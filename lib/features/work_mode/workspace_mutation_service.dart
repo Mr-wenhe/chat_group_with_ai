@@ -93,16 +93,9 @@ class WorkspaceMutationService {
   }) {
     final manager = resourceLockManager;
     if (manager == null) return operation();
-    // Lock both declared impact directories and exact paths. A malformed or
-    // incomplete rename plan must not leave its destination outside the lock
-    // set; the exact-path fallback keeps the boundary safe while preserving
-    // the planner's broader directory scope.
-    final paths = <String>{
-      ...plan.knownAffectedDirectories,
-      ...plan.exactPaths,
-    };
-    final requests =
-        paths.map(WorkResourceLockRequest.treeWrite).toList(growable: false);
+    final requests = plan.resourceLockPaths
+        .map(WorkResourceLockRequest.treeWrite)
+        .toList(growable: false);
     return manager.withLocks(
       plan.taskId,
       requests,

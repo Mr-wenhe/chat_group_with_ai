@@ -72,32 +72,60 @@ extension WorkCollaborationAutonomy on WorkCollaborationState {
               (v as String).trim().isNotEmpty);
 
   static bool validProposalAssignment(Map<String, dynamic> value) =>
-      !value.containsKey('requestRevision') &&
-      _validAssignment({...value, 'requestRevision': 1});
+      proposalAssignmentError(value) == null;
+
+  /// Use the persisted schema for both admission and targeted model repair.
+  static String? proposalAssignmentError(Map<String, dynamic> value) =>
+      value.containsKey('requestRevision')
+          ? 'requestRevision 由运行时生成，提案不得填写'
+          : _assignmentError({...value, 'requestRevision': 1});
 
   static bool _validAssignment(Map<String, dynamic> a) =>
-      a.length == 10 &&
-      WorkCollaborationState._only(a, {
-        'memberId',
-        'scenarioId',
-        'goal',
-        'preconditions',
-        'stepGoals',
-        'expectedResult',
-        'acceptanceIds',
-        'requiredCapabilities',
-        'resetMethod',
-        'requestRevision'
-      }) &&
-      ['memberId', 'scenarioId']
-          .every((k) => WorkCollaborationState._id(a[k])) &&
-      ['goal', 'preconditions', 'expectedResult', 'resetMethod'].every((k) =>
-          WorkCollaborationState._multilineText(a[k]) &&
-          (a[k] as String).trim().isNotEmpty) &&
-      _strings(a['stepGoals']) &&
-      _strings(a['acceptanceIds'], ids: true) &&
-      _strings(a['requiredCapabilities'], ids: true) &&
-      WorkCollaborationState._revision(a['requestRevision']);
+      _assignmentError(a) == null;
+
+  static String? _assignmentError(Map<String, dynamic> a) {
+    const keys = {
+      'memberId',
+      'scenarioId',
+      'goal',
+      'preconditions',
+      'stepGoals',
+      'expectedResult',
+      'acceptanceIds',
+      'requiredCapabilities',
+      'resetMethod',
+      'requestRevision'
+    };
+    final extra = a.keys.where((key) => !keys.contains(key)).toList();
+    final missing = keys.where((key) => !a.containsKey(key)).toList();
+    if (extra.isNotEmpty || missing.isNotEmpty) {
+      return '字段不匹配：缺少 ${missing.join('、')}；多余 ${extra.join('、')}';
+    }
+    for (final key in ['memberId', 'scenarioId']) {
+      if (!WorkCollaborationState._id(a[key])) {
+        return '$key 必须是非空、无控制字符且不超过 128 字符的字符串';
+      }
+    }
+    for (final key in [
+      'goal',
+      'preconditions',
+      'expectedResult',
+      'resetMethod'
+    ]) {
+      if (!WorkCollaborationState._multilineText(a[key]) ||
+          (a[key] as String).trim().isEmpty) {
+        return '$key 必须是非空字符串（不是数组），最多 4096 字符，仅允许换行与制表符';
+      }
+    }
+    for (final key in ['stepGoals', 'acceptanceIds', 'requiredCapabilities']) {
+      if (!_strings(a[key], ids: key != 'stepGoals')) {
+        return '$key 必须是 1–64 项非空字符串数组，每项最多 ${key == 'stepGoals' ? 4096 : 128} 字符';
+      }
+    }
+    return WorkCollaborationState._revision(a['requestRevision'])
+        ? null
+        : 'requestRevision 必须是有效需求版本';
+  }
 
   static bool _validUsageRef(Map<String, dynamic> e) =>
       e.length == 13 &&

@@ -7,6 +7,7 @@ import 'package:crypto/crypto.dart';
 import 'package:path/path.dart' as p;
 
 import 'binary_document_parser.dart';
+import 'document_font_environment.dart';
 
 class DocumentPageRendererException implements Exception {
   final String code;
@@ -89,7 +90,8 @@ class DocumentPageRenderer {
               temp.path,
               input.path,
             ],
-            isCancelled);
+            isCancelled,
+            environment: documentFontEnvironment(fallbackDirectory: temp));
         if (result.exitCode != 0) {
           throw DocumentPageRendererException(
               'renderFailed', _safeProcessError(result.stderr));
@@ -370,8 +372,9 @@ class DocumentPageRenderer {
   Future<_ProcessOutput> _run(
     String executable,
     List<String> arguments,
-    bool Function() isCancelled,
-  ) async {
+    bool Function() isCancelled, {
+    Map<String, String>? environment,
+  }) async {
     if (isCancelled()) {
       throw const DocumentPageRendererException('cancelled', '文档渲染已停止。');
     }
@@ -381,7 +384,7 @@ class DocumentPageRenderer {
         executable,
         arguments,
         runInShell: false,
-        environment: _fontConfigEnvironment(),
+        environment: environment ?? documentFontEnvironment(),
       );
     } on Object {
       throw DocumentPageRendererException(
@@ -484,28 +487,6 @@ class DocumentPageRenderer {
             FileSystemEntityType.file) {
           return bundled.path;
         }
-      }
-    }
-    return null;
-  }
-
-  static Map<String, String>? _fontConfigEnvironment() {
-    if (!Platform.isMacOS) return null;
-    final inherited = Platform.environment['FONTCONFIG_FILE']?.trim();
-    // shortcut: matches flutter_test's current config path, update if Flutter changes it.
-    // flutter_test injects a font-only config that hides installed CJK fonts.
-    if (inherited != null &&
-        inherited.isNotEmpty &&
-        !inherited.contains('/flutter_test_fonts.')) {
-      return null;
-    }
-    for (final path in const [
-      '/opt/homebrew/etc/fonts/fonts.conf',
-      '/usr/local/etc/fonts/fonts.conf',
-      '/etc/fonts/fonts.conf',
-    ]) {
-      if (FileSystemEntity.typeSync(path) == FileSystemEntityType.file) {
-        return {'FONTCONFIG_FILE': path};
       }
     }
     return null;

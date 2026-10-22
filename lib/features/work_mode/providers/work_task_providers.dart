@@ -15,6 +15,7 @@ import 'package:chat_group/features/work_mode/work_resource_lock_manager.dart';
 import 'package:chat_group/features/work_mode/workspace_mutation_service.dart';
 import 'package:chat_group/features/work_mode/workspace_file_service.dart';
 import 'package:chat_group/features/work_mode/workspace_path_policy.dart';
+import 'package:chat_group/features/work_mode/work_task_execution_policy.dart';
 import 'package:chat_group/features/work_mode/macos_native_app_automation.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -207,27 +208,21 @@ final workTaskCoordinatorProvider = Provider<WorkTaskCoordinator>((ref) {
     requireFolderGrant: true,
     resourceLockManager: resourceLockManager,
     resourceLockPlan: (task) {
-      final grants = folderGrantService?.grants
-          .where((grant) =>
-              grant.available && grant.cloudDisclosureConfirmedAt != null)
-          .map((grant) => _canonicalLockRoot(
-                grant.path,
-                isWindows: resourceLockManager.isWindows,
-              ))
-          .toSet();
-      if (grants == null || grants.isEmpty) {
+      // DM tools lock their actual operation paths. Authorization grants are
+      // capabilities, not resources every task will touch.
+      if (!WorkTaskExecutionPolicy.isValidatedV2GroupTask(task)) {
         return const <WorkResourceLockRequest>[];
       }
-      // Clearly read-only tasks hold shared root read leases, so independent
-      // readers can run together while still waiting behind a writer.
-      // Ambiguous requests keep the conservative tree-write lease; the Stage 02
-      // tool also acquires exact operation locks for later model decisions.
-      final mode = _isClearlyReadOnlyWorkRequest(task.userRequest)
-          ? WorkResourceLockMode.read
-          : WorkResourceLockMode.treeWrite;
-      return grants
-          .map((path) => WorkResourceLockRequest(path: path, mode: mode))
-          .toList(growable: false);
+      final workspace = database.workModeWorkspaceBox.get(task.groupId);
+      final root = workspace?.workDirPath.trim() ?? '';
+      return root.isEmpty
+          ? const <WorkResourceLockRequest>[]
+          : [
+              WorkResourceLockRequest.treeWrite(_canonicalLockRoot(
+                root,
+                isWindows: resourceLockManager.isWindows,
+              ))
+            ];
     },
     folderPicker: ([String? initialDirectory]) =>
         FilePicker.platform.getDirectoryPath(
@@ -247,25 +242,6 @@ final workTaskCoordinatorProvider = Provider<WorkTaskCoordinator>((ref) {
   ref.onDispose(coordinator.dispose);
   return coordinator;
 });
-
-bool _isClearlyReadOnlyWorkRequest(String request) {
-  final lower = request.toLowerCase();
-  if (lower.trim().isEmpty) return false;
-  final mutation = RegExp(
-    r'(写|写入|修改|改写|创建|生成|删除|移除|重命名|替换|保存|覆盖|安装|提交|推送|'
-    r'测试|构建|编译|运行|执行|'
-    r'\b(?:write|create|generate|modify|edit|delete|remove|rename|replace|save|overwrite|'
-    r'install|commit|push|build|test|compile)\b)',
-    caseSensitive: false,
-  ).hasMatch(lower);
-  if (mutation) return false;
-  return RegExp(
-    r'(读取|读一下|查看|打开|分析|审查|检查|搜索|查找|列出|列举|统计|概览|'
-    r'\b(?:read|view|open|analy[sz]e|review|inspect|search|find|list|status|show|'
-    r'cat|grep|rg|head|tail)\b)',
-    caseSensitive: false,
-  ).hasMatch(lower);
-}
 
 String _canonicalLockRoot(String path, {required bool isWindows}) {
   try {

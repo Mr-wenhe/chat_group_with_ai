@@ -32,8 +32,10 @@ import 'package:chat_group/features/work_mode/work_folder_grant_service.dart';
 import 'package:chat_group/features/work_mode/work_mode_workspace_service.dart';
 import 'package:chat_group/features/work_mode/work_resource_lock_manager.dart';
 import 'package:chat_group/features/work_mode/work_discussion_state.dart';
+import 'package:chat_group/features/work_mode/work_task_requirements_confirmation.dart';
 import 'package:chat_group/features/work_mode/work_snapshot_service.dart';
 import 'package:chat_group/features/work_mode/work_task_coordinator.dart';
+import 'package:chat_group/features/work_mode/work_task_action_message_service.dart';
 import 'package:chat_group/features/work_mode/work_task_event.dart';
 import 'package:chat_group/features/work_mode/work_task_event_store.dart';
 import 'package:chat_group/features/work_mode/workspace_file_service.dart';
@@ -227,6 +229,7 @@ class _RouteApi extends ChatApiService {
     Duration? receiveTimeout,
     int maxRetries = 5,
     CancelToken? cancelToken,
+    String? reasoningEffort,
     bool structuredJson = false,
     bool allowReasoningContentFallback = false,
     String? taskId,
@@ -278,6 +281,9 @@ class _UiWorkGateway extends AiRequestGateway {
     int? runBoundary,
     bool requiresTools = false,
     bool userInitiated = false,
+    bool finishOnTerminalFrame = false,
+    String? reasoningEffort,
+    void Function()? onResponseActivity,
     void Function(ChatStreamEvent event)? onEvent,
   }) async {
     calls++;
@@ -495,6 +501,10 @@ void main() {
       },
       requireFolderGrant: true,
       resourceLockManager: WorkResourceLockManager(isWindows: false),
+      userActionNotifier: WorkTaskActionMessageService(
+        database: database,
+        credentials: _Credentials(),
+      ).notify,
     );
     final routeApi = _RouteApi();
 
@@ -561,6 +571,28 @@ void main() {
       reason: '群里只有这一位本职合格者：执行人由资格直接指定，不留"待推举"的中间态',
     );
     expect(gateway.calls, 0);
+    final confirmButton = find.text('确认本版需求');
+    await tester.ensureVisible(confirmButton);
+    await tester.pump();
+    expect(confirmButton, findsOneWidget);
+    await tester.tap(confirmButton);
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 100)),
+    );
+    await tester.pump();
+    expect(
+      database.messageBox.values.any((message) =>
+          message.groupId == groupId &&
+          message.content == '✅【需求已确认】当前需求版本 1 已接受，群讨论开始收敛方案。'),
+      isTrue,
+      reason: '群聊按钮确认与输入确认必须发布相同的阶段结果',
+    );
+    expect(
+      WorkTaskRequirementsConfirmation.hasMarker(
+        coordinator.taskById(pendingTask.id)!.executionStateJson,
+      ),
+      isFalse,
+    );
     await tester.runAsync(() async {
       await expectLater(
           coordinator.updateDiscussionState(
@@ -629,6 +661,11 @@ void main() {
     expect(routeApi.calls, 0);
     expect(pickerCalls, 2);
     expect(gateway.calls, 2);
+
+    await tester.tap(find.byKey(const Key('work-task-collapse')));
+    await tester.pump();
+    await tester.drag(find.byType(ListView).first, const Offset(0, -2000));
+    await tester.pump();
 
     // The model's final response is a chat message even when the task only
     // read files. The work panel remains the progress/status surface; the

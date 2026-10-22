@@ -169,6 +169,11 @@ extension _WorkTaskCoordinatorDiscussionLifecycle on WorkTaskCoordinator {
         task.isTerminal) {
       return;
     }
+    if (WorkTaskCompletionChoice.paused(task) ||
+        WorkTaskCompletionChoice.pending(task) ||
+        WorkTaskRequirementsConfirmation.hasMarker(task.executionStateJson)) {
+      return;
+    }
     final decoded = WorkDiscussionState.decodeExecutionState(
       task.executionStateJson,
     );
@@ -228,6 +233,53 @@ extension _WorkTaskCoordinatorDiscussionLifecycle on WorkTaskCoordinator {
     _discussionStartingIds.remove(task.id);
   }
 
+  Future<void> _implConfirmRequirements(
+    String taskId, {
+    required int version,
+  }) {
+    return _serialize(() async {
+      _ensureOpen();
+      final task = _requireWorkTask(taskId);
+      if (task.isTerminal || !_requiresDiscussionForTask(task)) {
+        throw StateError('该群聊需求已结束或不支持此确认。');
+      }
+      if (!isUserActionCurrent(
+            taskId: taskId,
+            blockerId: WorkTaskRequirementsConfirmation.blockerId,
+            version: version,
+          ) ||
+          !WorkTaskRequirementsConfirmation.isCurrent(task) ||
+          WorkTaskRequirementsConfirmation.versionFor(task) != version) {
+        throw StateError('需求确认卡已过期，请按最新版本重新确认。');
+      }
+      final cancelledDiscussionIsDraining =
+          _discussionRuns.containsKey(taskId) &&
+              _discussionCancellations[taskId]?.isCancelled == true;
+      if (_running.containsKey(taskId) ||
+          _startingTaskIds.contains(taskId) ||
+          _discussionRuns.containsKey(taskId) &&
+              !cancelledDiscussionIsDraining) {
+        throw StateError('当前任务已开始运行，不能重复确认。');
+      }
+      WorkTaskRequirementsConfirmation.acceptCurrentRequest(task);
+      WorkTaskCompletionChoice.setPaused(task, false);
+      task
+        ..status = AgentTaskStatus.paused
+        ..resumeRequired = false
+        ..lastError = '需求已确认，正在组织群讨论。'
+        ..updatedAt = _clock();
+      await _save(task);
+      await _record(
+        task,
+        WorkTaskEventKind.planning,
+        '需求已确认，开始群讨论',
+        detail:
+            '需求版本 ${WorkDiscussionState.fromExecutionState(task.executionStateJson)?.requestRevision ?? 1}；确认后才进入团队方案收敛。',
+      );
+      _maybeStartDiscussion(task);
+    });
+  }
+
   Future<void> _runDiscussion(AgentTask task, WorkTaskDiscussionRunner runner,
       WorkTaskCancellation cancellation,
       {required int expectedRevision}) async {
@@ -270,8 +322,12 @@ extension _WorkTaskCoordinatorDiscussionLifecycle on WorkTaskCoordinator {
             .runCollaboration(
           task,
           cancellation,
-          (update) =>
-              _applyCollaborationUpdate(update, fromDiscussionRunner: true),
+          (update) async {
+            final result = await _applyCollaborationUpdate(update,
+                fromDiscussionRunner: true);
+            if (WorkTaskCompletionChoice.paused(result)) cancellation.cancel();
+            return result;
+          },
         );
         await _serialize(() async {
           final stored = _taskBox.get(task.id);
@@ -358,6 +414,20 @@ extension _WorkTaskCoordinatorDiscussionLifecycle on WorkTaskCoordinator {
         // failure checkpoint cannot be written during shutdown/recovery.
       }
     } finally {
+      if (!_disposed &&
+          !_dataClearInProgress &&
+          !task.isTerminal &&
+          WorkTaskCompletionChoice.paused(task)) {
+        await _serialize(() async {
+          if (_hasPendingV2Input(task)) await _applyPendingV2Inputs(task);
+          WorkFailure.clearFromTask(task);
+          task
+            ..status = AgentTaskStatus.paused
+            ..resumeRequired = false
+            ..lastError = '已停在安全检查点，可补充需求；点击继续才恢复。';
+          await _save(task);
+        });
+      }
       _discussionSlotIds.remove(task.id);
       _notifySlotAvailable();
       if (!_disposed && !_dataClearInProgress) unawaited(_schedule());
@@ -383,7 +453,9 @@ extension _WorkTaskCoordinatorDiscussionLifecycle on WorkTaskCoordinator {
       if (stored == null ||
           stored.isTerminal ||
           stored.status != AgentTaskStatus.paused ||
-          stored.resumeRequired) {
+          stored.resumeRequired ||
+          WorkTaskRequirementsConfirmation.hasMarker(
+              stored.executionStateJson)) {
         return;
       }
       if (_hasPendingV2Input(stored)) await _applyPendingV2Inputs(stored);
@@ -526,6 +598,9 @@ extension _WorkTaskCoordinatorDiscussionLifecycle on WorkTaskCoordinator {
             await executor.prepareCollaborationWork(task)) {
           return null;
         }
+      }
+      if (WorkTaskCompletionChoice.pending(task)) {
+        return '本轮成果已冻结，请选择可完成、继续测试或补充需求。';
       }
       return _discussionWaitingReason(state);
     }

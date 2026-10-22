@@ -145,12 +145,11 @@ class ChatMessageList extends StatelessWidget {
         final isMember = message.senderType == Message.senderTypeMember;
         // 真人成员不是角色：绝不能用 unknownCharacter 顶上，否则会渲染成
         // 一个"未知角色"的头像，还会被当成角色接上点击进角色详情页。
-        final resolvedSender =
-            message.senderType == Message.senderTypeUser ||
-                    message.senderType == Message.senderTypeSystem ||
-                    isMember
-                ? null
-                : characterIndex[message.senderId] ?? unknownCharacter;
+        final resolvedSender = message.senderType == Message.senderTypeUser ||
+                message.senderType == Message.senderTypeSystem ||
+                isMember
+            ? null
+            : characterIndex[message.senderId] ?? unknownCharacter;
         final sender = resolvedSender;
         final actionSender = resolvedSender != null &&
                 editableSenderIds.contains(resolvedSender.id)
@@ -179,6 +178,7 @@ class ChatMessageList extends StatelessWidget {
         final selectable = selectableIds.contains(message.id);
         final bubble = ChatMessageBubble(
           message: message,
+          isDirectChat: isDirectChat,
           sender: sender,
           memberName: memberName,
           characters: characters,
@@ -197,22 +197,19 @@ class ChatMessageList extends StatelessWidget {
           senderAvatarImage: avatarImageOf(sender),
           userAvatarImage: userAvatarImage,
           userAvatarText: userAvatarText,
-          onSenderTap: actionSender == null
-              ? null
-              : () => onSenderTap(actionSender),
+          onSenderTap:
+              actionSender == null ? null : () => onSenderTap(actionSender),
           onUserAvatarTap: onUserAvatarTap,
-          onMentionSender: actionSender == null
-              ? null
-              : () => onMentionSender(actionSender),
+          onMentionSender:
+              actionSender == null ? null : () => onMentionSender(actionSender),
           quotedMessage: quotedMessage,
           quotedSenderName: quotedMessage == null
               ? null
               : quotedMessage.senderType == Message.senderTypeMember
                   ? _memberDisplayName(quotedMessage)
                   : senderNameById(quotedMessage.senderId),
-          onQuotedTap: quotedMessage == null
-              ? null
-              : () => onQuotedTap(quotedMessage),
+          onQuotedTap:
+              quotedMessage == null ? null : () => onQuotedTap(quotedMessage),
           ownerName: ownerName,
           readReceiptText: isDirectChat && message.senderType == 'user'
               ? (readUserMessageIds.contains(message.id) ? '已读' : '未读')

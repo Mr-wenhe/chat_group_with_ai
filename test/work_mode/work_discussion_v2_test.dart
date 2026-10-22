@@ -1,3 +1,4 @@
+import 'package:chat_group/features/work_mode/work_task_completion_choice.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -9,6 +10,7 @@ import 'package:chat_group/core/models/api_protocol.dart';
 import 'package:chat_group/features/ai_governance/ai_request_gateway.dart';
 import 'package:chat_group/features/ai_governance/ai_governance_models.dart';
 import 'package:chat_group/services/chat_api_service.dart';
+import 'package:chat_group/core/streaming/chat_stream_event.dart';
 import 'package:dio/dio.dart';
 import '../helpers/memory_governance_store.dart';
 import 'package:chat_group/core/database/database_service.dart';
@@ -23,22 +25,28 @@ import 'package:chat_group/features/work_mode/default_work_task_runner.dart';
 import 'package:chat_group/features/work_mode/work_discussion_runner.dart';
 import 'package:chat_group/features/work_mode/work_discussion_state.dart';
 import 'package:chat_group/features/work_mode/work_collaboration_state.dart';
+import 'package:chat_group/features/work_mode/work_context_boundary.dart';
 import 'package:chat_group/features/work_mode/work_discussion_v2_protocol.dart';
 import 'package:chat_group/features/work_mode/work_discussion_v2_protocol_text.dart';
 import 'package:chat_group/features/work_mode/work_discussion_v2_stage.dart';
+import 'package:chat_group/features/chat_group/roundtable_news_role_service.dart'
+    show RoundtableNewsRoleService, roundtableNewsRoleId;
 import 'package:chat_group/features/work_mode/work_public_update_stream.dart';
 import 'package:chat_group/features/work_mode/agent_decision.dart';
 import 'package:chat_group/features/agentic/tool_request.dart';
 import 'package:chat_group/features/work_mode/work_tool_registry.dart';
 import 'package:chat_group/features/work_mode/work_role_router.dart';
 import 'package:chat_group/features/work_mode/work_folder_grant_service.dart';
+import 'package:chat_group/features/work_mode/work_mode_directory_service.dart';
 import 'package:chat_group/features/work_mode/work_mode_workspace_service.dart';
 import 'package:chat_group/features/work_mode/work_task_coordinator.dart';
 import 'package:chat_group/features/work_mode/work_task_event_store.dart';
+import 'package:chat_group/features/work_mode/work_artifact_delivery_notice.dart';
 import 'package:crypto/crypto.dart';
 import 'package:chat_group/features/work_mode/workspace_path_policy.dart';
 import 'package:chat_group/features/work_mode/workspace_file_service.dart';
 import 'package:chat_group/features/work_mode/workspace_mutation_service.dart';
+import 'package:chat_group/features/work_mode/work_snapshot_service.dart';
 import 'package:flutter_test/flutter_test.dart';
 import '../helpers/lifecycle_hive.dart';
 
@@ -255,6 +263,577 @@ void main() {
 
   setUp(_openFixture);
   tearDown(_closeFixture);
+
+  test('协调者返修正式方案时收到全部未决口径问题清单', () async {
+    await modelRunner(confirm)
+        .runCollaboration(task, WorkTaskCancellation(), apply);
+    final shell =
+        WorkDiscussionState.fromExecutionState(task.executionStateJson)!;
+    final before = shell.collaboration!;
+    final raw = before.toJson()
+      ..['phase'] = 'clarifying'
+      ..['revision'] = before.revision + 1
+      ..['verificationRevision'] = before.verificationRevision + 1
+      ..['issues'] = [
+        ...before.issues,
+        for (final entry in const [
+          ('plan-count-gap', 'A-02 步数不匹配', '逐项重算固定骰点路径'),
+          ('plan-assertion-gap', '步骤合并多个断言', '每步只保留一条断言'),
+        ])
+          {
+            'id': entry.$1,
+            'sourceId': 'qa',
+            'kind': 'defect',
+            'status': 'open',
+            'target': 'plan',
+            'problem': entry.$2,
+            'evidenceRef': 'review-${entry.$1}',
+            'resolution': '',
+            'resolutionRef': '',
+            'retestCondition': entry.$3,
+            'requestRevision': before.requestRevision - 1,
+          }
+      ];
+    final updated = WorkCollaborationState.tryParse(raw)!;
+    task.executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
+      task.executionStateJson,
+      shell.copyWith(collaboration: updated),
+      expectedCollaborationRevision: before.revision,
+    );
+
+    final turns = <({String memberId, Map<String, dynamic> focus})>[];
+    await modelRunner((member, context) async {
+      turns.add((
+        memberId: member.id,
+        focus: Map<String, dynamic>.from(context['turnFocus'] as Map),
+      ));
+      if (turns.length == 1) {
+        return _turn('respond', text: '正式方案仍有缺口，请协调者集中修订。');
+      }
+      return _turn('decide', decision: {
+        'kind': 'question',
+        'targetId': '',
+        'reason': '隔离夹具停止后续讨论',
+        'evidence': '已核对返修清单',
+        'impact': '不执行制作',
+        'options': <Map<String, dynamic>>[],
+      });
+    }).runCollaboration(task, WorkTaskCancellation(), apply);
+
+    expect(turns.map((turn) => turn.memberId).take(2),
+        ['qa', before.coordinatorId]);
+    final checklist =
+        (turns.last.focus['formalPlanRevisionChecklist'] as List).cast<Map>();
+    expect(checklist.map((issue) => issue['id']),
+        ['plan-count-gap', 'plan-assertion-gap']);
+    expect(
+        checklist.map((issue) => issue['problem']), ['A-02 步数不匹配', '步骤合并多个断言']);
+    expect(checklist.map((issue) => issue['retestCondition']),
+        ['逐项重算固定骰点路径', '每步只保留一条断言']);
+  }, timeout: const Timeout(Duration(seconds: 30)));
+
+  for (final scenario in ['granted', 'revoked', 'defect', 'other-task']) {
+    test('目录授权证据来自当前授权服务且不代替执行证据：$scenario', () async {
+      await modelRunner(confirm, workspaceService: execution.workspaceService)
+          .runCollaboration(task, WorkTaskCancellation(), apply);
+      final shell =
+          WorkDiscussionState.fromExecutionState(task.executionStateJson)!;
+      final before = shell.collaboration!;
+      final raw = before.toJson()
+        ..['phase'] = 'clarifying'
+        ..['revision'] = before.revision + 1
+        ..['issues'] = [
+          {
+            'id': 'folder-question',
+            'sourceId': 'dev',
+            'kind': scenario == 'defect' ? 'defect' : 'decision',
+            'status': 'open',
+            'target': '交付目录授权',
+            'problem': '历史提醒说尚未授权',
+            'evidenceRef':
+                'work-task-action:${scenario == 'other-task' ? 'other' : task.id}:folderAuthorization:1',
+            'resolution': '',
+            'resolutionRef': '',
+            'retestCondition': '核对实际授权状态',
+            'requestRevision': before.requestRevision,
+          }
+        ];
+      task.executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
+        task.executionStateJson,
+        shell.copyWith(collaboration: WorkCollaborationState.tryParse(raw)),
+        expectedCollaborationRevision: before.revision,
+      );
+      Map<String, dynamic>? capturedAuthorization;
+      Map<String, dynamic>? original;
+      String? reference;
+      await modelRunner((member, context) async {
+        if (context.containsKey('originalFinal')) return original!;
+        if (original == null) {
+          capturedAuthorization = Map<String, dynamic>.from(
+              context['collaboration']['folderAuthorization'] as Map);
+          reference = (context['availableResolutionEvidence'] as List)
+                  .cast<Map>()
+                  .firstWhere((e) => e['kind'] == 'folder-authorization')['ref']
+              as String;
+          if (scenario == 'revoked') {
+            await execution.folderGrantService!
+                .removeDirectory(capturedAuthorization!['rootPath'] as String);
+          }
+          original = _turn('respond', resolutions: [
+            {
+              'id': 'folder-question',
+              'resolution': '当前授权服务已确认目录可写',
+              'evidenceRef': reference,
+            }
+          ]);
+          return original!;
+        }
+        return _turn('decide', decision: {
+          'kind': 'question',
+          'targetId': '',
+          'reason': '隔离夹具停止',
+          'evidence': '只验证目录授权证据边界',
+          'impact': '不制作文件',
+          'options': [],
+        });
+      }, workspaceService: execution.workspaceService)
+          .runCollaboration(task, WorkTaskCancellation(), apply);
+      final after =
+          WorkDiscussionState.fromExecutionState(task.executionStateJson)!
+              .collaboration!;
+      expect(capturedAuthorization?['status'], 'granted');
+      expect(after.issues.single['status'],
+          scenario == 'granted' ? 'resolved' : 'open');
+      expect(after.acceptances.every((a) => a['status'] == 'pending'), isTrue);
+      expect(after.iterations, isEmpty);
+      final detail =
+          await events.readDiscussionDetail(task.id, reference!.substring(13));
+      expect(jsonDecode(detail)['status'], 'granted');
+      expect(
+          'folder-grant:${sha256.convert(utf8.encode(detail)).toString().substring(0, 24)}',
+          reference);
+    }, timeout: const Timeout(Duration(seconds: 30)));
+  }
+
+  for (final scenario in [
+    'author',
+    'other-member',
+    'code',
+    'unchanged-plan',
+    'superseded-candidate',
+    'current-candidate'
+  ]) {
+    test('正式方案证据仅关闭提出者的修订前方案问题：$scenario', () async {
+      await modelRunner(confirm)
+          .runCollaboration(task, WorkTaskCancellation(), apply);
+      final shell =
+          WorkDiscussionState.fromExecutionState(task.executionStateJson)!;
+      final before = shell.collaboration!;
+      final raw = before.toJson()
+        ..['phase'] = 'clarifying'
+        ..['requestRevision'] = scenario == 'superseded-candidate'
+            ? before.requestRevision + 1
+            : before.requestRevision
+        ..['revision'] = before.revision + 1
+        ..['iterations'] =
+            {'superseded-candidate', 'current-candidate'}.contains(scenario)
+                ? [
+                    {
+                      'id': 'r004',
+                      'artifactDigest': 'old-candidate-digest',
+                      'requestRevision': before.requestRevision,
+                      'teamRevision': before.teamRevision,
+                      'manifestRef': 'candidate:r004',
+                      'reviewRef': 'old-report',
+                      'status': 'reviewed',
+                    }
+                  ]
+                : before.iterations
+        ..['issues'] = [
+          {
+            'id': 'plan-clarity',
+            'sourceId':
+                scenario == 'other-member' ? 'original-reviewer' : 'dev',
+            'kind': 'defect',
+            'status': 'open',
+            'target': scenario == 'code' ? 'code' : 'plan',
+            'problem': '选子步骤需要明确',
+            'evidenceRef': 'original-review',
+            'resolution': '',
+            'resolutionRef': '',
+            'retestCondition': '提出者核对修订后的完整正式方案',
+            'requestRevision': scenario == 'unchanged-plan'
+                ? before.requestRevision
+                : scenario == 'superseded-candidate'
+                    ? before.requestRevision
+                    : before.requestRevision - 1,
+          }
+        ];
+      final updated = WorkCollaborationState.tryParse(raw)!;
+      task.executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
+          task.executionStateJson,
+          shell.copyWith(
+              collaboration: updated, requestRevision: updated.requestRevision),
+          expectedCollaborationRevision: before.revision);
+      var attempted = false;
+      Map<String, dynamic>? original;
+      String? reference;
+      final runner = modelRunner((member, context) async {
+        if (context.containsKey('originalFinal')) return original!;
+        if (!attempted) {
+          attempted = true;
+          final evidence =
+              (context['availableResolutionEvidence'] as List).cast<Map>();
+          if (scenario == 'current-candidate') {
+            expect(
+                evidence.any((item) => item['kind'] == 'formal-plan'), isFalse);
+            return _turn('decide', decision: {
+              'kind': 'question',
+              'targetId': '',
+              'reason': '保留当前候选的正式验收流程',
+              'evidence': '当前版本候选仍需通过软件测试关闭问题。',
+              'impact': '不执行制作',
+              'options': <Map<String, dynamic>>[],
+            });
+          }
+          reference = evidence
+              .firstWhere((e) => e['kind'] == 'formal-plan')['ref'] as String;
+          original = _turn('respond', resolutions: [
+            {
+              'id': 'plan-clarity',
+              'resolution': '本人已核对修订后的正式方案，点击步骤明确。',
+              'evidenceRef': reference,
+            }
+          ]);
+          return original!;
+        }
+        return _turn('decide', decision: {
+          'kind': 'question',
+          'targetId': '',
+          'reason': '隔离夹具停止后续讨论',
+          'evidence': '保留本次解决项采纳结果',
+          'impact': '不执行制作',
+          'options': <Map<String, dynamic>>[],
+        });
+      });
+      await runner.runCollaboration(task, WorkTaskCancellation(), apply);
+      final after =
+          WorkDiscussionState.fromExecutionState(task.executionStateJson)!
+              .collaboration!;
+      expect(attempted, isTrue);
+      expect(
+          after.issues.single['status'],
+          {'author', 'superseded-candidate'}.contains(scenario)
+              ? 'resolved'
+              : 'open');
+      expect(after.acceptances.every((a) => a['status'] == 'pending'), isTrue);
+      expect(
+          after.iterations.map((item) => item['id']),
+          {'superseded-candidate', 'current-candidate'}.contains(scenario)
+              ? ['r004']
+              : isEmpty);
+      if (reference != null) {
+        final detail =
+            await events.readDiscussionDetail(task.id, reference!.substring(5));
+        expect(
+            'plan:${sha256.convert(utf8.encode(detail)).toString().substring(0, 24)}',
+            reference);
+        expect(jsonDecode(detail)['plan'], before.plan);
+      }
+    }, timeout: const Timeout(Duration(seconds: 30)));
+  }
+
+  for (final stale in [false, true]) {
+    test('待审提案完整上下文与过期修订路由：$stale', () async {
+      await db.agentTaskBox.put(task.id, task);
+      final shell = WorkDiscussionState.fromExecutionState(
+        task.executionStateJson,
+      )!;
+      final current = shell.collaboration!;
+      final candidate = proposal(current.toJson())
+        ..['plan'] = '候选方案正文，含五条实际试玩步骤。'
+        ..['artifactContract'] = {
+          ...current.artifactContract,
+          'verificationCommands': [
+            jsonEncode({'executable': 'true', 'arguments': <String>[]})
+          ],
+        };
+      final serialized = jsonEncode(candidate);
+      final digest =
+          sha256.convert(utf8.encode(serialized)).toString().substring(0, 24);
+      await events.writeDiscussionDetail(task.id, digest, serialized);
+      const issueId = 'pending-proposal-review';
+      final raw = current.toJson()
+        ..['revision'] = current.revision + 1
+        ..['requestRevision'] = current.requestRevision + (stale ? 1 : 0)
+        ..['verificationRevision'] = current.verificationRevision + 1
+        ..['issues'] = [
+          {
+            'id': 'earlier-open-defect',
+            'sourceId': 'qa',
+            'kind': 'defect',
+            'status': 'open',
+            'target': 'verification',
+            'problem': '已有缺陷仍待解决。',
+            'evidenceRef': 'existing-test-evidence',
+            'resolution': '',
+            'resolutionRef': '',
+            'retestCondition': '保留缺陷并让成员核对完整候选提案。',
+            'requestRevision': current.requestRevision,
+          },
+          ...current.issues,
+          {
+            'id': issueId,
+            'sourceId': 'dev',
+            'kind': 'idea',
+            'status': 'open',
+            'target': 'plan',
+            'problem': '核对完整候选方案及独立验证命令。',
+            'evidenceRef': 'proposal-request',
+            'resolution': 'scope-proposal',
+            'resolutionRef': 'proposal:$digest',
+            'retestCondition': '成员依据完整候选方案逐项审阅。',
+            'requestRevision': current.requestRevision,
+          }
+        ];
+      String? invalidSection;
+      final pending = WorkCollaborationState.tryParse(
+        raw,
+        onInvalid: (section) => invalidSection = section,
+      );
+      expect(pending, isNotNull, reason: '协作状态字段：$invalidSection');
+      task.executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
+        task.executionStateJson,
+        shell.copyWith(
+            requestRevision: pending!.requestRevision, collaboration: pending),
+        expectedCollaborationRevision: current.revision,
+      );
+      await db.agentTaskBox.put(task.id, task);
+
+      final contexts = <Map<String, dynamic>>[];
+      final focuses = <Map<String, dynamic>>[];
+      final speakers = <String>[];
+      final runner = modelRunner((member, context) async {
+        focuses.add(Map<String, dynamic>.from(context['turnFocus'] as Map));
+        speakers.add(member.id);
+        contexts
+            .add(Map<String, dynamic>.from(context['collaboration'] as Map));
+        if (contexts.length == 1) {
+          return {'success': true, 'message': 'not-json'};
+        }
+        if (stale && contexts.length == 2) {
+          return _turn('propose', issue: issueId, proposal: candidate);
+        }
+        if (stale && context['collaboration']['pendingProposal'] != null) {
+          return _turn('approve', approval: {
+            ...approval(
+                Map<String, dynamic>.from(context['collaboration'] as Map)),
+            'kind': 'idea',
+            'subjectId': issueId,
+          });
+        }
+        return _turn('decide', decision: {
+          'kind': 'question',
+          'targetId': issueId,
+          'reason': '测试在读取候选后暂停。',
+          'evidence': '只验证请求上下文，不裁定候选。',
+          'impact': '保留当前正式方案。',
+          'options': <Map<String, dynamic>>[],
+        });
+      });
+      await runner.runCollaboration(task, WorkTaskCancellation(), apply);
+
+      expect(contexts.length, stale ? greaterThan(3) : 2,
+          reason: '过期提案必须重新提交并逐人认可，正常提案只请求一次协议修复。');
+      for (var index = 0; index < 2; index++) {
+        if (stale) {
+          expect(speakers[index], contexts[index]['coordinatorId']);
+          expect(focuses[index]['stage'],
+              WorkDiscussionStage.prepareProposal.name);
+          expect(focuses[index]['issueId'], issueId);
+        } else {
+          expect(focuses[index]['approvalIdentifiers']['subjectId'], issueId);
+        }
+      }
+      for (final captured in contexts.take(2)) {
+        expect(captured['plan'], current.plan);
+        expect(captured['artifactContract']['verificationCommands'],
+            current.artifactContract['verificationCommands']);
+        expect(captured['issues'].first['id'], 'earlier-open-defect');
+        final key = stale ? 'previousProposal' : 'pendingProposal';
+        expect(captured[key]['issueId'], issueId);
+        expect(captured[key]['proposal'], candidate);
+        expect(captured[key]['requestRevision'], current.requestRevision);
+        expect(
+            captured
+                .containsKey(stale ? 'pendingProposal' : 'previousProposal'),
+            isFalse);
+      }
+      expect(
+        WorkDiscussionState.fromExecutionState(task.executionStateJson)!
+            .collaboration!
+            .plan,
+        stale ? candidate['plan'] : current.plan,
+        reason: '提案仅进入评审上下文，不能提前改写正式方案。',
+      );
+      expect(await events.readDiscussionDetail(task.id, digest), serialized,
+          reason: '修订不能改写旧提案证据。');
+    }, timeout: const Timeout(Duration(seconds: 30)));
+  }
+
+  test('待审提案缺少详情引用时暂停而不回退到旧方案', () async {
+    await db.agentTaskBox.put(task.id, task);
+    final shell = WorkDiscussionState.fromExecutionState(
+      task.executionStateJson,
+    )!;
+    final current = shell.collaboration!;
+    final raw = current.toJson()
+      ..['revision'] = current.revision + 1
+      ..['issues'] = [
+        ...current.issues,
+        {
+          'id': 'proposal-without-reference',
+          'sourceId': 'dev',
+          'kind': 'idea',
+          'status': 'open',
+          'target': 'plan',
+          'problem': '候选方案详情没有可核验的引用。',
+          'evidenceRef': 'proposal-request',
+          'resolution': 'scope-proposal',
+          'resolutionRef': '',
+          'retestCondition': '恢复完整提案后再逐人评审。',
+          'requestRevision': current.requestRevision,
+        }
+      ];
+    final pending = WorkCollaborationState.tryParse(raw);
+    expect(pending, isNotNull);
+    task.executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
+      task.executionStateJson,
+      shell.copyWith(collaboration: pending),
+      expectedCollaborationRevision: current.revision,
+    );
+    await db.agentTaskBox.put(task.id, task);
+
+    var calls = 0;
+    final runner = modelRunner((member, context) async {
+      calls++;
+      return _turn('respond', text: '不应在缺少提案时评审旧方案。');
+    });
+    await runner.runCollaboration(task, WorkTaskCancellation(), apply);
+
+    final after = WorkDiscussionState.fromExecutionState(
+      task.executionStateJson,
+    )!
+        .collaboration!;
+    expect(calls, 0);
+    expect(after.plan, current.plan);
+    expect(after.hasPendingDecision, isTrue);
+    expect(
+      after.decisions.last['reason'],
+      contains('没有关联可核验的完整详情'),
+    );
+  }, timeout: const Timeout(Duration(seconds: 30)));
+
+  test('同轮新增问题后保留证据并跳过旧验证版本认可', () async {
+    await db.agentTaskBox.put(task.id, task);
+    final before =
+        WorkDiscussionState.fromExecutionState(task.executionStateJson)!
+            .collaboration!;
+    var responses = 0;
+    final runner = modelRunner((member, context) async {
+      responses++;
+      if (responses == 1) {
+        return _turn(
+          'approve',
+          text: '我记录了问题，认可需在问题处理后重新确认。',
+          issues: [
+            {
+              'id': 'same-turn-defect',
+              'kind': 'defect',
+              'target': 'dev',
+              'problem': '本轮测试发现待处理问题。',
+              'evidenceRef': '',
+              'retestCondition': '责任人修复后由测试成员复现。',
+            }
+          ],
+          approval: approval(context['collaboration'] as Map<String, dynamic>),
+        );
+      }
+      return _turn('decide', decision: {
+        'kind': 'question',
+        'targetId': 'same-turn-defect',
+        'reason': '测试夹具暂停后续缺陷处理。',
+        'evidence': '保留本轮真实问题记录。',
+        'impact': '等待后续修复与复测。',
+        'options': <Map<String, dynamic>>[],
+      });
+    });
+    await runner.runCollaboration(task, WorkTaskCancellation(), apply);
+
+    final after =
+        WorkDiscussionState.fromExecutionState(task.executionStateJson)!
+            .collaboration!;
+    expect(responses, greaterThanOrEqualTo(2));
+    expect(after.approvals.length, before.approvals.length,
+        reason: '同轮问题更新验证版本后，旧版本认可不能落盘。');
+    final defect =
+        after.issues.singleWhere((issue) => issue['id'] == 'same-turn-defect');
+    expect(defect['evidenceRef'], isNotEmpty);
+    final response = db.messageBox.get(defect['evidenceRef']);
+    expect(response?.content, contains('我记录了问题'));
+    expect(response?.content, isNot(contains('【未采纳】')),
+        reason: '已经被问题引用的原始证据不被改写。');
+    expect(
+      db.messageBox.values
+          .any((message) => message.content.contains('本轮认可未写入')),
+      isTrue,
+      reason: '群内要明确说明本轮认可没有生效及原因。',
+    );
+    expect(task.lastError, isNot(contains('认可版本已过期')));
+  }, timeout: const Timeout(Duration(seconds: 30)));
+
+  for (final proposedPath in [r'c:\WORK\output', 'D:/unauthorized']) {
+    test('Windows pinned location preserves authorization: $proposedPath',
+        () async {
+      await db.agentTaskBox.put(task.id, task);
+      final root = jsonDecode(task.executionStateJson) as Map<String, dynamic>;
+      final collaboration = root[WorkDiscussionState.jsonKey]['collaboration']
+          as Map<String, dynamic>;
+      collaboration['scope'] = r'请在 C:\work\output 保存文件。';
+      collaboration['artifactContract']['location'] = 'C:/work/output';
+      task.executionStateJson = jsonEncode(root);
+      var rejected = false;
+      final discussion = modelRunner((member, context) async {
+        final state =
+            Map<String, dynamic>.from(context['collaboration'] as Map);
+        rejected = rejected ||
+            context['lastValidationError'].toString().contains('用户产物合同不可覆盖');
+        if ((state['plan'] as String).isEmpty) {
+          final next = proposal(state);
+          next['artifactContract'] = {
+            ...state['artifactContract'] as Map,
+            'location': proposedPath
+          };
+          return _turn('propose', text: '按合同保存文件。', proposal: next);
+        }
+        return _turn('approve', approval: approval(state));
+      });
+      await discussion.runCollaboration(task, WorkTaskCancellation(), apply);
+      final after =
+          WorkDiscussionState.fromExecutionState(task.executionStateJson)!
+              .collaboration!;
+      if (proposedPath.startsWith('D:')) {
+        expect(after.artifactContract['location'], 'C:/work/output');
+        expect(rejected, isTrue);
+      } else {
+        expect(after.artifactContract['location'], proposedPath,
+            reason: task.lastError);
+        expect(after.plan, isNotEmpty, reason: task.lastError);
+        expect(rejected, isFalse);
+      }
+    }, timeout: const Timeout(Duration(seconds: 30)));
+  }
+
   test('推导出来的 location 允许协调成员提案改写', () async {
     await db.agentTaskBox.put(task.id, task);
     final root = jsonDecode(task.executionStateJson) as Map<String, dynamic>;
@@ -973,10 +1552,30 @@ void main() {
       expect(attachments, isNotEmpty);
       for (final file in attachments) {
         expect(await File(file.localPath).exists(), isTrue);
-        expect(jsonDecode(await File(file.localPath).readAsString()),
-            contains('acceptances'));
+        final detail = Map<String, dynamic>.from(
+            jsonDecode(await File(file.localPath).readAsString()) as Map);
+        final savedProposal =
+            Map<String, dynamic>.from(detail['proposal'] as Map);
+        expect(savedProposal, contains('acceptances'));
+        expect(detail['requestRevision'], isA<int>());
+        expect(detail['teamRevision'], isA<int>());
+        expect(detail['verificationRevision'], isA<int>());
       }
-    });
+      final proposalDetails = <Map<String, dynamic>>[];
+      for (final file
+          in attachments.where((file) => file.fileName == '方案与验收详情.json')) {
+        proposalDetails.add(Map<String, dynamic>.from(
+            jsonDecode(await File(file.localPath).readAsString()) as Map));
+      }
+      final pendingDetail = proposalDetails.firstWhere((detail) =>
+          (detail['proposal']['scope'] as String).contains('增加键盘操作'));
+      final issue = (pendingDetail['issues'] as List)
+          .cast<Map>()
+          .singleWhere((issue) => issue['id'] == 'idea');
+      expect(issue['status'], 'open');
+      expect(issue['resolution'], contains('等待'));
+      expect(issue['resolution'], contains('尚未改变正式方案'));
+    }, timeout: const Timeout(Duration(seconds: 30)));
   }
   for (final adopt in [false, true]) {
     test('分歧由 P3 用户明确裁决后重新确认方案：adopt=$adopt', () async {
@@ -1311,6 +1910,12 @@ void main() {
       reasonFor({...validIssue, 'status': 'open'}),
       contains('issues[0] 必须且只能包含'),
     );
+    expect(
+        reasonFor({...validIssue, 'status': 'open'}), contains('多余字段：status'));
+    final missingField = {...validIssue}..remove('retestCondition');
+    expect(reasonFor(missingField), contains('缺少字段：retestCondition'));
+    expect(reasonFor({...validIssue, '未信任字段正文': '不应回显'}),
+        contains('多余字段：unknown'));
     expect(
       reasonFor({...validIssue, 'problem': 'p' * 4097}),
       contains('issues[0].problem'),

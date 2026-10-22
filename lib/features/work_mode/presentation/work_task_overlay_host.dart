@@ -1,3 +1,6 @@
+import '../work_task_completion_choice.dart';
+import 'work_task_supplement_dialog.dart';
+import 'package:chat_group/core/models/message.dart';
 import 'dart:async';
 
 import 'package:chat_group/core/database/database_service_provider.dart';
@@ -9,6 +12,7 @@ import 'package:chat_group/core/text/entity_labels.dart';
 import 'package:chat_group/core/models/api_provider.dart';
 import 'package:chat_group/features/ai_governance/ai_governance_models.dart';
 import 'package:chat_group/features/ai_governance/ai_governance_store.dart';
+import 'package:chat_group/features/ai_governance/model_capability_registry.dart';
 import 'package:chat_group/features/work_mode/presentation/work_task_panel.dart';
 import 'package:chat_group/features/work_mode/presentation/work_task_decision_dialog.dart';
 import 'package:chat_group/features/work_mode/presentation/work_change_approval_dialog.dart';
@@ -23,6 +27,7 @@ import 'package:chat_group/features/work_mode/work_task_event.dart';
 import 'package:chat_group/features/work_mode/work_task_event_store.dart';
 import 'package:chat_group/features/work_mode/work_task_error_sanitizer.dart';
 import 'package:chat_group/features/work_mode/work_task_user_action.dart';
+import 'package:chat_group/features/work_mode/work_task_execution_policy.dart';
 import 'package:chat_group/features/work_mode/work_task_decision.dart';
 import 'package:chat_group/features/work_mode/work_folder_grant_service.dart';
 import 'package:chat_group/features/work_mode/presentation/work_folder_grant_consent_dialog.dart';
@@ -32,6 +37,8 @@ import 'package:chat_group/features/work_mode/presentation/work_task_tab_visibil
 import 'package:chat_group/services/conversation_presence_service.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+part 'work_task_overlay_user_checkpoint.dart';
 
 /// Hosts the non-modal work-task panel above every application route.
 ///
@@ -44,6 +51,7 @@ class WorkTaskOverlayHost extends ConsumerStatefulWidget {
   final GlobalKey<NavigatorState>? navigatorKey;
   final Stream<List<AgentTask>>? taskStream;
   final WorkTaskEventStream? eventStreamFor;
+  final WorkTaskEventHistory? eventHistoryFor;
   final Future<void> Function(String taskId)? onStopTask;
   final Future<void> Function(String taskId)? onContinueTask;
   final Future<void> Function(String taskId, String reply)? onReplyTask;
@@ -87,6 +95,7 @@ class WorkTaskOverlayHost extends ConsumerStatefulWidget {
     this.navigatorKey,
     this.taskStream,
     this.eventStreamFor,
+    this.eventHistoryFor,
     this.onStopTask,
     this.onContinueTask,
     this.onReplyTask,
@@ -109,12 +118,33 @@ class WorkTaskOverlayHost extends ConsumerStatefulWidget {
     this.showTaskSummarySection = false,
   });
 
+  /// Attachment dialogs use the Navigator below this app-scoped panel.
+  static Future<void> withPanelHiddenForPreview(
+      BuildContext context, Future<void> Function() preview) async {
+    final host = context.findAncestorStateOfType<_WorkTaskOverlayHostState>();
+    if (host != null && host.mounted) {
+      host._setPreviewVisibility(false);
+    }
+    try {
+      await preview();
+    } finally {
+      if (host != null && host.mounted) {
+        host._setPreviewVisibility(true);
+      }
+    }
+  }
+
   @override
   ConsumerState<WorkTaskOverlayHost> createState() =>
       _WorkTaskOverlayHostState();
 }
 
 class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
+  void _updateUserCheckpointUi(VoidCallback update) => setState(update);
+
+  bool _completionDialogOpen = false;
+  final _shownCompletionChoices = <String>{};
+
   /// 底部留给聊天输入区的净空。
   ///
   /// 宿主覆盖在整个 Navigator 之上，量不到具体路由的输入行高度（附件/引用预览
@@ -202,6 +232,7 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
   /// 留在窗口内"，窗口变窄后它能整块落到屏幕外，而那时胶囊没在树上，读不到尺寸
   /// 也就永远修不回来。读不到时仍退回零尺寸（重启后第一帧），够把胶囊抓回来。
   final GlobalKey _pillEntryKey = GlobalKey();
+  int _previewDepth = 0;
   bool _isVisible = true;
   bool _isCollapsed = false;
   WorkSnapshotService? _snapshotService;
@@ -296,6 +327,7 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
       // the panel remains the durable fallback after the prompt is dismissed.
       _scheduleApprovalPrompt(tasks);
       _scheduleDecisionPrompt(tasks);
+      _scheduleCompletionPrompt(tasks);
     });
     // 标签栏与队列计数按当前会话收敛，所以会话切换必须主动重算：只跟着任务流
     // 更新重算的话，切到另一个已有历史任务的会话时，标签栏仍旧是上一个会话的，
@@ -333,6 +365,7 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
     final hasTasks = _panelHasContent;
     var usageEntries = const <UsageLedgerEntry>[];
     var usageDiagnostics = const <AiRequestDiagnostic>[];
+    final outOfBoundsUsageEntries = <UsageLedgerEntry>{};
     var usageUnavailable = false;
     try {
       final store = AiGovernanceStore.forDatabase(
@@ -340,6 +373,30 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
       );
       usageEntries = store.ledgerEntries;
       usageDiagnostics = store.diagnostics;
+      final registry = ModelCapabilityRegistry();
+      for (final entry in usageEntries.where((item) => item.exactUsage)) {
+        try {
+          final providers = ApiProvider.values.where(
+            (provider) => provider.name == entry.provider,
+          );
+          if (providers.isEmpty) continue;
+          final capability = registry.resolve(
+            provider: providers.first,
+            modelId: entry.model,
+            custom: store.customCapability(entry.provider, entry.model),
+          );
+          if (!capability.isKnown) continue;
+          if (!capability.usageWithinBounds(
+            inputTokens: entry.inputTokens,
+            outputTokens: entry.outputTokens,
+            cachedInputTokens: entry.cachedInputTokens,
+          )) {
+            outOfBoundsUsageEntries.add(entry);
+          }
+        } on Object {
+          // A malformed capability must not hide otherwise readable ledger rows.
+        }
+      }
     } on Object {
       // Lightweight hosts without a database should not present zero as a total.
       usageUnavailable = true;
@@ -349,7 +406,7 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
     return Stack(
       children: <Widget>[
         Positioned.fill(child: widget.child),
-        if (hasTasks && _isVisible && !_isCollapsed)
+        if (_previewDepth == 0 && hasTasks && _isVisible && !_isCollapsed)
           _positionedPanel(
             isWide: isWide,
             viewportHeight: viewport.height,
@@ -357,6 +414,7 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
               showTaskSummarySection: widget.showTaskSummarySection,
               usageEntries: usageEntries,
               usageDiagnostics: usageDiagnostics,
+              outOfBoundsUsageEntries: outOfBoundsUsageEntries,
               usageUnavailable: usageUnavailable,
               tasks: _tasks,
               hiddenTaskCount: _hiddenTaskCount,
@@ -367,9 +425,17 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
               eventStreamFor: widget.eventStreamFor ??
                   _eventStore?.watch ??
                   ((_) => const Stream<WorkTaskEvent>.empty()),
+              eventHistoryFor: widget.eventHistoryFor ??
+                  (_eventStore == null
+                      ? null
+                      : (taskId) async =>
+                          (await _eventStore!.read(taskId)).events),
               onSelectTask: (taskId) =>
                   setState(() => _selectedTaskId = taskId),
               onStop: _stopTask,
+              onSupplement: _coordinator == null ? null : _supplementTask,
+              onCompletionChoice:
+                  _coordinator == null ? null : _showCompletionChoice,
               onContinue: _continueTask,
               onContinueWithoutFollowUps: (taskId) =>
                   _continueTask(taskId, restoreQueuedFollowUps: false),
@@ -419,6 +485,7 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
                   (widget.onRequestFolderTask != null || _coordinator != null
                       ? _reauthorizeTask
                       : null),
+              onCommandReapproval: _coordinator?.requestCommandReapproval,
               onViewConflict: _viewConflictTask,
               onUndo: widget.onUndoTask ??
                   (_snapshotService == null ? null : _undoTask),
@@ -439,7 +506,7 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
               onClose: () => setState(() => _isVisible = false),
             ),
           ),
-        if (hasTasks && _isVisible && _isCollapsed)
+        if (_previewDepth == 0 && hasTasks && _isVisible && _isCollapsed)
           _positionedPillEntry(
             isWide: isWide,
             child: _WorkTaskMiniBar(
@@ -449,7 +516,7 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
               onDragEnd: _endMiniBarDrag,
             ),
           ),
-        if (hasTasks && !_isVisible)
+        if (_previewDepth == 0 && hasTasks && !_isVisible)
           _positionedPillEntry(
             isWide: isWide,
             child: FloatingActionButton.small(
@@ -781,14 +848,30 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
   bool get _canReplyToTask =>
       widget.onReplyTask != null || _coordinator != null;
 
-  Future<void> _replyTask(String taskId, String reply) {
+  Future<void> _replyTask(String taskId, String reply) async {
     final callback = widget.onReplyTask;
     if (callback != null) return callback(taskId, reply);
     final coordinator = _coordinator;
     if (coordinator == null) {
       throw StateError('工作任务调度器不可用，请稍后重试。');
     }
-    return coordinator.enqueueFollowUp(taskId, reply);
+    final task = coordinator.taskById(taskId);
+    final decisions = task == null || task.groupId.startsWith('dm:')
+        ? const <WorkTaskDecision>[]
+        : WorkTaskDecision.forTask(task).where((d) => d.isOpen).toList();
+    if (decisions.length > 1) {
+      throw StateError('有多项待决问题，请点击“回答待决问题”选择对应问题。');
+    }
+    if (decisions.length == 1) {
+      final decision = decisions.single;
+      final accepted = await coordinator.respondToDecision(taskId,
+          decisionId: decision.id, revision: decision.revision, answer: reply);
+      if (!accepted) {
+        throw StateError('这条答复未被采纳，请查看对应待决问题的最新说明。');
+      }
+      return;
+    }
+    await coordinator.enqueueFollowUp(taskId, reply);
   }
 
   Future<void> _retryTask(String taskId) {
@@ -1125,6 +1208,8 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
         decision = await WorkChangeApprovalDialog.show(
           navigatorContext,
           plan: plan,
+          continuesAfterRejection:
+              WorkTaskExecutionPolicy.isValidatedV2GroupTask(task),
         );
       } else {
         final pending = ToolRequest.fromJsonString(task.pendingToolRequestJson);
@@ -1133,6 +1218,8 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
           navigatorContext,
           pending: pending,
           requiresNoUndo: requiresNoUndo,
+          continuesAfterRejection:
+              WorkTaskExecutionPolicy.isValidatedV2GroupTask(task),
         );
       }
     } finally {
@@ -1374,6 +1461,10 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
         });
       }
     });
+  }
+
+  void _setPreviewVisibility(bool visible) {
+    if (mounted) setState(() => _previewDepth += visible ? -1 : 1);
   }
 
   void _setPanelModalVisibility(bool visible) {

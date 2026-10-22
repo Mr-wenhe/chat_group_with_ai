@@ -72,6 +72,8 @@ extension _WorkTaskCoordinatorExecution on WorkTaskCoordinator {
             ..resumeRequired = true
             ..lastError = reason;
           await _save(task);
+          await _record(task, WorkTaskEventKind.paused, '恢复核对未通过',
+              detail: reason);
           await _notifyUserAction(task);
           recoveryBlocked = true;
         } else {
@@ -113,6 +115,20 @@ extension _WorkTaskCoordinatorExecution on WorkTaskCoordinator {
       final stored = _taskBox.get(task.id);
       if (stored == null) {
         _conversationReservations.remove(task.groupId);
+        await _schedule();
+        return;
+      }
+
+      if (!stored.isTerminal && WorkTaskCompletionChoice.paused(stored)) {
+        if (_hasPendingV2Input(stored)) await _applyPendingV2Inputs(stored);
+        WorkFailure.clearFromTask(stored);
+        stored
+          ..status = AgentTaskStatus.paused
+          ..resumeRequired = false
+          ..lastError = '已停在安全检查点，可补充需求；点击继续才恢复。';
+        await _save(stored);
+        await _record(stored, WorkTaskEventKind.paused, '已暂停，等待补充或继续');
+        _conversationReservations.add(stored.groupId);
         await _schedule();
         return;
       }

@@ -1,7 +1,7 @@
 part of 'search_stage06_test.dart';
 
 SearchQueryPlanner _planner(MemoryGovernanceStore store, _PlannerClient client,
-    {Duration? requestTimeout}) {
+    {Duration? requestTimeout, DateTime Function()? clock}) {
   return SearchQueryPlanner(
     gateway: AiRequestGateway(store: store, client: client),
     config: const SearchPlannerConfig(
@@ -11,6 +11,7 @@ SearchQueryPlanner _planner(MemoryGovernanceStore store, _PlannerClient client,
       conversationId: 'conversation-1',
     ),
     requestTimeout: requestTimeout ?? SearchQueryPlanner.defaultRequestTimeout,
+    clock: clock ?? DateTime.now,
   );
 }
 
@@ -113,6 +114,7 @@ class _PlannerClient extends ChatApiService {
     Duration? receiveTimeout,
     int? maxRetries,
     CancelToken? cancelToken,
+    String? reasoningEffort,
     bool structuredJson = false,
     bool allowReasoningContentFallback = false,
     required int maxResponseBytes,
@@ -146,6 +148,9 @@ class _PlannerClient extends ChatApiService {
     Duration receiveTimeout = const Duration(seconds: 120),
     CancelToken? cancelToken,
     required List<Map<String, dynamic>> messages,
+    bool finishOnTerminalFrame = false,
+    String? reasoningEffort,
+    void Function()? onResponseActivity,
   }) async* {
     yield ChatStreamEvent.done('');
   }

@@ -4,6 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 回复语言
 
+- 每次面向用户回复时，必须先称呼用户「主人」。开始执行任务前，每轮只向用户提出 1 个澄清问题，逐轮确认，直到对用户表达及预期任务的理解有至少 99% 的信心后再开始执行。
 - 面向用户的所有回复必须使用中文；代码、命令、文件路径、标识符与引用原文保持原样。
 
 ## Commands
@@ -47,7 +48,7 @@ The gateway is plain TypeScript executed via Node's type-stripping — there is 
 
 **AI Group Chat Simulator** — a local-first Flutter app that simulates group conversations between AI characters backed by LLM providers, plus a work-mode agent that executes real file/command tasks.
 
-Toolchain: **Flutter 3.27.1 / Dart 3.6.0** (`pubspec.yaml` requires `sdk: ">=3.5.0 <4.0.0"`; CI and release workflows pin 3.27.1). Current version `2.3.5+14`.
+Toolchain: **Flutter 3.27.1 / Dart 3.6.0** (`pubspec.yaml` requires `sdk: ">=3.5.0 <4.0.0"`; CI and release workflows pin 3.27.1). Current version `2.6.0+14`.
 
 ### Repository layout
 
@@ -115,10 +116,11 @@ An explicit per-room toggle. When on, non-empty user input is routed to a work t
 - `WorkTaskCoordinator` owns scheduling **app-wide** (mounted via `WorkTaskOverlayHost` in `MaterialApp.builder`), independent of any widget, with `maximumConcurrentTasks = 2`. Tasks survive chat-room disposal.
 - `WorkAgentLoop` drives execution; the model receives public checkpoints, never a private reasoning trace.
 - `WorkRoleRouter` elects an executor among group members from inferred stage/occupation + `CharacterSkill`. A model recommendation can never invent a qualification. 群聊里没被 `@` 时它只把候选交给群推举，**唯一例外**是群里只有一位成员本职合格（`_nativelyQualified`，不开实现桥梁）：S1 直接指定该成员并跳过选人模型调用，讨论仍会确认方案与逐人认可，合同里刻意**不写** `explicitExecutorId`（自动指定不是用户声明，讨论仍可改派）。用户 `@` 某人只是征求意见时（`consultedCharacterIds` 非空）不做自动指定——判错方向必须是保守，退回旧行为而不是替用户派活。面板是"想自己指定"的真出口（`WorkTaskCoordinator.selectDiscussionExecutor` 把用户点选的候选写进 `executorId` 并写钉定、**不递增** `requestRevision`，因为用户改的是"谁来干"而不是"要干什么"）；路由文案不得再许诺"在群里 @ 一位候选角色"，那条路在任务非终态时只走 `enqueueFollowUp`，不会重跑路由。
-- 新群工作任务从聊天输入、协调器提交及独立追问推广入口统一创建 v2；DM 和普通聊天保持原行为。`WorkDiscussionRunner` 先选择相关团队、实际查证未决问题、形成方案并逐成员认可，再由同一个 `WorkAgentLoop` 制作、冻结候选、独立审查、返工复测和逐成员认可交付；旧“理解 100%”不是 v2 门槛。
+- 新群工作任务从聊天输入、协调器提交及独立追问推广入口统一创建 v2；DM 和普通聊天保持原行为。`WorkDiscussionRunner` 先选择相关团队、实际查证未决问题、形成方案并逐成员认可，再由同一个 `WorkAgentLoop` 制作并冻结候选，等待用户选择交付路径；选择继续测试时执行独立审查、返工复测和逐成员认可交付；旧“理解 100%”不是 v2 门槛。
+- **冻结后由用户选择交付路径**：群 v2 每轮候选冻结后暂停，弹窗提供「可完成」「继续测试」「补充需求」。直接交付只记录用户确认与未测试结论，不伪造自动验收、独立审查或成员签字；正常测试分支保持原有返工复测与逐员认可门禁。选择绑定任务、需求/团队版本及候选摘要，旧弹窗不能授权新成果。单文件最终交付直接提供用户约定的文件，不因软件类型强制打包；送测仍可打包。最终附件指向授权工作区原输出路径并保留冻结字节缓存，交付与重发均核对原文件摘要；旧ZIP重发时替换掉过时附件。「补充需求／暂停」在讨论、制作、测试期间均可用，等当前动作落盘到安全停点后暂停，补充原文与附件沿现有消息/FIFO 保存；关闭或提交补充窗口都不自动恢复，用户确认更新后的需求卡或显式继续才恢复。
 - 启动恢复先保留 FIFO、附件关联和版本索引，再核对项目、当前成员资格/配置、文件摘要、工具收据和权限，重新获取资源锁。讨论和执行共用两个 App 运行槽；待用户/审批、主动暂停、停止、完成及删除任务不会自动执行。旧未完成群任务保留产物后转换，需显式继续重新确认方案；旧已完成历史不伪造签字，未知 schema 保留原状态并阻塞。
 - v2 副作用调用前持久化不确定操作标记，完成后写设备本地提交收据；重启可用已提交收据或完整覆盖写的真实 SHA-256 后置条件核对，无法证明的命令、追加写、安装、删除及外部调用求助，不能盲重放，也不保证普遍 exactly-once。可信本地工具收据、路径授权、审批和资源锁不能作为跨设备可执行权限携带。
-- Tools: sandboxed command runner (approval-gated, with `blockedByDefault` / `pathRejected` / `waitingForApproval` states), workspace file service (list / read / search / patch / rename / delete), document tool, weather service, and skill create / download. `browser.context` exists in the tool enum and is still described in prompts, but no runtime registers it — treat it as unavailable.
+- Tools: sandboxed command runner (approval-gated, with `blockedByDefault` / `pathRejected` / `waitingForApproval` states), workspace file service (list / read / search / patch / rename / delete), document tool, weather service, skill create / download, and `browser.context` for validated v2 group software-candidate usage on macOS when the assigned member already has `browserContext` permission. It opens only the current frozen candidate’s single HTML in offline WKWebView; bounded query parameters may set confirmed fixtures, but arbitrary paths, URLs, and script execution are unavailable.
 - Permissions: folder grants and agent settings persist under `app_settings` keys `work_mode_folder_grants_v1` / `work_mode_agent_settings_v1`; mutations are fingerprinted and require explicit approval dialogs.
 - **会话槽只由持有者交还**：槽的持有者是"正在执行（`planning` / `runningTool`）或停在等用户（`waitingForApproval` / `paused` / `interrupted`）"的那条任务（`_pauseForDiscussion` 的串行所有权）。释放它必须先问 `_conversationHeldByAnotherTask`（收口点是 `_releaseConversationReservationFor`，恢复、删除、启动恢复三处共用）：无条件 `_conversationReservations.remove(groupId)` 会把同会话另一条任务的占用一起松开，于是两条任务并发跑在同一个群里（群工作上下文、产物路径与文件锁都是共享的）。`queued` **不算**持有者——排队中的任务什么也没握住，把它当占用方会让刚恢复的任务卡在自己留下的旧槽后面，谁也跑不起来。同理，已停止的 v2 任务不能按"讨论未完成"挡掉「继续」入口：停止已经取消讨论，v2 又不给「从头开始」，挡掉就没有出路；恢复后由 `_discussionGateFailure` 拦在执行之前。旧 v1 检查点没有这条重入路径，保持挡住。已停止的任务也不该出现「重试」：`_implRetry` 只放行 `canRestartAfterUserStop` 的「从头开始」，其余一律被状态守卫拒绝，摆一个点下去必然报错的按钮比不摆更糟。
 - **撤回发言不能改写已被引用的正文**：v2 讨论的正文先发布、状态后校验（问题证据要绑定消息 id），一轮发言还是**逐项**落盘的（`_validateHumanMember` 只允许一次追加一条 issue），所以"第二项被拒绝"不等于"整轮没被采纳"。`_withdrawRejectedTurn` 必须先过 `_isAdoptedEvidence`——已落盘记录（issue / 决议 / 验收 / 签字 / 工作项的 `*Ref`）引用过的正文原样保留，拒绝仍由诊断事件记录；否则已提交问题的 `evidenceRef` 会被换成一句中性说明，问题依据就此失真。
@@ -229,6 +231,7 @@ Large suites are split into `*_part_NN.dart` and `*_helpers_NN.dart` files (back
 
 ## Review / 校验完整性规则
 
+- **BUG 修复必须同步排查并修复同类路径**：修复任一线路的 BUG 时，必须沿共用入口、全部调用方、类似协议或实现路径、状态转换及失败恢复路径检查是否存在相同根因的问题；发现同类问题须在本次范围内一并修复并验证，不能只修当前模型、截图或单个复现入口。共享代码改动必须验证既有调用方兼容性，不得扩展为无关重构；客观阻塞导致无法修复或验证的路径须明确列出原因与剩余风险，不得宣称整体修复完成。
 - 当用户要求 Review、验收或校验某个阶段、模块、文件或改动集时，必须先明确本次范围，并完整检查范围内的需求符合性、正确性、边界与失败路径、测试有效性、可读性、架构、安全、性能、新老兼容和本清单中的代码质量要求。
 - 发现一个问题不得立即中断校验或直接给出最终结论；必须继续完成其余可执行检查，尽可能一次性收集全部问题。某项检查失败时，记录失败证据并继续不依赖该项的检查；只有安全风险、数据破坏风险或客观阻塞使后续检查无法进行时才停止，并明确未检查范围。
 - 最终报告必须集中列出所有发现，按严重级别排序，并为每项提供文件与行号、证据、影响和建议修复方向；同时列出已执行命令、通过项、失败项、未检查项及原因。完成完整范围前，不得只报告“第一个问题”，也不得宣称 Review / 校验完成。
@@ -241,7 +244,7 @@ Large suites are split into `*_part_NN.dart` and `*_helpers_NN.dart` files (back
 - Fully offline proactive contact is not implemented: closed-app AI generation would need pre-generated local notifications or a server-side push service. Current proactive DMs are foreground-only.
 - Web builds cannot provide the app's credential boundary, so they are not a release target.
 - UI-heavy chat-room behaviour is mostly covered indirectly through extracted logic tests rather than widget tests.
-- `WorkArtifactDeliveryGuard` 已提供交付合同与 DOCX/HTML 等结构校验，候选发布与审查还会核对真实文件摘要。结构正确不等于软件已运行测试；`browser.context` 尚无运行时注册，缺浏览器能力必须阻塞或走用户明确的人工验收/豁免。文档审查必须完整读取正文，`workspace.document` 用 `startChunk` / `nextChunkStart` 有界分页，相关检索片段不能冒充全文。网络来源核查尚未接通专业审查工具入口。
+- `WorkArtifactDeliveryGuard` 已提供交付合同与 DOCX/HTML 等结构校验，候选发布与审查还会核对真实文件摘要。结构正确不等于软件已运行测试；`browser.context` 仅在 macOS、已验证的 v2 群软件候选、成员能力与既有权限同时满足时注册；缺浏览器能力必须阻塞，不能退化为读源码、口头验收或未经用户同意的人工豁免。文档审查必须完整读取正文，`workspace.document` 用 `startChunk` / `nextChunkStart` 有界分页，相关检索片段不能冒充全文。网络来源核查尚未接通专业审查工具入口。 **待做：Windows 工作模式网页交互测试**（WebView2 的候选隔离、操作、断言与可信验收收据），本轮暂不实现；Windows 附件预览不等同于工作模式交互测试。
 - In-room progress is shown by `WorkTaskPanel`, not in the chat transcript. The multi-line `agent-progress:` bubble has had no producer since the work-mode rewrite; only its renderer survives, for messages already persisted in users' Hive boxes.
 - DM 仍可由角色路由器生成 `WorkHandoffState` 并由协调器串行接手；新群任务使用 v2 工作项/候选/审查责任交接，不再生成 legacy handoff。旧群 handoff 仅保留历史，迁移重新核对后进入 v2。DM 阶段切换会清除上一阶段的投递重发通知，避免下一角色重复发送上一角色产物。
 - 完整/会话备份通过现有附件通道保存交付版本及关联报告；配置备份不含任务历史。缺物理文件标记不完整，导入版本仅作历史并标记 `verified=false`，项目需重新绑定；导入未完成 v2 在原任务显式继续后归档旧方案，重新确认角色、方案、工作项、决策及验收，旧人工豁免和签字不授权当前执行。冻结的历史文件保留原始来源标识和摘要；活动 Hive 引用按新 ID 重写，历史签字不授权当前执行。

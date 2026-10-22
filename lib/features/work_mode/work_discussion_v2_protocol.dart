@@ -91,6 +91,39 @@ class WorkDiscussionV2Turn {
     'tool'
   };
 
+  /// Repair one schema field without letting the repair rewrite other facts.
+  static Map<String, dynamic>? proposalFieldRepair(String text, String error) {
+    final field = const ['workItems', 'acceptances', 'usageAssignments']
+        .where((field) =>
+            error.startsWith('proposal.$field ') ||
+            error.startsWith('proposal.$field['))
+        .firstOrNull;
+    if (field == null) return null;
+    try {
+      final original = _decodeResponseObject(text);
+      if (original is! Map || original['proposal'] is! Map) return null;
+      return {'field': field, 'original': original};
+    } on Object {
+      return null;
+    }
+  }
+
+  static String mergeProposalFieldRepair(
+      Map<String, dynamic> repair, String response) {
+    final field = repair['field'] as String;
+    final replacement = _decodeResponseObject(response);
+    if (replacement is! Map ||
+        replacement.length != 1 ||
+        !replacement.containsKey(field)) {
+      throw const FormatException('字段修复只能返回指定字段');
+    }
+    final original = Map<String, dynamic>.from(repair['original'] as Map);
+    return jsonEncode({
+      ...original,
+      'proposal': {...original['proposal'] as Map, field: replacement[field]}
+    });
+  }
+
   /// Accept a single protocol object after a preface of at most 256 characters.
   /// The object still goes through the exact same schema validation below, and
   /// any non-whitespace text after it remains invalid.
@@ -227,6 +260,7 @@ class WorkDiscussionV2Turn {
           {required bool includeApproval, required bool autonomous}) =>
       WorkDiscussionProtocolText.proposalTail +
       (includeApproval ? WorkDiscussionProtocolText.approvalTail : '') +
+      (autonomous ? WorkDiscussionProtocolText.autonomyRules : '') +
       WorkDiscussionProtocolText.tailCommon(autonomous: autonomous);
 
   /// 协议总则加材料要求：首轮请求与协议修复器共用同一份。
@@ -267,7 +301,7 @@ class WorkDiscussionV2Turn {
       _tail(includeApproval: true, autonomous: autonomous);
 
   static WorkDiscussionV2Turn? parse(Map<String, dynamic> response,
-      {void Function(String)? onInvalid}) {
+      {void Function(String)? onInvalid, bool autonomous = false}) {
     WorkDiscussionV2Turn? invalid(String reason) {
       onInvalid?.call(reason);
       return null;
@@ -307,8 +341,18 @@ class WorkDiscussionV2Turn {
       for (var index = 0; index < issues.length; index++) {
         final item = issues[index];
         if (!_keys(item, issueKeys)) {
+          final missing =
+              issueKeys.where((key) => !item.containsKey(key)).join('、');
+          final unexpected = item.keys
+              .where((key) => !issueKeys.contains(key))
+              .map((key) =>
+                  RegExp(r'^[A-Za-z][A-Za-z0-9_]{0,63}$').hasMatch(key)
+                      ? key
+                      : 'unknown')
+              .join('、');
           return invalid(
-              'issues[$index] 必须且只能包含 id、kind、target、problem、evidenceRef、retestCondition');
+              'issues[$index] 必须且只能包含 id、kind、target、problem、evidenceRef、retestCondition；'
+              '缺少字段：${missing.isEmpty ? '无' : missing}；多余字段：${unexpected.isEmpty ? '无' : unexpected}');
         }
         if (!{'defect', 'idea', 'decision'}.contains(item['kind'])) {
           return invalid('issues[$index].kind 必须为 defect、idea 或 decision');
@@ -336,7 +380,7 @@ class WorkDiscussionV2Turn {
       }
       Map<String, dynamic>? optional(String key) =>
           m[key] == null ? null : Map<String, dynamic>.from(m[key] as Map);
-      final proposal = optional('proposal');
+      var proposal = optional('proposal');
       final approval = optional('approval');
       final decision = optional('decision');
       if (proposal != null &&
@@ -357,11 +401,43 @@ class WorkDiscussionV2Turn {
             'proposal 须仅包含 scope/plan/artifactContract/workItems/acceptances 五个基础字段；自主策略下还必须且只可增加 usageAssignments。scope、plan 非空且最多 4096 字符');
       }
       if (proposal != null &&
-          proposal.containsKey('usageAssignments') &&
-          (_records(proposal['usageAssignments']) == null ||
-              !_records(proposal['usageAssignments'])!
-                  .every(WorkCollaborationAutonomy.validProposalAssignment))) {
-        return invalid('usageAssignments 必须是严格的逐成员场景，不含版本、状态或收据字段');
+          (autonomous || proposal.containsKey('usageAssignments'))) {
+        final assignments = _records(proposal['usageAssignments']);
+        if (assignments == null || assignments.isEmpty) {
+          return invalid('proposal.usageAssignments 必须是非空逐成员场景数组，自主方案不得省略');
+        }
+        for (var index = 0; index < assignments.length; index++) {
+          final error = WorkCollaborationAutonomy.proposalAssignmentError(
+              assignments[index]);
+          if (error != null) {
+            return invalid('proposal.usageAssignments[$index].$error');
+          }
+        }
+      }
+      if (proposal != null && proposal['artifactContract'] is Map) {
+        final contract = Map<String, dynamic>.from(
+          proposal['artifactContract'] as Map,
+        );
+        if (contract.containsKey('verificationCommands') &&
+            contract['verificationCommands'] != null) {
+          final normalized = normalizeVerificationCommands(
+            contract['verificationCommands'],
+          );
+          if (normalized == null) {
+            return invalid(
+              'artifactContract.verificationCommands 必须是 1–64 条 command.run 命令；每条可用 JSON 字符串或仅含 executable 与 arguments 的对象表达，字段和类型必须精确匹配，且规范化后不超过 1024 字符。拒绝额外字段、控制字符和超长参数。',
+            );
+          }
+          // JSON object member order and insignificant whitespace do not alter
+          // a command. Store the one canonical representation used by the
+          // approved command baseline, preserving executable and argument
+          // strings exactly.
+          contract['verificationCommands'] = normalized;
+          proposal = <String, dynamic>{
+            ...proposal,
+            'artifactContract': contract,
+          };
+        }
       }
       if (proposal != null &&
           !isValidArtifactContractFields(
@@ -501,38 +577,55 @@ class WorkDiscussionV2Turn {
       v is String &&
       v.length <= max &&
       !v.contains(RegExp(r'[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]'));
+  static List<String>? normalizeVerificationCommands(Object? value) {
+    if (value is! List || value.isEmpty || value.length > 64) return null;
+    final normalized = <String>[];
+    for (final item in value) {
+      try {
+        final Object? decoded;
+        if (item is String) {
+          if (!_text(item, 1024)) return null;
+          decoded = jsonDecode(item);
+        } else if (item is Map) {
+          decoded = Map<String, dynamic>.from(item);
+        } else {
+          return null;
+        }
+        if (decoded is! Map ||
+            decoded.length != 2 ||
+            !decoded.containsKey('executable') ||
+            !decoded.containsKey('arguments') ||
+            decoded['executable'] is! String ||
+            (decoded['executable'] as String).trim().isEmpty ||
+            (decoded['executable'] as String)
+                .contains(RegExp(r'[\u0000-\u001f\u007f]')) ||
+            decoded['arguments'] is! List ||
+            (decoded['arguments'] as List).length > 64 ||
+            !(decoded['arguments'] as List).every(
+              (argument) =>
+                  argument is String &&
+                  !argument.contains(RegExp(r'[\u0000-\u001f\u007f]')),
+            )) {
+          return null;
+        }
+        final canonical = jsonEncode(<String, dynamic>{
+          'executable': decoded['executable'],
+          'arguments': decoded['arguments'],
+        });
+        if (canonical.length > 1024) return null;
+        normalized.add(canonical);
+      } on Object {
+        return null;
+      }
+    }
+    return normalized;
+  }
+
   static bool isValidVerificationCommands(Map<String, dynamic> contract) {
     if (!contract.containsKey('verificationCommands')) return true;
     final commands = contract['verificationCommands'];
     if (commands == null) return true;
-    if (commands is! List ||
-        commands.isEmpty ||
-        commands.length > 64 ||
-        !commands.every((command) => _validVerificationCommand(command))) {
-      return false;
-    }
-    return true;
-  }
-
-  static bool _validVerificationCommand(Object? value) {
-    if (!_text(value, 1024)) return false;
-    try {
-      final decoded = jsonDecode(value as String);
-      if (decoded is! Map ||
-          decoded.length != 2 ||
-          decoded.keys.toList().join(',') != 'executable,arguments' ||
-          decoded['executable'] is! String ||
-          (decoded['executable'] as String).trim().isEmpty ||
-          decoded['arguments'] is! List ||
-          !(decoded['arguments'] as List)
-              .every((argument) => argument is String)) {
-        return false;
-      }
-      // Runtime allowlisting compares this exact canonical serialization.
-      return jsonEncode(decoded) == value;
-    } on Object {
-      return false;
-    }
+    return normalizeVerificationCommands(commands) != null;
   }
 
   static bool isValidArtifactFiles(Map<String, dynamic> contract) {

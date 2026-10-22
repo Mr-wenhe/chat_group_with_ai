@@ -18,6 +18,7 @@ class WorkChangeApprovalDialog extends StatelessWidget {
   final VoidCallback? onApproved;
   final VoidCallback? onApprovedWithoutUndo;
   final VoidCallback? onRejected;
+  final bool continuesAfterRejection;
 
   const WorkChangeApprovalDialog({
     super.key,
@@ -26,6 +27,7 @@ class WorkChangeApprovalDialog extends StatelessWidget {
     this.onApproved,
     this.onApprovedWithoutUndo,
     this.onRejected,
+    this.continuesAfterRejection = false,
   });
 
   /// Matches the app's existing `showDialog` pattern while making a dismissed
@@ -37,6 +39,7 @@ class WorkChangeApprovalDialog extends StatelessWidget {
     VoidCallback? onApproved,
     VoidCallback? onApprovedWithoutUndo,
     VoidCallback? onRejected,
+    bool continuesAfterRejection = false,
   }) {
     return showDialog<WorkChangeApprovalDecision>(
       context: context,
@@ -47,6 +50,7 @@ class WorkChangeApprovalDialog extends StatelessWidget {
         onApproved: onApproved,
         onApprovedWithoutUndo: onApprovedWithoutUndo,
         onRejected: onRejected,
+        continuesAfterRejection: continuesAfterRejection,
       ),
     );
   }
@@ -97,6 +101,8 @@ class WorkChangeApprovalDialog extends StatelessWidget {
               Text('预计 ${plan.estimatedBytes} 字节'),
               Text(plan.snapshotAvailable ? '可创建快照' : '无法创建快照'),
               Text(plan.reversible ? '可撤销' : '不可撤销'),
+              if (continuesAfterRejection)
+                const Text('拒绝仅禁止本次操作，任务会继续寻找安全替代方案；要暂停整个任务，请关闭此框后点击任务面板“停止”。'),
               if (!plan.snapshotAvailable || !plan.reversible)
                 const Padding(
                   padding: EdgeInsets.only(top: 8),
@@ -119,7 +125,7 @@ class WorkChangeApprovalDialog extends StatelessWidget {
             onRejected?.call();
             Navigator.of(context).pop(WorkChangeApprovalDecision.rejected);
           },
-          child: const Text('拒绝并暂停'),
+          child: Text(continuesAfterRejection ? '拒绝本次操作' : '拒绝并暂停'),
         ),
         if (!plan.snapshotAvailable || !plan.reversible)
           FilledButton(

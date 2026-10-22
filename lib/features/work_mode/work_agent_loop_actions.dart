@@ -370,6 +370,47 @@ extension _WorkAgentLoopActions on WorkAgentLoop {
       );
     }
     final definition = validation.definition!;
+    final otherHtmlDraft = _singleHtmlDraftConflictPath(task, call);
+    final overwrittenHtmlDraft = _singleHtmlDraftOverwritePath(task, call);
+    final existingHtmlDraft = otherHtmlDraft ?? overwrittenHtmlDraft;
+    if (existingHtmlDraft != null) {
+      final conflicts = _recordSingleHtmlDraftConflict(task);
+      final contractTarget = _isContractHtmlPath(task, existingHtmlDraft);
+      final contractRecovery = '请直接修订合同正式文件 `$existingHtmlDraft`：'
+          '用带 expectedSha256 的精确替换或 parts 合并；'
+          '完整覆盖必须 append:false、overwrite:true 并保留完整内容。'
+          '不要向完整 HTML 追加另一份文档，继续遵守摘要、审批和快照。';
+      final message = contractTarget
+          ? '本次未执行另一条路径上的完整 HTML 写入。$contractRecovery'
+          : otherHtmlDraft != null
+              ? '单 HTML 交付物的完整草稿已固定在 `$existingHtmlDraft`。'
+                  '本次未执行另一条路径上的完整 HTML 写入；请沿固定路径续写，'
+                  '或用 parts 合并到合同文件。'
+              : '单 HTML 草稿 `$existingHtmlDraft` 已开始制作。'
+                  '本次未执行同路径整份覆盖，以免丢失已写内容；请用 append:true 续写，'
+                  '局部修正用 expectedFragment/replacement，最后用 parts 合并到合同文件。';
+      if (conflicts >= _singleHtmlDraftConflictLimit) {
+        final recovery = contractTarget
+            ? '重复尝试换路径写入，已暂停以避免分叉候选。$contractRecovery'
+            : '同一工作项重复尝试换路径或整份覆盖单 HTML 草稿，已暂停以避免分叉候选或丢失已写内容。'
+                '请在任务面板继续；沿唯一草稿路径追加，局部修正用精确片段替换，完成后按合同路径合并。';
+        return _pauseForUserAction(
+          state,
+          recovery,
+          failure: WorkFailure.fromSignalsForUserAction(
+            recovery,
+            completedContent: _completedContent(state),
+          ),
+          reason: 'singleHtmlDraftConflict',
+        );
+      }
+      return _repairToolFailure(
+        state,
+        message: message,
+        instruction: message,
+        scope: 'singleHtmlDraft',
+      );
+    }
     final operation = ToolRequest(
       tool: call.name,
       reason: publicUpdate,
@@ -383,6 +424,39 @@ extension _WorkAgentLoopActions on WorkAgentLoop {
                     false))) {
       await _skipCommittedTool(state, call);
       return null;
+    }
+    final operationCheckpoint = safeToolRequestCheckpoint(operation);
+    final rejectedFingerprints =
+        _decodeMap(task.executionStateJson)['rejectedOperationFingerprints'];
+    if (definition.isMutation &&
+        WorkTaskExecutionPolicy.isValidatedV2GroupTask(task) &&
+        rejectedFingerprints is List &&
+        rejectedFingerprints.contains(
+          sha256.convert(utf8.encode(operationCheckpoint)).toString(),
+        )) {
+      const message = '相同操作此前已被拒绝，本次仍未执行，也不会再次提交相同审批。'
+          '请改用其他已授权工具；没有安全替代方式时说明具体卡点。';
+      const refusal = WorkToolResult.failed(
+        message: message,
+        failureCode: 'rejectedOperation',
+        data: {'rejected': true, 'repeatedApprovalBlocked': true},
+      );
+      final stalled = await _observeV2Progress(
+        state,
+        _toolProgressObservation(call, refusal),
+      );
+      if (stalled != null) return stalled;
+      state
+        ..recentResults.add(_safeResult(refusal, call))
+        ..modelResults.add(_modelResult(refusal, call));
+      return _repairToolFailure(
+        state,
+        message: message,
+        instruction:
+            '该操作已在历史中被明确拒绝，本次没有执行。不要再次提交相同操作、改写说明后重试，或改用其他工具实施同一副作用。若只是读取候选，可用已授权的 workspace.read 作只读补充，但不能记作静态命令通过或游戏实测通过；继续其他已授权工作。若被拒操作是不可替代的验收门槛，立即说明审批阻塞并暂停，不要重试。',
+        scope: 'rejectedApproval',
+        repeats: () => _isRepeatedCommandOutcome(state, call, refusal),
+      );
     }
     if (state.cancellation.isCancelled) return _interrupt(state);
 
@@ -444,6 +518,10 @@ extension _WorkAgentLoopActions on WorkAgentLoop {
     }
     // Keep the intent through receipt observers; they may persist independently.
     await onToolResult?.call(task, call, toolResult);
+    if (actionStarted && definition.isMutation && !toolResult.succeeded) {
+      // A failed process can still rewrite files and invalidate an earlier check.
+      _recordArtifactChange(task, call, toolResult);
+    }
     if (!toolResult.succeeded &&
         actionStarted &&
         definition.isMutation &&
@@ -480,7 +558,6 @@ extension _WorkAgentLoopActions on WorkAgentLoop {
     if (state.cancellation.isCancelled && !toolResult.succeeded) {
       return _interrupt(state);
     }
-
     // Approval, permission and path gates can return before a handler does
     // any work. Refund the speculative count for those outcomes, while a
     // paused process prompt remains a real started action. This check happens
@@ -551,6 +628,44 @@ extension _WorkAgentLoopActions on WorkAgentLoop {
         await _checkpoint(state);
         return null;
       }
+      if (WorkTaskExecutionPolicy.isValidatedV2GroupTask(task) &&
+          call.name == AgentToolName.browserContext) {
+        switch (toolResult.failureCode) {
+          case 'browserAssertionBinding':
+            if (state.browserAssertionBindingRepairs > 0) {
+              return _fail(
+                state,
+                '断言经一次定向纠正后仍未绑定当前成员场景；本次断言未执行，验收未记为通过。',
+                failure: failure,
+              );
+            }
+            state.browserAssertionBindingRepairs++;
+            return _repairToolFailure(
+              state,
+              message: message,
+              instruction:
+                  '本次断言在执行前被拒绝。请从当前本人场景的 acceptanceIds 选择验收 ID，并从该项已确认的 expectedResult 或 method 原样复制连续预期文字；不得改写预期、借用其他成员场景或放宽验收。若当前场景没有可逐字复制的预期，不要再调用 assert，报告该场景无法按已确认方案断言。',
+              scope: 'browserAssertionBinding',
+            );
+          case 'browserCloseBeforeAssertion':
+            return _repairToolFailure(
+              state,
+              message: message,
+              instruction:
+                  '浏览器会话仍保持打开；请先用当前场景分配的验收项和已确认预期调用 browser.context assert，再继续测试或关闭会话。不要重新打开。',
+              scope: 'browserCloseBeforeAssertion',
+            );
+          case 'browserSessionOccupied':
+            return _repairToolFailure(
+              state,
+              message: message,
+              instruction:
+                  '上一成员的隔离浏览器会话仍占用本任务，本次尚未打开新会话。请使用失败结果中的 sessionRef 调用 close；关闭成功后再为当前成员 open。不要重复 open，也不要猜测或替换 sessionRef。',
+              scope: 'browserSessionOccupied',
+            );
+        }
+        return _fail(state, message, failure: failure);
+      }
       if (_isRepairableToolFailure(toolResult)) {
         return _repairToolFailure(
           state,
@@ -567,6 +682,10 @@ extension _WorkAgentLoopActions on WorkAgentLoop {
         message,
         failure: failure,
       );
+    }
+
+    if (toolResult.data['rejected'] != true) {
+      _rememberSingleHtmlDraft(task, call);
     }
 
     if (definition.isMutation && toolResult.data['changed'] == false) {
@@ -1014,10 +1133,22 @@ extension _WorkAgentLoopActions on WorkAgentLoop {
     required WorkToolResult result,
   }) async {
     final task = state.task;
+    final reapproval = commandReapprovalContextFor(task);
+    if (reapproval != null &&
+        safeToolRequestCheckpointJson(jsonEncode(reapproval['operation'])) ==
+            safeToolRequestCheckpoint(operation)) {
+      final root = _decodeMap(task.executionStateJson)
+        ..remove('commandReapprovalRequest');
+      task.executionStateJson = jsonEncode(root);
+    }
     // A completed tool call is progress, so the repair budgets start over; the
     // failure fingerprint history is deliberately left alone because a
     // successful read does not prove an earlier defect is gone.
     state.toolRepairCount = 0;
+    if (call.name == AgentToolName.browserContext &&
+        call.arguments['operation'] == 'assert') {
+      state.browserAssertionBindingRepairs = 0;
+    }
     state.toolRepairInstruction = '';
     state.completionRepairCount = 0;
     state.pendingToolRequest = null;
@@ -1028,6 +1159,22 @@ extension _WorkAgentLoopActions on WorkAgentLoop {
     // mutation or artifact, otherwise a later continuation would silently
     // skip the same change and report a file that was never written.
     final rejected = result.data['rejected'] == true;
+    if (rejected &&
+        isMutation &&
+        WorkTaskExecutionPolicy.isValidatedV2GroupTask(task)) {
+      final execution = _decodeMap(task.executionStateJson);
+      final rawFingerprints = execution['rejectedOperationFingerprints'];
+      final fingerprints = rawFingerprints is List
+          ? rawFingerprints.whereType<String>().toList()
+          : <String>[];
+      final fingerprint = sha256
+          .convert(utf8.encode(safeToolRequestCheckpoint(operation)))
+          .toString();
+      if (!fingerprints.contains(fingerprint)) fingerprints.add(fingerprint);
+      if (fingerprints.length > 128) fingerprints.removeAt(0);
+      execution['rejectedOperationFingerprints'] = fingerprints;
+      task.executionStateJson = jsonEncode(execution);
+    }
     task
       ..pendingToolRequestJson = ''
       ..completedOperations = <String>[

@@ -50,7 +50,9 @@ extension _WorkDiscussionRunnerSetup on WorkDiscussionRunner {
     }
 
     final allCharacters = _groupCharacters(group);
-    if (group.aiCharacterIds.toSet().length > allCharacters.length) {
+    final eligibleGroupMemberIds =
+        group.aiCharacterIds.where((id) => id != roundtableNewsRoleId).toSet();
+    if (eligibleGroupMemberIds.length > allCharacters.length) {
       await _publish(
         task,
         group,
@@ -223,6 +225,7 @@ extension _WorkDiscussionRunnerSetup on WorkDiscussionRunner {
   List<AICharacter> _groupCharacters(ChatGroup group) {
     final seen = <String>{};
     return group.aiCharacterIds
+        .where((id) => id != roundtableNewsRoleId)
         .map(database.aiCharacterBox.get)
         .whereType<AICharacter>()
         .where((character) => seen.add(character.id))

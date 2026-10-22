@@ -33,7 +33,8 @@ extension _V2DiscussionTeam on _V2DiscussionSession {
             : team.where((m) => m['memberId'] == entry.key).firstOrNull?['role']
                 as String?;
         final character = runner.database.aiCharacterBox.get(entry.value);
-        if (role == null ||
+        if (entry.value == roundtableNewsRoleId ||
+            role == null ||
             character == null ||
             !WorkRoleRouter.qualifiesForResponsibility(
                 character,
@@ -62,7 +63,8 @@ extension _V2DiscussionTeam on _V2DiscussionSession {
         changed = true;
       }
       if (state.isAutonomous) {
-        for (final id in state.participantIds) {
+        for (final id
+            in state.participantIds.where((id) => id != roundtableNewsRoleId)) {
           if (team.any((m) => m['memberId'] == id)) continue;
           final character = runner.database.aiCharacterBox.get(id);
           final resolved = character == null
@@ -93,11 +95,13 @@ extension _V2DiscussionTeam on _V2DiscussionSession {
       return !state.hasBlockingDecision && await _checkTeam();
     }
     final characters = group!.aiCharacterIds
+        .where((id) => id != roundtableNewsRoleId)
         .where((id) => !state.isAutonomous || state.participantIds.contains(id))
         .map(runner.database.aiCharacterBox.get)
         .whereType<AICharacter>()
         .toList();
     for (final id in confirmed.values) {
+      if (id == roundtableNewsRoleId) continue;
       final member = runner.database.aiCharacterBox.get(id);
       if (member != null && !characters.any((c) => c.id == id)) {
         characters.add(member);
@@ -112,7 +116,8 @@ extension _V2DiscussionTeam on _V2DiscussionSession {
     final team =
         selected.team.map((m) => Map<String, dynamic>.from(m)).toList();
     if (state.isAutonomous) {
-      for (final id in state.participantIds) {
+      for (final id
+          in state.participantIds.where((id) => id != roundtableNewsRoleId)) {
         if (team.any((m) => m['memberId'] == id)) continue;
         final character = runner.database.aiCharacterBox.get(id);
         team.add({
@@ -392,7 +397,7 @@ extension _V2DiscussionTeam on _V2DiscussionSession {
         {'pending', 'deferred'}.contains(d['status']));
     if (pending) return;
     final id =
-        _key('decision', '$kind:$target:$reason:${state.requestRevision}');
+        _key('decision', '$kind:$target:$reason:${state.requestRevision}:${state.revision}');
     if (state.decisions.any((d) =>
         d['id'] == id && {'pending', 'deferred'}.contains(d['status']))) {
       return;
@@ -413,7 +418,8 @@ extension _V2DiscussionTeam on _V2DiscussionSession {
     await _commit(router || !state.teamQualified ? 'router' : 'coordinator',
         router || !state.teamQualified ? 'router' : state.coordinatorId, {
       'decisions': [...state.decisions, decision],
-      'requestRevision': state.requestRevision + 1
+      'requestRevision': state.requestRevision +
+          (router && isMemberRequestRecoveryDecision(decision) ? 0 : 1)
     });
   }
 }

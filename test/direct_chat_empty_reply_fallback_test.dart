@@ -49,6 +49,9 @@ class EmptyReplyChatApi extends ScriptedChatApi {
     int maxTokens = 1024,
     Duration receiveTimeout = const Duration(seconds: 120),
     CancelToken? cancelToken,
+    bool finishOnTerminalFrame = false,
+    String? reasoningEffort,
+    void Function()? onResponseActivity,
   }) async* {
     replyCalls.add(messages);
     yield ChatStreamEvent.done('');
@@ -103,6 +106,16 @@ void main() {
       await Future<void>.delayed(const Duration(milliseconds: 150));
     });
     await waitForReply(tester, api);
+    var replyPersisted = false;
+    for (var step = 0; step < 160 && !replyPersisted; step++) {
+      replyPersisted = await tester.runAsync(() async {
+            await Future<void>.delayed(const Duration(milliseconds: 20));
+            return db.messageBox.values.any((message) =>
+                message.groupId == 'dm:va' && message.senderType == 'ai');
+          }) ??
+          false;
+      if (!replyPersisted) await tester.pump(const Duration(milliseconds: 50));
+    }
     expect(api.replyCalls, isNotEmpty, reason: '私聊回合必须真的发出请求');
 
     final replies = db.messageBox.values

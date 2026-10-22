@@ -155,3 +155,9 @@ abstract interface class WorkTaskCollaborationExecutor {
 abstract interface class WorkTaskRecoveryValidator {
   Future<String?> validateRecovery(AgentTask task);
 }
+
+/// Explicit user acceptance of frozen bytes, without claiming test evidence.
+abstract interface class WorkTaskUserCandidateDelivery {
+  Future<bool> deliverUserConfirmedCandidate(AgentTask task,
+      {bool Function()? hasArrivingInput});
+}

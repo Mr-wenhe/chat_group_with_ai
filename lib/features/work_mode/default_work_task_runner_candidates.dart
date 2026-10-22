@@ -153,10 +153,22 @@ extension WorkCandidateDelivery on DefaultWorkTaskRunner {
         requiredPaths.isEmpty ? validation.deliveredPaths : requiredPaths;
     final selection =
         await _safeArtifactsForAttachment(task, deliverablePaths: declared);
+    final validatedPaths = validation.deliveredPaths.toSet();
+    final formats = WorkArtifactDeliveryGuard.declaredOutputFormats(task);
+    final selectedDeliverables = selection.entries
+        .where((entry) => formats.any((format) =>
+            WorkArtifactDeliveryGuard.matchesDeclaredFormat(
+                entry.file.path, format)))
+        .map((entry) => entry.file.path)
+        .toSet();
+    final contractOutputsValidated = formats.isEmpty
+        ? selection.entries
+            .every((entry) => validatedPaths.contains(entry.file.path))
+        : selectedDeliverables.isNotEmpty &&
+            selectedDeliverables.every(validatedPaths.contains);
     if (selection.skippedNames.isNotEmpty ||
         selection.entries.length != declared.toSet().length ||
-        !validation.deliveredPaths
-            .every((path) => selection.files.any((f) => f.path == path))) {
+        !contractOutputsValidated) {
       throw StateError('合同文件缺失、超限或不可读取，未发布完整候选。');
     }
     final root = _workspaceRootForTask(task);
@@ -262,7 +274,8 @@ extension WorkCandidateDelivery on DefaultWorkTaskRunner {
         'delivery-${sha256.convert(utf8.encode('${task.id}:${candidate.iterationId}:$kind:$evidence'))}';
     final existing = database.messageBox.get(messageId);
     if (kind == 'final') {
-      await _validateFinalResend(existing, candidate, publisher, state);
+      await _validateFinalResend(existing, candidate, publisher, state,
+          userAccepted: WorkTaskCompletionChoice.choice(task) == 'deliver');
     }
     final message = existing ??
         Message(
@@ -283,6 +296,8 @@ extension WorkCandidateDelivery on DefaultWorkTaskRunner {
       'kind': kind,
       'senderId': senderId,
       'verified': true,
+      if (kind == 'final' && WorkTaskCompletionChoice.choice(task) == 'deliver')
+        'acceptedByUserWithoutTesting': true,
       'evidenceRef': evidence,
       'files': paths,
       if (nativeBundle != null) 'nativeBundle': nativeBundle.toJson(),
@@ -290,10 +305,12 @@ extension WorkCandidateDelivery on DefaultWorkTaskRunner {
     message.content = switch (kind) {
       'review' =>
         '本轮审查报告 ${candidate.iterationId}，对应摘要 ${candidate.digest.substring(0, 12)}。',
+      'final' when WorkTaskCompletionChoice.choice(task) == 'deliver' =>
+        '正式交付 ${candidate.iterationId}：用户确认直接完结，未经过本轮测试／独立审查。',
       'final' =>
         '正式交付 ${candidate.iterationId}，${state.acceptances.any((a) => a['status'] == 'waived') ? '含用户明确豁免，' : ''}${state.acceptances.any((a) => a['status'] == 'manual') ? '含用户人工验收，' : ''}验收与逐员认可已封存。',
       _ => nativeBundle == null
-          ? '候选送测 ${candidate.iterationId}，文件已冻结，等待本轮审查。'
+          ? '本轮成果 ${candidate.iterationId} 已冻结，等待你选择可完成、继续测试或补充需求。'
           : '候选送测 ${candidate.iterationId}；${nativeBundle.appPath} 已作为冻结 macOS App 包装在 ZIP 中，等待本轮审查。',
     };
     _candidateState(task);
@@ -318,7 +335,11 @@ extension WorkCandidateDelivery on DefaultWorkTaskRunner {
     try {
       final nativeBundle =
           MacAppBundleDescription.tryParse(candidate.manifest['nativeBundle']);
+      final directFinal = kind == 'final' &&
+          nativeBundle == null &&
+          candidate.files.length == 1;
       if (kind != 'review' &&
+              !directFinal &&
               nativeBundle == null &&
               (candidate.manifest['contract'] as Map)['type'] == 'software' ||
           deliveryFiles.length >
@@ -345,7 +366,15 @@ extension WorkCandidateDelivery on DefaultWorkTaskRunner {
           ..add(bundle);
       }
       final attachments = <MediaAttachment>[...?message.media];
+      if (directFinal) {
+        attachments.removeWhere(
+            (a) => a.fileName != _basename(deliveryFiles.single.path));
+        message.media = attachments;
+      }
       for (final source in deliveryFiles) {
+        final original = directFinal
+            ? await _finalCandidateOriginal(task, candidate)
+            : source;
         final expected = await WorkCandidatePublisher.fileDigest(source);
         final previous = attachments
             .where((a) => a.fileName == _basename(source.path))
@@ -355,6 +384,10 @@ extension WorkCandidateDelivery on DefaultWorkTaskRunner {
             await WorkCandidatePublisher.fileDigest(
                     File(previous.managedPath)) ==
                 expected) {
+          if (directFinal) {
+            attachments[attachments.indexOf(previous)] =
+                _attachmentReferencingOriginal(original, previous);
+          }
           continue;
         }
         final copied = await (mediaCopier == null
@@ -367,13 +400,15 @@ extension WorkCandidateDelivery on DefaultWorkTaskRunner {
         }
         attachments.removeWhere((a) => a.fileName == copied.fileName);
         attachments.add(kind == 'review' || bundle == null
-            ? _attachmentReferencingOriginal(source, copied)
+            ? _attachmentReferencingOriginal(original, copied)
             : copied);
         _candidateState(task);
         message.media = attachments;
         await database.updateMessage(message);
       }
       await publisher.verify(candidate, expectedDigest: candidate.digest);
+      if (directFinal) await _finalCandidateOriginal(task, candidate);
+      message.media = attachments;
       message.content = message.content.replaceAll('\n附件投递失败，可重发同一版本。', '');
       await database.updateMessage(message);
       _clearArtifactDeliveryNotice(task);
@@ -391,8 +426,31 @@ extension WorkCandidateDelivery on DefaultWorkTaskRunner {
     }
   }
 
+  /// Final attachments point to the authorized output; frozen bytes remain cached.
+  Future<File> _finalCandidateOriginal(
+      AgentTask task, WorkCandidate candidate) async {
+    final root = _workspaceRootForTask(task);
+    final files = workspaceFileService;
+    if (root == null || files == null) {
+      throw StateError('无法核对正式交付位置，请恢复原工作区后重发。');
+    }
+    final entry = candidate.files.single;
+    final output =
+        File(p.joinAll([root, ...p.posix.split(entry['path'] as String)]));
+    final resolved = await files.pathPolicy.resolveExisting(output.path);
+    if (!resolved.isFile ||
+        await FileSystemEntity.type(output.path, followLinks: false) ==
+            FileSystemEntityType.link ||
+        await WorkCandidatePublisher.fileDigest(File(resolved.path)) !=
+            entry['sha256']) {
+      throw StateError('指定位置的文件与冻结成果不一致，未覆盖原文件或交付其他版本。');
+    }
+    return output;
+  }
+
   Future<void> _validateFinalResend(Message? existing, WorkCandidate candidate,
-      WorkCandidatePublisher publisher, WorkCollaborationState state) async {
+      WorkCandidatePublisher publisher, WorkCollaborationState state,
+      {bool userAccepted = false}) async {
     if (existing?.workDelivery?['verified'] == true) {
       final metadata = existing!.workDelivery!;
       if (metadata['artifactDigest'] != candidate.digest) {
@@ -412,6 +470,15 @@ extension WorkCandidateDelivery on DefaultWorkTaskRunner {
         }
       }
     } else {
+      if (userAccepted) {
+        final outcome = await WorkCandidatePublisher.readMetadata(
+            File('${candidate.directory.path}/outcome.json'));
+        if (outcome['acceptedByUser'] != true ||
+            outcome['artifactDigest'] != candidate.digest) {
+          throw StateError('缺少当前成果的用户确认凭据。');
+        }
+        return;
+      }
       if (!state.deliveryReady) throw StateError('全员版本认可尚未齐全。');
       await publisher.sealOutcome(candidate, state, accepted: true);
     }

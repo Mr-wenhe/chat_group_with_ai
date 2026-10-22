@@ -45,7 +45,7 @@ extension _DefaultWorkTaskRunnerProduction on DefaultWorkTaskRunner {
   }
 
   Future<bool> _prepareCollaborationWork(AgentTask task) async {
-    final state = _candidateState(task);
+    var state = _candidateState(task);
     if (!WorkDiscussionState.fromExecutionState(task.executionStateJson)!
             .isProductionExecutorConsistent ||
         !state.productionReady ||
@@ -53,6 +53,9 @@ extension _DefaultWorkTaskRunnerProduction on DefaultWorkTaskRunner {
       return false;
     }
     if (!await _productionContractAvailable(task, state)) return false;
+    if (await _recoverUnchangedProduction(task, state)) {
+      state = _candidateState(task);
+    }
     final done = state.workItems
         .where((i) => i['status'] == 'done')
         .map((i) => i['id'])
@@ -80,6 +83,7 @@ extension _DefaultWorkTaskRunnerProduction on DefaultWorkTaskRunner {
           persist: false);
       _bindWorkItem(task, item['kind'] == 'material' ? 'material' : 'produce',
           item['id'] as String);
+      if (item['kind'] != 'material') await _captureProductionBaseline(task);
       return true;
     }
     return _prepareCompletedProduction(task, state);
@@ -139,6 +143,13 @@ extension _DefaultWorkTaskRunnerProduction on DefaultWorkTaskRunner {
       _bindWorkItem(task, userBaseline ? 'baseline' : 'publish',
           state.currentIteration?['id'] as String? ?? 'unpublished');
       return true;
+    }
+    if (WorkTaskCompletionChoice.pending(task)) {
+      task
+        ..status = AgentTaskStatus.paused
+        ..resumeRequired = false
+        ..lastError = '本轮成果已冻结，请选择可完成、继续测试或补充需求。';
+      return false;
     }
     if (state.phase == 'ready') {
       await _productionCommit(task, 'workItem', {'phase': 'verifying'},
@@ -480,10 +491,20 @@ extension _DefaultWorkTaskRunnerProduction on DefaultWorkTaskRunner {
     final root = _workspaceRootForTask(task);
     if (files == null || root == null) return '工作材料读取能力不可用。';
     for (final path in completion.evidence) {
-      final result = await files
-          .readTextRange(p.isAbsolute(path) ? path : p.join(root, path));
-      if (result.cancelled || result.sensitive || result.text.trim().isEmpty) {
-        return '工作材料文件缺失或正文为空。';
+      try {
+        final result = await files
+            .readTextRange(p.isAbsolute(path) ? path : p.join(root, path));
+        if (result.cancelled ||
+            result.sensitive ||
+            result.text.trim().isEmpty) {
+          return '工作材料文件缺失或正文为空。';
+        }
+      } on WorkspacePathException catch (error) {
+        return '工作材料证据路径无法读取：${sanitizeWorkTaskError(error)}。'
+            '请用工具实际返回的完整文件路径修正 completion.evidence，保留已成功写入的材料。';
+      } on FileSystemException catch (error) {
+        return '工作材料证据文件读取失败：${sanitizeWorkTaskError(error)}。'
+            '请核对 completion.evidence 的真实文件路径与读取权限。';
       }
     }
     return null;
@@ -491,6 +512,8 @@ extension _DefaultWorkTaskRunnerProduction on DefaultWorkTaskRunner {
 
   Future<void> _completeProductionItem(
       AgentTask task, AICharacter actor) async {
+    final changeFailure = await _validateProductionChanges(task);
+    if (changeFailure != null) throw StateError(changeFailure);
     task.status = AgentTaskStatus.runningTool;
     final root = _decodeMap(task.executionStateJson);
     final binding = root['workItemExecution'] as Map;
@@ -500,7 +523,8 @@ extension _DefaultWorkTaskRunnerProduction on DefaultWorkTaskRunner {
       'actorId': actor.id,
       'binding': binding,
       'summary': task.resultSummary,
-      'completion': root['v2WorkItemCompletion']
+      'completion': root['v2WorkItemCompletion'],
+      if (binding['stage'] == 'produce') 'changes': root['productionChanges'],
     });
     final digest =
         sha256.convert(utf8.encode(text)).toString().substring(0, 24);
@@ -543,9 +567,16 @@ extension _DefaultWorkTaskRunnerProduction on DefaultWorkTaskRunner {
       final paths = declared
           .map((f) => p.isAbsolute(f) ? f : p.join(workspace!, f))
           .toList();
+      final completionIdentity = sha256
+          .convert(utf8.encode(jsonEncode([
+            for (final item in current.workItems)
+              if (item['kind'] != 'material') item['resultRef']
+          ])))
+          .toString()
+          .substring(0, 16);
       await publishCandidate(task,
           publicationId:
-              'production-${current.requestRevision}-${current.teamRevision}',
+              'production-${current.requestRevision}-${current.teamRevision}-$completionIdentity',
           requiredPaths: paths);
     }
   }

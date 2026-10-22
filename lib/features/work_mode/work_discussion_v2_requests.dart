@@ -69,6 +69,8 @@ extension _V2DiscussionRequests on _V2DiscussionSession {
     unawaited(cancellation.whenCancelled.then((_) => token.cancel()));
     try {
       _turnEndedByProtocolFailure = false;
+      final collaboration = await _collaborationForPrompt();
+      if (collaboration == null) return null;
       if (state.phase == 'reviewing' && !await _loadDeliveryEvidence()) {
         return null;
       }
@@ -77,7 +79,7 @@ extension _V2DiscussionRequests on _V2DiscussionSession {
       }
       final prepared = await runWithUnifiedMemory<List<Map<String, dynamic>>>(
         selector: MemoryContextSelector(runner.database),
-        conversationHistory: _messages(member),
+        conversationHistory: _messages(member, collaboration),
         observerCharacterId: member.character.id,
         actor: member.character,
         participantCharacterIds: state.activeMembers,
@@ -108,12 +110,12 @@ extension _V2DiscussionRequests on _V2DiscussionSession {
             'question', '', '当前必要讨论上下文超过成员模型窗口，请选择更大窗口模型。', '未截掉问题或认可。');
         return null;
       }
-      return await _requestProtocol(member, messages, token);
+      return await _requestProtocol(member, messages, token, collaboration);
     } on TimeoutException {
       if (!cancellation.isCancelled) {
         await _memberRequestFailure(member,
             cause: '成员模型请求超过单次时限'
-                '（${runner.roleTimeout.inSeconds} 秒）仍未返回正文。',
+                '（${runner.roleTimeout.inSeconds} 秒）未取得完整响应；已接收情况见执行动态，未采纳部分正文。',
             evidence: 'timeout=${runner.roleTimeout.inSeconds}s');
       }
       return null;
@@ -132,16 +134,96 @@ extension _V2DiscussionRequests on _V2DiscussionSession {
     }
   }
 
-  Future<WorkDiscussionV2Turn?> _requestProtocol(_DiscussionMember member,
-      List<Map<String, dynamic>> messages, CancelToken token) async {
-    // 四种机会互斥地各用一次：首次、协议修复、上游长度耗尽后的精简指令，以及正文
-    // 命中编号清单后的一次重写。每次循环要么返回，要么消耗掉其中一个标记，
-    // 所以最多请求四次。
+  /// 待审提案完整内容保存在附件，正式方案在全员认可前仍保持原样。
+  /// 审查请求必须同时带上这份已验摘要的候选，不能让成员从有界聊天预览猜方案。
+  Future<Map<String, dynamic>?> _collaborationForPrompt() async {
+    final collaboration = state.toPromptJson();
+    // 场景的版本由运行时生成；提案参考不混入禁止模型填写的字段。
+    collaboration['usageAssignments'] = [
+      for (final assignment in state.usageAssignments)
+        {...assignment}..remove('requestRevision')
+    ];
+    await _refreshFolderAuthorization();
+    collaboration['folderAuthorization'] = {
+      ..._folderAuthorization,
+      if (_folderAuthorizationRef.isNotEmpty)
+        'evidenceRef': _folderAuthorizationRef,
+    };
+    if (_beforeProduction) {
+      final store = runner.eventStore;
+      if (store != null) {
+        await store.writeDiscussionDetail(task.id, _formalPlanRef.substring(5),
+            jsonEncode(_formalPlanSnapshot));
+      }
+    }
+    final pendingProposals = state.issues.where((issue) =>
+        issue['status'] == 'open' &&
+        issue['kind'] == 'idea' &&
+        issue['resolution'] == 'scope-proposal');
+    final open = pendingProposals
+            .where((issue) => issue['requestRevision'] == state.requestRevision)
+            .firstOrNull ??
+        pendingProposals.firstOrNull;
+    if (open == null) return collaboration;
+    final issueId = open['id'] as String;
+    final reference = open['resolutionRef'];
+    if (reference is! String || !reference.startsWith('proposal:')) {
+      await _decision(
+        'question',
+        issueId,
+        '当前待审提案没有关联可核验的完整详情，已暂停评审。',
+        '没有把聊天预览当作正式提案，也没有改变现有方案。',
+      );
+      return null;
+    }
+    final store = runner.eventStore;
+    if (store == null ||
+        (open['requestRevision'] as int) > state.requestRevision) {
+      await _decision(
+        'question',
+        issueId,
+        '当前待审提案的保存记录或需求版本无法核对，已暂停评审。',
+        '没有把聊天预览当作正式提案，也没有改变现有方案。',
+      );
+      return null;
+    }
+    try {
+      final proposal = _proposalFromDetail(reference,
+          await store.readDiscussionDetail(task.id, reference.substring(9)));
+      // 旧提案只作修订依据，不能以新需求版本重新收票或自动采纳。
+      collaboration[open['requestRevision'] == state.requestRevision
+          ? 'pendingProposal'
+          : 'previousProposal'] = {
+        'issueId': issueId,
+        'resolutionRef': reference,
+        'requestRevision': open['requestRevision'],
+        'proposal': proposal,
+      };
+      return collaboration;
+    } on Object catch (error) {
+      await _decision(
+        'question',
+        issueId,
+        '当前待审提案详情无法完整读取或核验，已暂停评审。',
+        sanitizeWorkTaskError(error),
+      );
+      return null;
+    }
+  }
+
+  Future<WorkDiscussionV2Turn?> _requestProtocol(
+      _DiscussionMember member,
+      List<Map<String, dynamic>> messages,
+      CancelToken token,
+      Map<String, dynamic> collaboration) async {
+    // 协议/状态字段的定向修复、上游长度精简和公开正文重写都有各自的一次上限。
     var repairUsed = false;
     var compactUsed = false;
     var rewriteUsed = false;
+    Map<String, dynamic>? fieldRepair;
+    WorkDiscussionV2Turn? resolutionRepairOriginal;
     while (true) {
-      final response = await _requestWithRetries(member, messages, token);
+      var response = await _requestOnce(member, messages, token);
       if (cancellation.isCancelled || token.isCancelled) return null;
       if (response['success'] == false) {
         if (!compactUsed && _completionLimitExhausted(response)) {
@@ -169,10 +251,64 @@ extension _V2DiscussionRequests on _V2DiscussionSession {
         }
         return null;
       }
+      if (fieldRepair != null) {
+        try {
+          response = {
+            ...response,
+            'message': WorkDiscussionV2Turn.mergeProposalFieldRepair(
+                fieldRepair,
+                (response['message'] ?? response['content']) as String)
+          };
+          fieldRepair = null;
+        } on Object {
+          _turnEndedByProtocolFailure = true;
+          await runner._recordDiagnostic(task, '定向字段修复失败；未改写或采纳原提案。');
+          return null;
+        }
+      }
       var protocolError = '';
       final parsed = WorkDiscussionV2Turn.parse(response,
+          autonomous: state.isAutonomous,
           onInvalid: (reason) => protocolError = reason);
       if (parsed != null) {
+        final finalText = response['message'] ?? response['content'];
+        final repairOriginal = resolutionRepairOriginal;
+        if (repairOriginal != null) {
+          resolutionRepairOriginal = null;
+          if (!_sameTurnExceptResolutions(repairOriginal, parsed)) {
+            await runner._recordDiagnostic(
+              task,
+              '解决项定向修复改动了其他协作字段；已丢弃修复结果并保留原回应供状态闸门核验。',
+              kind: WorkTaskEventKind.failed,
+              title: '定向修复越界',
+            );
+            lastValidationError = _resolutionValidationError(
+                repairOriginal.resolutions, member.character.id);
+            return repairOriginal;
+          }
+        }
+        final resolutionError =
+            _resolutionValidationError(parsed.resolutions, member.character.id);
+        if (resolutionError.isNotEmpty) {
+          lastValidationError = resolutionError;
+          if (!repairUsed && finalText is String) {
+            repairUsed = true;
+            resolutionRepairOriginal = parsed;
+            await runner._recordDiagnostic(
+              task,
+              '成员解决项引用未通过状态校验；已针对 resolutions 字段进行一次有界修复。',
+              kind: WorkTaskEventKind.planning,
+              title: '解决项依据待修复',
+            );
+            messages = _protocolRepairMessages(
+              member,
+              finalText,
+              collaboration,
+              _resolutionEvidenceForPrompt(member.character.id),
+            );
+            continue;
+          }
+        }
         if (rewriteUsed ||
             !WorkPublicUpdateStream.looksLikeFormattedUpdate(
                 parsed.publicUpdateFull)) {
@@ -207,7 +343,16 @@ extension _V2DiscussionRequests on _V2DiscussionSession {
       // another vague instruction. Persona and optional chat previews are
       // not needed for syntax conversion; all authority remains present.
       repairUsed = true;
-      messages = _protocolRepairMessages(member, finalText);
+      fieldRepair =
+          WorkDiscussionV2Turn.proposalFieldRepair(finalText, protocolError);
+      messages = fieldRepair == null
+          ? _protocolRepairMessages(
+              member,
+              finalText,
+              collaboration,
+              _resolutionEvidenceForPrompt(member.character.id),
+            )
+          : _proposalFieldRepairMessages(member, fieldRepair, collaboration);
       if (messages.fold<int>(
               0,
               (total, message) =>
@@ -231,7 +376,7 @@ extension _V2DiscussionRequests on _V2DiscussionSession {
       CancelToken token,
       List<Map<String, dynamic>> sourceMessages) async {
     try {
-      final response = await _requestWithRetries(
+      final response = await _requestOnce(
           member, _rewriteMessages(member, turn, sourceMessages), token);
       if (cancellation.isCancelled || token.isCancelled) return null;
       if (response['success'] == false) return null;
@@ -328,7 +473,7 @@ extension _V2DiscussionRequests on _V2DiscussionSession {
             '原成员与责任保持不变，成员资格与模型配置仍可用。',
         hiddenNotes.isEmpty ? evidence : '$evidence；${hiddenNotes.join('')}',
         options: [...controls, ...replacements],
-        impact: '本轮没有产出正文；未更换成员、模型与责任。'
+        impact: '本次请求未取得可采纳的协作结果；未更换成员、模型与责任。'
             '请选择下一步：保留原成员重试，或先调整该成员的模型配置再重试。',
         router: true);
   }
@@ -343,7 +488,7 @@ extension _V2DiscussionRequests on _V2DiscussionSession {
   /// [rejection] 非空表示另一种形态：正文能解析，但方案被状态校验判废（[rejection]
   /// 就是那条校验错误）。成因不同、出路相同，所以共用同一套收口与阈值。
   Future<void> _protocolFailureDecision(_DiscussionMember member,
-      {String rejection = ''}) async {
+      {String rejection = '', String action = ''}) async {
     final role = state.team
         .where((m) => m['memberId'] == member.character.id)
         .firstOrNull?['role'] as String?;
@@ -372,26 +517,29 @@ extension _V2DiscussionRequests on _V2DiscussionSession {
             ? '未产出可解析的 v2 JSON 正文。'
             : boundedDiscussionText(lastValidationError,
                 maximum: WorkDiscussionRunner.invalidFinalPreviewCharacters);
+    final rejectionLabel = rejection.startsWith('解决项未被采纳：')
+        ? '解决项'
+        : switch (action) {
+            'propose' => '方案提案',
+            'approve' => '本人认可',
+            'decide' => '协调决议',
+            'investigate' => '调查结果',
+            _ => '协作更新',
+          };
     final reason = rejected
-        ? '成员 ${member.character.name} 连续 '
-            '${_V2DiscussionSession.protocolFailureFastStopLimit} 轮提交的方案都被校验判废，'
-            '没有带来任何被采纳的进展。'
+        ? '成员 ${member.character.name} 的同一项$rejectionLabel校验错误连续出现 '
+            '${_V2DiscussionSession.protocolFailureFastStopLimit} 轮；未采纳内容没有写入正式状态。'
         : '成员 ${member.character.name} 连续 '
             '${_V2DiscussionSession.protocolFailureFastStopLimit} 轮未产出可解析的 v2 协议正文，'
             '该模型很可能不具备稳定的结构化输出能力。';
     final impact = rejected
-        ? '本轮方案未通过校验；任务停在成员选择上，不会被无进展地反复重试。'
+        ? '本轮$rejectionLabel错误仍未解决；任务停在成员选择上，不会被无进展地反复重试。'
             '请选择下一步：保留原成员重试，或调整该成员的模型配置、更换成员后再继续。'
         : '本轮没有产出正文；任务停在成员选择上，不会被无产出地反复重试。'
             '请选择下一步：保留原成员重试，或调整该成员的模型配置、更换成员后再继续。';
-    await _decision(
-        'member',
-        member.character.id,
-        reason,
+    await _decision('member', member.character.id, reason,
         hiddenNotes.isEmpty ? evidence : '$evidence；${hiddenNotes.join('')}',
-        options: [...controls, ...replacements],
-        impact: impact,
-        router: true);
+        options: [...controls, ...replacements], impact: impact, router: true);
   }
 
   /// 成员本轮请求失败的成因与上游证据。
@@ -417,7 +565,15 @@ extension _V2DiscussionRequests on _V2DiscussionSession {
     return (
       cause:
           '${sanitizeWorkTaskError(WorkDiscussionTurn.fromResponse(response).failureReason)}。',
-      evidence: 'failureCode=${response['failureCode'] ?? 'unknown'}',
+      evidence: [
+        'failureCode=${response['failureCode'] ?? 'unknown'}',
+        for (final key in const [
+          'receivedCharacters',
+          'responseActivityCount',
+          'lastResponseActivityMs'
+        ])
+          if (response[key] is int) '$key=${response[key]}',
+      ].join('; '),
     );
   }
 
@@ -471,8 +627,50 @@ extension _V2DiscussionRequests on _V2DiscussionSession {
     return '$body（含 JSON 起点：${finalText.contains('{') ? '是' : '否'}）';
   }
 
+  List<Map<String, dynamic>> _proposalFieldRepairMessages(
+      _DiscussionMember member,
+      Map<String, dynamic> repair,
+      Map<String, dynamic> collaboration) {
+    final field = repair['field'] as String;
+    final original = repair['original'] as Map;
+    final proposal = original['proposal'] as Map;
+    final rules = switch (field) {
+      'workItems' =>
+        'workItems 为最多64项的数组。每项仅含 id、ownerId、dependencies、可选 kind；id/ownerId 为非空且最多128字符的字符串；dependencies 为最多64项非空ID字符串数组，每项最多128字符；kind 只能为 material 或 produce。不得携带状态、版本或结果引用。',
+      'acceptances' =>
+        'acceptances 为最多64项的数组。每项必须且仅含 id、method、requiredCapability，均为非空且最多128字符的字符串。不得携带状态、版本或证据引用。',
+      'usageAssignments' => WorkDiscussionProtocolText.autonomyRules,
+      _ => throw StateError('不支持的提案字段修复'),
+    };
+    return [
+      {
+        'role': 'system',
+        'content': '只修复指定 proposal 字段，返回只含该字段的 JSON 对象；不得返回完整提案。'
+            '保留原有 ID、负责人、依赖、验收条件和场景语义；仅移除运行时字段或修正协议格式。'
+            '不新增需求、授权、事实、测试结果或签字。缺少必要内容时如实返回 null，不能编造。\n'
+            '$rules\n以上只说明字段结构；本次仅返回 {"$field":修复后的数组}，不返回 schemaVersion、action 或 proposal 等外层字段。'
+      },
+      {
+        'role': 'user',
+        'content': jsonEncode({
+          'field': field,
+          'protocolError': lastValidationError,
+          'value': proposal[field],
+          if (field == 'usageAssignments') ...{
+            'currentAssignments': collaboration['usageAssignments'],
+            'acceptances': proposal['acceptances'],
+            'participantRoster': _participantRoster(),
+          },
+        })
+      }
+    ];
+  }
+
   List<Map<String, dynamic>> _protocolRepairMessages(
-          _DiscussionMember member, String originalFinal) =>
+          _DiscussionMember member,
+          String originalFinal,
+          Map<String, dynamic> collaboration,
+          List<Map<String, dynamic>> resolutionEvidence) =>
       [
         {
           'role': 'system',
@@ -480,6 +678,8 @@ extension _V2DiscussionRequests on _V2DiscussionSession {
               '${AgentPromptBuilder.replyGuidance}\n'
               '逐项修复 protocolError 指出的字段；若错误在 issues，每项只能保留 id、kind、target、problem、evidenceRef、retestCondition，'
               '非空文本应简洁（建议不超过 512 字符），evidenceRef 只能用真实证据键或空字符串。\n'
+              '若错误在 resolutions，逐项核对 resolutions[index].id 与 resolutions[index].evidenceRef：只可复制 availableResolutionEvidence 中的精确 ref，并满足该问题的证据要求；无匹配证据时删除该 resolution、保持问题开放，不能声称已解决或自行造证据。\n'
+              '若 protocolError 指向 artifactContract.verificationCommands，只允许在 executable 与每个 argument 字符串完全不变时，把 JSON 字符串或对象规范化为仅含 executable 和 arguments 的标准 JSON 字符串；对象必须严格只有这两个字段，不能增删参数或放宽验证基线，无法保真时 proposal=null。\n'
               '原回应字符串值内的半角双引号必须转义为 \\" 或改用「」，不得把它们原样留在字符串里破坏 JSON 语法。'
               '不补造事实、读取、测试、完成或成员签字。原回应没有明确的本人认可时 approval=null；'
               '未形成完整提案时 proposal=null，将实际意见放入 public_update。'
@@ -494,7 +694,8 @@ extension _V2DiscussionRequests on _V2DiscussionSession {
           'content': jsonEncode({
             'taskId': task.id,
             'memberId': member.character.id,
-            'collaboration': state.toPromptJson(),
+            'collaboration': collaboration,
+            'availableResolutionEvidence': resolutionEvidence,
             // 修复请求同样嵌入 `autonomyRules`，那份规则要求按名册的 memberId 对齐
             // 参与者；不给名册，模型只能拿显示名去凑 memberId。
             if (state.isAutonomous) 'participantRoster': _participantRoster(),
@@ -505,77 +706,240 @@ extension _V2DiscussionRequests on _V2DiscussionSession {
         }
       ];
 
-  Future<Map<String, dynamic>> _requestWithRetries(_DiscussionMember member,
-      List<Map<String, dynamic>> messages, CancelToken parent) {
-    var emptyRetried = false;
-    return RetryHandler.executeWithRetry<Map<String, dynamic>>(
-      maxRetries: WorkAgentLoop.defaultMaxModelRetries,
-      shouldRetryResult: (result) {
-        if (parent.isCancelled) return false;
-        // Unknown empty completions get one resend; proven budget exhaustion
-        // needs changed conditions, rather than another identical request.
-        if (result['success'] == false &&
-            result['failureCode'] == 'emptyResponse') {
-          final detail = result['emptyCompletionDetail'];
-          if (detail is Map &&
-              _exhaustedFinishReasons.contains(detail['finishReason'])) {
-            // 已明确到达上游完成长度，原样重发不会增加生成正文的空间。
-            return false;
-          }
-          if (emptyRetried) return false;
-          emptyRetried = true;
-          return true;
-        }
-        return RetryHandler.isTransientResult(result);
-      },
-      shouldRetryError: (error) =>
-          !parent.isCancelled && RetryHandler.isTransientError(error),
-      sleep: (delay) => Future.any([
-        Future<void>.delayed(delay),
-        cancellation.whenCancelled,
-      ]),
-      operation: (attempt) async {
-        if (parent.isCancelled) throw parent.cancelError!;
-        if (attempt.retryNumber > 0) {
-          await runner._recordDiagnostic(task,
-              '成员请求暂时失败，保留原成员与模型重试（${attempt.retryNumber}/${WorkAgentLoop.defaultMaxModelRetries}）。');
-          if (parent.isCancelled) throw parent.cancelError!;
-        }
-        // Each attempt owns its transport. A timed-out request must be
-        // cancelled before retrying, rather than continuing alongside it.
-        final token = CancelToken();
-        unawaited(parent.whenCancel.then((_) => token.cancel()));
-        try {
-          await runner._recordDiagnostic(
-            task,
-            '本次请求有单次时限，收到真实正文后才推进讨论。',
-            kind: WorkTaskEventKind.planning,
-            title: '正在等待成员模型回应',
-          );
-          if (parent.isCancelled) throw parent.cancelError!;
-          final result = await runner._sendTurnRequest(
-              task: task,
-              member: member,
-              conversationId: task.groupId,
-              messages: messages,
-              timeout: runner.roleTimeout,
-              cancelToken: token);
-          if (!parent.isCancelled &&
-              result['success'] == false &&
-              result['failureCode'] != 'emptyResponse') {
-            await runner._recordDiagnostic(
-                task, '成员请求失败：${sanitizeWorkTaskError(result['message'])}');
-          }
-          if (!parent.isCancelled && result['failureCode'] == 'emptyResponse') {
-            await runner._recordDiagnostic(task,
-                '讨论模型返回空内容。${describeEmptyCompletion(result['emptyCompletionDetail'])}');
-          }
-          return result;
-        } finally {
-          token.cancel();
-        }
-      },
+  bool _sameTurnExceptResolutions(
+      WorkDiscussionV2Turn before, WorkDiscussionV2Turn after) {
+    Object? canonical(Object? value) {
+      if (value is Map) {
+        final keys = value.keys.map((key) => key.toString()).toList()..sort();
+        return {
+          for (final key in keys) key: canonical(value[key]),
+        };
+      }
+      if (value is List) return value.map(canonical).toList(growable: false);
+      return value;
+    }
+
+    Object? toolJson(WorkDiscussionV2Turn turn) => turn.tool == null
+        ? null
+        : {
+            'name': turn.tool!.name.wireName,
+            'arguments': turn.tool!.arguments,
+          };
+    String signature(WorkDiscussionV2Turn turn) => jsonEncode(canonical({
+          'action': turn.action,
+          'publicUpdate': turn.publicUpdateFull,
+          'issueId': turn.issueId,
+          'nextMemberId': turn.nextMemberId,
+          'issues': turn.issues,
+          'proposal': turn.proposal,
+          'approval': turn.approval,
+          'decision': turn.decision,
+          'tool': toolJson(turn),
+        }));
+    return signature(before) == signature(after);
+  }
+
+  List<Map<String, dynamic>> _resolutionEvidenceForPrompt(String memberId) {
+    final references = <String, Map<String, dynamic>>{
+      if (_folderAuthorization['status'] == 'granted' &&
+          _folderAuthorizationRef.isNotEmpty)
+        _folderAuthorizationRef: {
+          'ref': _folderAuthorizationRef,
+          'kind': 'folder-authorization',
+          ..._folderAuthorization,
+          'use': '仅证明当前工作目录已有本地读写授权；只可关闭引用本任务目录授权提醒的 decision，不证明软件验收通过',
+        },
+      if (_beforeProduction && runner.eventStore != null)
+        _formalPlanRef: {
+          'ref': _formalPlanRef,
+          'kind': 'formal-plan',
+          'requestRevision': state.requestRevision,
+          'teamRevision': state.teamRevision,
+          'planDigest': state.usagePlanDigest,
+          'use': '仅问题提出者可据修订后的当前正式方案关闭制作前问题；不证明软件已运行或验收通过',
+        },
+    };
+    for (final entry in evidence.entries) {
+      final receipt = entry.value;
+      if (receipt['requestRevision'] != state.requestRevision ||
+          receipt['teamRevision'] != state.teamRevision) {
+        continue;
+      }
+      references[entry.key] = {
+        'ref': entry.key,
+        'kind': 'tool',
+        'issueId': receipt['issueId'],
+        'requestRevision': receipt['requestRevision'],
+        'teamRevision': receipt['teamRevision'],
+        'tool': receipt['tool'],
+      };
+    }
+
+    final contextBoundary = WorkContextBoundary.readAt(
+      runner.database.appSettingsBox,
+      task.groupId,
     );
+    void addVisibleMessage(Message? message, {String? kind}) {
+      if (message == null ||
+          message.groupId != task.groupId ||
+          (contextBoundary != null &&
+              !message.timestamp.isAfter(contextBoundary))) {
+        return;
+      }
+      final visible = message.visibleToCharacterIds;
+      if (visible.isEmpty || !visible.contains(memberId)) return;
+      references.putIfAbsent(message.id, () {
+        final preview = message.content.trim();
+        return {
+          'ref': message.id,
+          'kind': kind ?? 'group-message',
+          'senderId': message.senderId,
+          if (preview.isNotEmpty)
+            'preview': boundedDiscussionText(preview, maximum: 200),
+        };
+      });
+    }
+
+    for (final issue in state.issues.where((i) => i['status'] == 'open')) {
+      final ref = issue['evidenceRef'] as String;
+      if (!ref.startsWith('investigation:')) {
+        addVisibleMessage(runner.database.messageBox.get(ref),
+            kind: 'issue-evidence');
+      }
+    }
+    for (final decision in state.decisions.where((d) =>
+        {'answered', 'waived'}.contains(d['status']) &&
+        (d['responseRef'] as String).isNotEmpty)) {
+      addVisibleMessage(
+        runner.database.messageBox.get(decision['responseRef'] as String),
+        kind: 'user-decision',
+      );
+    }
+
+    final recent = runner.database.messageBox.values.where((message) {
+      final visible = message.visibleToCharacterIds;
+      return message.groupId == task.groupId &&
+          visible.isNotEmpty &&
+          visible.contains(memberId) &&
+          (message.content.trim().isNotEmpty ||
+              message.media?.isNotEmpty == true);
+    }).toList()
+      ..sort((left, right) => left.timestamp.compareTo(right.timestamp));
+    final visibleRecent = WorkContextBoundary.visible(
+      runner.database.appSettingsBox,
+      task.groupId,
+      recent,
+    );
+    for (final message in visibleRecent.skip(
+        visibleRecent.length > WorkDiscussionRunner.maxCollaborationChatPreviews
+            ? visibleRecent.length -
+                WorkDiscussionRunner.maxCollaborationChatPreviews
+            : 0)) {
+      addVisibleMessage(message);
+    }
+    return references.values.toList(growable: false);
+  }
+
+  Future<void> _refreshFolderAuthorization() async {
+    _folderAuthorization = const {'status': 'unknown'};
+    _folderAuthorizationRef = '';
+    final grants = runner.workspaceService?.grantService;
+    final store = runner.eventStore;
+    final root =
+        runner.database.workModeWorkspaceBox.get(task.groupId)?.workDirPath;
+    if (grants == null || store == null || root == null || root.isEmpty) return;
+    await grants.load();
+    final readable = await grants.isPathAuthorizedResolved(root);
+    final writable = readable && await grants.isPathWritableResolved(root);
+    final snapshot = <String, dynamic>{
+      'rootPath': root,
+      'status': writable
+          ? 'granted'
+          : readable
+              ? 'readOnly'
+              : 'missing',
+      'requestRevision': state.requestRevision,
+      'teamRevision': state.teamRevision,
+    };
+    final body = jsonEncode(snapshot);
+    final ref = _key('folder-grant', body);
+    await store.writeDiscussionDetail(task.id, ref.substring(13), body);
+    _folderAuthorization = snapshot;
+    _folderAuthorizationRef = ref;
+  }
+
+  Future<Map<String, dynamic>> _requestOnce(_DiscussionMember member,
+      List<Map<String, dynamic>> messages, CancelToken parent) async {
+    if (parent.isCancelled) throw parent.cancelError!;
+    // Failed group-member calls pause for an explicit recovery choice instead
+    // of silently spending more tokens on the same request.
+    final token = CancelToken();
+    unawaited(parent.whenCancel.then((_) => token.cancel()));
+    try {
+      final capability =
+          runner.gateway.capability(member.provider!, member.config!.modelName);
+      final channel =
+          capability.supportsStreaming ? '流式' : '非流式（当前模型能力未声明支持流式）';
+      final sizes = <String, int>{};
+      try {
+        final context = jsonDecode(messages.last['content'] as String) as Map;
+        for (final key in const [
+          'currentTaskContext',
+          'collaboration',
+          'evidence',
+          'skills',
+          'recentChatMessages',
+          'recentDiscussion'
+        ]) {
+          if (context.containsKey(key)) {
+            sizes[key] = jsonEncode(context[key]).length;
+          }
+        }
+        final collaboration = context['collaboration'];
+        if (collaboration is Map) {
+          for (final key in const [
+            'issues',
+            'decisions',
+            'plan',
+            'usageAssignments'
+          ]) {
+            sizes['collaboration.$key'] = jsonEncode(collaboration[key]).length;
+          }
+        }
+      } on Object {
+        // A repair context may use a different shape; never log its raw body.
+      }
+      await runner._recordDiagnostic(
+        task,
+        '当前通道：$channel；正在等待成员完整响应；单次总时限 ${runner.roleTimeout.inSeconds} 秒，'
+        '请求文本共 ${messages.fold<int>(0, (n, m) => n + (m['content'] is String ? (m['content'] as String).length : 0))} 字符。'
+        '连接测试成功不代表此完整任务请求已返回；收到可采纳结果后才推进讨论。'
+        '${sizes.isEmpty ? '' : '各部分字符数：${jsonEncode(sizes)}'}',
+        kind: WorkTaskEventKind.planning,
+        title: '正在等待成员模型回应',
+      );
+      if (parent.isCancelled) throw parent.cancelError!;
+      final result = await runner._sendTurnRequest(
+          task: task,
+          member: member,
+          conversationId: task.groupId,
+          messages: messages,
+          timeout: runner.roleTimeout,
+          cancelToken: token);
+      if (!parent.isCancelled &&
+          result['success'] == false &&
+          result['failureCode'] != 'emptyResponse') {
+        await runner._recordDiagnostic(
+            task, '成员请求失败：${sanitizeWorkTaskError(result['message'])}');
+      }
+      if (!parent.isCancelled && result['failureCode'] == 'emptyResponse') {
+        await runner._recordDiagnostic(task,
+            '讨论模型返回空内容。${describeEmptyCompletion(result['emptyCompletionDetail'])}');
+      }
+      return result;
+    } finally {
+      token.cancel();
+    }
   }
 
   Future<void> _attachDetail(Map<String, dynamic> proposal, String responseRef,

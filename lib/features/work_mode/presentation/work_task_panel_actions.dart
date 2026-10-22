@@ -18,6 +18,9 @@ class _TaskActions extends StatelessWidget {
   final WorkTaskAction? onSelectVisionModel;
   final WorkTaskAction? onRetry;
   final WorkTaskAction? onReauthorize;
+  final WorkTaskReply? onCommandReapproval;
+  final WorkTaskAction? onSupplement;
+  final WorkTaskAction? onCompletionChoice;
   final WorkTaskAction? onViewConflict;
   final WorkTaskAction? onUndo;
   final WorkTaskAction? onLater;
@@ -65,6 +68,9 @@ class _TaskActions extends StatelessWidget {
     required this.onSelectVisionModel,
     required this.onRetry,
     required this.onReauthorize,
+    this.onCommandReapproval,
+    this.onSupplement,
+    this.onCompletionChoice,
     required this.onViewConflict,
     required this.onUndo,
     required this.onLater,
@@ -85,6 +91,39 @@ class _TaskActions extends StatelessWidget {
     this.dialogContext,
     required this.runAction,
   });
+
+  Future<void> _chooseCommandReapproval(BuildContext context) async {
+    final commands = reviewableCommandCheckpointsFor(task);
+    final selected = await _showTaskModal<String>(() => showDialog<String>(
+        context: dialogContext ?? context,
+        builder: (context) => AlertDialog(
+              title: const Text('选择要重新提交审批的命令'),
+              content: SizedBox(
+                  width: 600,
+                  height: 360,
+                  child: Column(children: [
+                    const Text(
+                        '选择已拒绝命令或当前合同检查。仅请求正常审批，不立即执行；随后点击“继续”。历史拒绝记录保留。'),
+                    Expanded(
+                        child: ListView(children: [
+                      for (final checkpoint in commands)
+                        ListTile(
+                            title: Text(jsonEncode(
+                                (jsonDecode(checkpoint) as Map)['args'])),
+                            trailing: const Icon(Icons.chevron_right),
+                            onTap: () => Navigator.pop(context, checkpoint)),
+                    ])),
+                  ])),
+              actions: [
+                TextButton(
+                    onPressed: () => Navigator.pop(context),
+                    child: const Text('取消'))
+              ],
+            )));
+    if (selected != null) {
+      await runAction((id) => onCommandReapproval!(id, selected));
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -111,6 +150,7 @@ class _TaskActions extends StatelessWidget {
         WorkTaskExecutionPolicy.enforcesCumulativeLimits(task) &&
             task.softLimitReached &&
             _isPausedStatus(task.status);
+    final canResumeDiscussion = _canResumeV2GroupDiscussion(task);
     final hasUserAction = WorkTaskUserAction.forTask(task).isNotEmpty ||
         _hasPendingDiscussionCheckpoint(task);
     // Recovery controls are meaningful only at a user-resumable boundary. A
@@ -122,9 +162,9 @@ class _TaskActions extends StatelessWidget {
     final canShowContinue = task.isUserStopped
         ? continueReason == null
         : !task.isTerminal &&
-            (task.status == AgentTaskStatus.paused ||
-                task.status == AgentTaskStatus.interrupted) &&
-            (isSoftLimitPause ||
+            _isPausedStatus(task.status) &&
+            (canResumeDiscussion ||
+                isSoftLimitPause ||
                 failure == null ||
                 failure.canContinue ||
                 failure.canContinueAfterRolePermissionUpdate);
@@ -223,7 +263,9 @@ class _TaskActions extends StatelessWidget {
               final sent = await runAction(
                 (_) => replyAction(task.id, reply),
               );
-              if (sent && replyController.text.trim() == reply) {
+              if (context.mounted &&
+                  sent &&
+                  replyController.text.trim() == reply) {
                 replyController.clear();
               }
             },
@@ -387,11 +429,10 @@ class _TaskActions extends StatelessWidget {
                 icon: const Icon(Icons.verified_outlined),
                 label: Text('确认交付 ${confirmableArtifacts.length} 个文件'),
               ),
-            // 停止后的记录只有"从头开始"这一条重试路径（`canRestartAfterUserStop`
-            // 为假时 `_implRetry` 会拒绝），所以别给它摆一个点下去必然报错的重试。
+            // 旧失败会留在终态记录上，按钮必须同时满足执行端的状态限制。
             if (onRetry != null &&
                 (canRestartFromBeginning ||
-                    !task.isUserStopped &&
+                    WorkTaskCoordinator.allowsCheckpointRetry(task) &&
                         !isSoftLimitPause &&
                         failure?.canRetry == true))
               FilledButton.icon(
@@ -423,6 +464,23 @@ class _TaskActions extends StatelessWidget {
                 icon: const Icon(Icons.compare_arrows_rounded),
                 label: const Text('查看冲突'),
               ),
+            if (!task.isTerminal &&
+                onSupplement != null &&
+                WorkTaskExecutionPolicy.isValidatedV2GroupTask(task))
+              OutlinedButton.icon(
+                  key: const Key('work-task-supplement'),
+                  onPressed:
+                      actionInFlight ? null : () => runAction(onSupplement!),
+                  icon: const Icon(Icons.edit_note),
+                  label: const Text('补充需求／暂停')),
+            if (onCompletionChoice != null &&
+                WorkTaskCompletionChoice.pending(task))
+              FilledButton(
+                  key: const Key('work-task-completion-choice'),
+                  onPressed: actionInFlight
+                      ? null
+                      : () => runAction(onCompletionChoice!),
+                  child: const Text('确认本轮成果')),
             if (!task.isTerminal)
               Tooltip(
                 message: stopReason ?? '停止当前任务。',
@@ -439,6 +497,16 @@ class _TaskActions extends StatelessWidget {
                   icon: const Icon(Icons.stop_circle_outlined),
                   label: const Text('停止'),
                 ),
+              ),
+            if (onCommandReapproval != null &&
+                reviewableCommandCheckpointsFor(task).isNotEmpty)
+              OutlinedButton.icon(
+                key: const Key('work-task-command-reapproval'),
+                onPressed: actionInFlight
+                    ? null
+                    : () => _chooseCommandReapproval(context),
+                icon: const Icon(Icons.fact_check_outlined),
+                label: const Text('重新提交命令审批'),
               ),
             if (canShowContinue)
               Tooltip(

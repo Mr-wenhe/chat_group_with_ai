@@ -447,6 +447,9 @@ String? _continueUnavailableReasonForPanel(AgentTask task) {
   // 用户停止也是终态，但它带着完整检查点，继续就是接着跑；其余终态没有可续的
   // 东西。这条分支必须排在下面所有守卫之前——它决定的是"该不该有继续入口"。
   if (task.isTerminal && !task.isUserStopped) return '任务已结束，无需继续。';
+  if (WorkTaskCompletionChoice.pending(task)) {
+    return '本轮成果待确认，请选择可完成、继续测试或补充需求。';
+  }
   final discussion = WorkDiscussionState.decodeExecutionState(
     task.executionStateJson,
   );
@@ -460,11 +463,11 @@ String? _continueUnavailableReasonForPanel(AgentTask task) {
   // 任何角色会再把它跑起来，而 v2 又不允许"从头开始"清空协作记录。这时"继续"就是
   // 重新进入讨论的唯一入口，按"讨论未完成"挡掉，任务既答不了也退不出。
   //
+  // 「稍后处理」同样会取消讨论并设置 resumeRequired，也必须开放这个重入入口。
   // 恢复后由协调器的讨论门禁（`_discussionGateFailure`）拦在执行之前：讨论没准备
   // 好就只重开讨论，不会提前执行。旧 v1 检查点没有这条重入路径（继续会直接抛
   // "请先完成群讨论"），保持原样挡住。
-  final reentrantDiscussion = task.isUserStopped &&
-      WorkTaskExecutionPolicy.isValidatedV2GroupTask(task);
+  final reentrantDiscussion = _canResumeV2GroupDiscussion(task);
   if (!reentrantDiscussion && _hasPendingGroupDiscussion(task)) {
     return '请先完成群讨论并确定最终执行角色。';
   }
@@ -489,7 +492,10 @@ String? _continueUnavailableReasonForPanel(AgentTask task) {
     // 用户停止的这条记录不能「重试」：`_implRetry` 只放行"从头开始"那条路，其余
     // 情况一律以状态守卫拒绝。对它建议"先点重试"既指了一条不存在的出路，又会让
     // 「继续」被这条非空原因挡在门外——而「继续」本身就是从同一个安全检查点接着跑。
-    if (!isSoftLimitPause && failure.canRetry && !task.isUserStopped) {
+    if (!isSoftLimitPause &&
+        failure.canRetry &&
+        WorkTaskCoordinator.allowsCheckpointRetry(task) &&
+        !reentrantDiscussion) {
       return '请先点击“重试”从安全检查点继续。';
     }
     if (failure.canContinue) return null;
@@ -517,6 +523,11 @@ bool _hasPendingGroupDiscussion(AgentTask task) {
   return discussion.present &&
       (discussion.state == null || !discussion.state!.isExecutionReady);
 }
+
+bool _canResumeV2GroupDiscussion(AgentTask task) =>
+    WorkTaskExecutionPolicy.isValidatedV2GroupTask(task) &&
+    _hasPendingGroupDiscussion(task) &&
+    (task.isUserStopped || _isPausedStatus(task.status) && task.resumeRequired);
 
 bool _requiresExplicitCommandRequest(AgentTask task) {
   try {

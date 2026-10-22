@@ -8,6 +8,7 @@ import 'package:chat_group/features/work_mode/work_task_event_store.dart';
 import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/features/agentic/tool_request.dart';
 import 'package:chat_group/features/work_mode/agent_decision.dart';
+import 'package:chat_group/features/work_mode/agent_decision_parser.dart';
 import 'package:chat_group/features/work_mode/work_agent_loop.dart';
 import 'package:chat_group/features/work_mode/work_change_plan.dart';
 import 'package:chat_group/features/work_mode/work_handoff_state.dart';
@@ -16,6 +17,7 @@ import 'package:chat_group/features/work_mode/work_task_event.dart';
 import 'package:chat_group/features/work_mode/work_task_coordinator.dart';
 import 'package:chat_group/features/work_mode/work_task_budget_wait.dart';
 import 'package:chat_group/features/work_mode/work_discussion_state.dart';
+import 'package:chat_group/features/work_mode/work_collaboration_state.dart';
 import 'package:chat_group/features/work_mode/work_context_builder.dart';
 import 'package:chat_group/features/work_mode/work_failure.dart';
 import 'package:chat_group/features/work_mode/work_model_deadline.dart';
@@ -231,6 +233,32 @@ Map<String, dynamic> _stagedWriteDecision(String path, String title) =>
       },
     );
 
+AgentTask _singleHtmlProductionTask({
+  List<String> files = const ['game.html'],
+}) {
+  final raw = candidateTestState(type: 'software', format: 'html').toJson();
+  raw['artifactContract'] = {
+    ...Map<String, dynamic>.from(raw['artifactContract'] as Map),
+    'files': files,
+    'verificationCommands': ['{"executable":"true","arguments":[]}'],
+  };
+  final collaboration = WorkCollaborationState.tryParse(raw);
+  if (collaboration == null) throw StateError('single HTML fixture is invalid');
+  final task = candidateTestTask(collaboration);
+  final execution = jsonDecode(task.executionStateJson) as Map<String, dynamic>;
+  execution['workItemExecution'] = {
+    'stage': 'produce',
+    'workItemId': 'produce',
+    'iterationId': 'unpublished',
+    'requestRevision': 1,
+    'teamRevision': 1,
+    'verificationRevision': 1,
+    'actorId': 'a',
+  };
+  task.executionStateJson = jsonEncode(execution);
+  return task;
+}
+
 /// `command.run` 的最小定义：只用它验证"成功命令会清掉重建计数"。
 WorkToolDefinition _commandRunFixture(_FakeTool tool) => WorkToolDefinition(
       name: AgentToolName.commandRun,
@@ -304,6 +332,289 @@ WorkAgentLoop _loop({
 }
 
 void main() {
+  for (final scenario in ['completed', 'failed']) {
+    final partialFailure = scenario == 'failed';
+    test(
+        'command-generated artifact changes rerun the contract check scenario=$scenario',
+        () async {
+      final task = _singleHtmlProductionTask();
+      final model = _FakeModel();
+      for (final executable in ['writer1', 'true', 'writer2', 'true']) {
+        model.responses
+            .add(_toolDecision(name: AgentToolName.commandRun, arguments: {
+          'executable': executable,
+          'arguments': <String>[],
+          'workingDirectory': '/workspace',
+          'declaredImpact': ['/workspace/game.html'],
+        }));
+      }
+      model.responses.add(_finishDecision('完成制作'));
+      var checks = 0;
+      final loop = _loop(
+          model: model,
+          registry: WorkToolRegistry(definitions: [
+            WorkToolDefinition(
+              name: AgentToolName.commandRun,
+              access: WorkToolAccess.mutation,
+              schema: const WorkToolSchema(fields: {
+                'executable': WorkToolValueType.string,
+                'arguments': WorkToolValueType.stringList,
+                'workingDirectory': WorkToolValueType.string,
+                'declaredImpact': WorkToolValueType.stringList,
+              }, required: {
+                'executable',
+                'arguments'
+              }),
+              mutationPipeline: _recordingPipeline([]),
+              handler: (invocation) async {
+                if (invocation.arguments['executable'] == 'true') {
+                  checks++;
+                  return const WorkToolResult.success(
+                      message: '真实检查已执行',
+                      data: {
+                        'runStatus': 'completed',
+                        'exitCode': 0,
+                      });
+                }
+                if (partialFailure &&
+                    invocation.arguments['executable'] == 'writer2') {
+                  return const WorkToolResult.failed(
+                      message: '命令部分写入后失败',
+                      failureCode: 'commandFailed',
+                      data: {
+                        'runStatus': 'failed',
+                        'exitCode': 1,
+                        'artifactPaths': ['/workspace/game.html'],
+                      });
+                }
+                // Production's command bridge reports changed artifact paths without hashes.
+                return const WorkToolResult.success(
+                    message: '已实际改写game.html',
+                    data: {
+                      'runStatus': 'completed',
+                      'exitCode': 0,
+                      'artifactPaths': ['/workspace/game.html'],
+                    });
+              },
+            ),
+          ]));
+      final result = await loop.execute(task);
+      expect(result.status, WorkAgentLoopStatus.workItemCompleted,
+          reason: result.message);
+      expect(checks, 2,
+          reason:
+              'two distinct producer commands changed the same output; each requires a real check');
+    }, timeout: const Timeout(Duration(seconds: 30)));
+  }
+  test('v2 浏览器相同按钮的新决策逐次执行，不被持久化写入去重吞掉', () async {
+    final model = _FakeModel();
+    for (var i = 0; i < 10; i++) {
+      model.responses.add({
+        'success': true,
+        'content': jsonEncode({
+          'action': 'tool',
+          'completion': null,
+          'public_update': '执行下一次骰点点击',
+          'tool': {
+            'name': 'browser.context',
+            'arguments': {
+              'operation': 'click',
+              'sessionRef': 'browser:aaaaaaaaaaaaaaaaaaaaaaaa',
+              'label': '测试：固定骰点 6'
+            }
+          },
+        })
+      });
+    }
+    model.responses.add(_finishDecision('本工作项完成'));
+    var clicks = 0;
+    final loop = WorkAgentLoop(
+        model: model.call,
+        parser: const AgentDecisionParser(allowBrowserContext: true),
+        registry: WorkToolRegistry(definitions: [
+          WorkToolDefinition(
+            name: AgentToolName.browserContext,
+            access: WorkToolAccess.mutation,
+            schema: const WorkToolSchema(fields: {
+              'operation': WorkToolValueType.string,
+              'sessionRef': WorkToolValueType.string,
+              'label': WorkToolValueType.string
+            }, required: {
+              'operation'
+            }),
+            mutationPipeline: _recordingPipeline(<String>[]),
+            handler: (_) async {
+              clicks++;
+              return WorkToolResult.success(message: '点击完成', data: {
+                'page': {'visibleText': '当前步数 $clicks'},
+                'candidateDigest': 'digest'
+              });
+            },
+          )
+        ]));
+    final task = candidateTestTask(candidateTestState());
+    final root = jsonDecode(task.executionStateJson) as Map<String, dynamic>;
+    root['workItemExecution'] = {
+      'requestRevision': 1,
+      'teamRevision': 1,
+      'verificationRevision': 1,
+      'actorId': 'a',
+      'stage': 'verify'
+    };
+    task.executionStateJson = jsonEncode(root);
+    final result = await loop.execute(task);
+    expect(result.status, WorkAgentLoopStatus.workItemCompleted,
+        reason: result.message);
+    expect(clicks, 10);
+    expect(jsonEncode(model.requests.last.messages),
+        contains('browserCurrentPage'));
+    expect(jsonEncode(model.requests.last.messages), contains('当前步数 10'));
+  }, timeout: const Timeout(Duration(seconds: 30)));
+
+  test('v2 浏览器失败后保留真实错误并停止重放', () async {
+    final model = _FakeModel()
+      ..responses.add({
+        'success': true,
+        'content': jsonEncode({
+          'action': 'tool',
+          'completion': null,
+          'public_update': '点击当前页面的掷骰按钮',
+          'tool': {
+            'name': 'browser.context',
+            'arguments': {
+              'operation': 'click',
+              'sessionRef': 'browser:aaaaaaaaaaaaaaaaaaaaaaaa',
+              'label': '掷骰',
+            },
+          },
+        }),
+      });
+    var browserCalls = 0;
+    final loop = WorkAgentLoop(
+      model: model.call,
+      parser: const AgentDecisionParser(allowBrowserContext: true),
+      registry: WorkToolRegistry(definitions: [
+        WorkToolDefinition(
+          name: AgentToolName.browserContext,
+          access: WorkToolAccess.mutation,
+          schema: const WorkToolSchema(fields: {
+            'operation': WorkToolValueType.string,
+            'sessionRef': WorkToolValueType.string,
+            'label': WorkToolValueType.string,
+          }, required: {
+            'operation',
+          }),
+          mutationPipeline: _recordingPipeline(<String>[]),
+          handler: (_) async {
+            browserCalls++;
+            return const WorkToolResult.retryableFailure(
+              message: '离线浏览器窗口已关闭。',
+            );
+          },
+        ),
+      ]),
+      maxToolRetries: 1,
+      maxModelRetries: 1,
+    );
+    final task = candidateTestTask(candidateTestState());
+    final execution =
+        jsonDecode(task.executionStateJson) as Map<String, dynamic>;
+    execution['workItemExecution'] = {
+      'requestRevision': 1,
+      'teamRevision': 1,
+      'verificationRevision': 1,
+      'actorId': 'a',
+      'stage': 'verify',
+    };
+    task.executionStateJson = jsonEncode(execution);
+
+    final result = await loop.execute(task);
+
+    expect(result.status, WorkAgentLoopStatus.failed);
+    expect(result.message, contains('离线浏览器窗口已关闭'));
+    expect(browserCalls, 1);
+    expect(model.requests, hasLength(1));
+  }, timeout: const Timeout(Duration(seconds: 30)));
+
+  test('v2 浏览器断言绑定错误只定向修复一次，不等待用户授权', () async {
+    final model = _FakeModel();
+    Map<String, dynamic> invalidAssert() => {
+          'success': true,
+          'content': jsonEncode({
+            'action': 'tool',
+            'completion': null,
+            'public_update': '检查当前验收结果',
+            'tool': {
+              'name': 'browser.context',
+              'arguments': {
+                'operation': 'assert',
+                'sessionRef': 'browser:aaaaaaaaaaaaaaaaaaaaaaaa',
+                'acceptanceId': 'qa',
+                'expectedText': '不属于当前验收预期的文字',
+              },
+            },
+          }),
+        };
+    model.responses
+      ..add(invalidAssert())
+      ..add(invalidAssert());
+    var browserCalls = 0;
+    final loop = WorkAgentLoop(
+      model: model.call,
+      parser: const AgentDecisionParser(allowBrowserContext: true),
+      registry: WorkToolRegistry(definitions: [
+        WorkToolDefinition(
+          name: AgentToolName.browserContext,
+          access: WorkToolAccess.mutation,
+          schema: const WorkToolSchema(fields: {
+            'operation': WorkToolValueType.string,
+            'sessionRef': WorkToolValueType.string,
+            'acceptanceId': WorkToolValueType.string,
+            'expectedText': WorkToolValueType.string,
+          }, required: {
+            'operation',
+            'sessionRef',
+            'acceptanceId',
+            'expectedText',
+          }),
+          mutationPipeline: _recordingPipeline(<String>[]),
+          handler: (_) async {
+            browserCalls++;
+            return const WorkToolResult.failed(
+              message: '断言必须绑定本人场景中的验收项，且预期文字须来自已确认的 expectedResult。',
+              failureCode: 'browserAssertionBinding',
+            );
+          },
+        ),
+      ]),
+    );
+    final task = candidateTestTask(
+      candidateTestState(type: 'software', format: 'html'),
+    );
+    final execution =
+        jsonDecode(task.executionStateJson) as Map<String, dynamic>;
+    execution['workItemExecution'] = {
+      'requestRevision': 1,
+      'teamRevision': 1,
+      'verificationRevision': 1,
+      'actorId': 'a',
+      'stage': 'verify',
+    };
+    task.executionStateJson = jsonEncode(execution);
+
+    final result = await loop.execute(task);
+
+    expect(result.status, WorkAgentLoopStatus.failed);
+    expect(result.message, contains('一次定向纠正后仍未绑定'));
+    expect(browserCalls, 2);
+    expect(model.requests, hasLength(2));
+    expect(
+      jsonEncode(model.requests[1].messages),
+      contains('从当前本人场景的 acceptanceIds 选择验收 ID'),
+    );
+    expect(task.status, isNot(AgentTaskStatus.paused));
+  }, timeout: const Timeout(Duration(seconds: 30)));
+
   test('REREVIEW2 whitespace-sensitive distinct HTML files complete', () async {
     final model = _FakeModel();
     for (var i = 1; i <= 6; i++) {
@@ -427,6 +738,50 @@ void main() {
     expect(stopped.status, WorkAgentLoopStatus.paused);
     expect(replay.requests, isEmpty);
     expect(mutations, 1);
+  });
+
+  test('v2 identical read content stalls despite changing range arguments',
+      () async {
+    final model = _FakeModel();
+    for (var index = 0; index < 12; index++) {
+      model.responses.add(_toolDecision(arguments: {
+        'path': 'part.txt',
+        'byteLength': 1000 + index,
+      }));
+    }
+    final task = candidateTestTask(candidateTestState());
+    final root = jsonDecode(task.executionStateJson) as Map<String, dynamic>;
+    root['workItemExecution'] = {
+      'requestRevision': 1,
+      'teamRevision': 1,
+      'verificationRevision': 1,
+      'actorId': 'a',
+      'stage': 'produce'
+    };
+    task.executionStateJson = jsonEncode(root);
+    final registry = WorkToolRegistry(definitions: [
+      WorkToolDefinition(
+        name: AgentToolName.workspaceRead,
+        access: WorkToolAccess.readOnly,
+        schema: const WorkToolSchema(fields: {
+          'path': WorkToolValueType.string,
+          'byteLength': WorkToolValueType.integer,
+        }, required: {
+          'path'
+        }),
+        handler: (invocation) async => WorkToolResult.success(data: {
+          'ok': true,
+          'path': '/work/part.txt',
+          'content': '同一份已读正文',
+          'bytesRead': invocation.arguments['byteLength'],
+          'truncated': false,
+        }),
+      )
+    ]);
+    final result = await _loop(model: model, registry: registry).execute(task);
+    expect(result.status, WorkAgentLoopStatus.paused);
+    expect(task.lastError, contains('任务停滞'));
+    expect(model.requests.length, 9);
   });
 
   test('discussion gate blocks model decisions and tools before readiness',
@@ -1095,6 +1450,29 @@ void main() {
     expect(result.modelRetryCount, 1);
   });
 
+  test('validated v2 group reports one transient model failure without replay',
+      () async {
+    final model = _FakeModel()
+      ..responses.add({
+        'success': false,
+        'statusCode': 503,
+        'message': '上游暂时不可用。',
+      });
+    final loop = _loop(
+      model: model,
+      registry: WorkToolRegistry(),
+      maxModelRetries: 1,
+    );
+    final task = _singleHtmlProductionTask();
+
+    final result = await loop.execute(task);
+
+    expect(result.status, WorkAgentLoopStatus.failed);
+    expect(result.message, contains('上游暂时不可用'));
+    expect(model.requests, hasLength(1));
+    expect(result.modelRetryCount, 0);
+  }, timeout: const Timeout(Duration(seconds: 30)));
+
   test('pauses instead of failing when a model retry reaches the action limit',
       () async {
     final model = _FakeModel()
@@ -1434,6 +1812,80 @@ void main() {
     expect(WorkFailure.fromTask(task), isNull);
   });
 
+  test('v2 repeated rejected command replans without resubmitting approval',
+      () async {
+    final command = {
+      'executable': 'python3',
+      'arguments': ['-c', 'print(1)'],
+      'workingDirectory': '/workspace',
+      'declaredImpact': ['/workspace/game.html'],
+    };
+    final model = _FakeModel()
+      ..responses.addAll([
+        _toolDecision(name: AgentToolName.commandRun, arguments: command),
+        _toolDecision(name: AgentToolName.commandRun, arguments: command),
+        _toolDecision(
+          name: AgentToolName.workspaceRead,
+          path: '/workspace/game.html',
+        ),
+        _toolDecision(name: AgentToolName.commandRun, arguments: command),
+      ]);
+    final tool = _FakeTool()
+      ..behavior = (_) => const WorkToolResult.success(
+            message: '用户拒绝了该变更，未执行。',
+            data: {'rejected': true},
+          );
+    final readTool = _FakeTool()
+      ..behavior = (_) => const WorkToolResult.success(
+            message: '候选文件读取成功。',
+            data: {
+              'ok': true,
+              'path': '/workspace/game.html',
+              'content': '<!doctype html><html></html>',
+            },
+          );
+    final task = _singleHtmlProductionTask();
+    final loop = _loop(
+      model: model,
+      registry: WorkToolRegistry(definitions: [
+        WorkToolDefinition(
+          name: AgentToolName.commandRun,
+          access: WorkToolAccess.mutation,
+          schema: const WorkToolSchema(fields: {
+            'executable': WorkToolValueType.string,
+            'arguments': WorkToolValueType.stringList,
+            'workingDirectory': WorkToolValueType.string,
+            'declaredImpact': WorkToolValueType.stringList,
+          }, required: {
+            'executable',
+            'arguments',
+            'workingDirectory',
+            'declaredImpact',
+          }),
+          handler: tool.call,
+          mutationPipeline: _recordingPipeline(<String>[]),
+        ),
+        _definition(AgentToolName.workspaceRead, readTool),
+      ]),
+    );
+
+    final result = await loop.execute(task);
+
+    expect(result.status, WorkAgentLoopStatus.paused);
+    expect(result.message, contains('自动修复没有取得进展'));
+    expect(tool.calls, 1);
+    expect(readTool.calls, 1);
+    expect(model.requests, hasLength(4));
+    expect(jsonEncode(model.requests[2].messages), contains('不会再次提交相同审批'));
+    expect(jsonEncode(model.requests[2].messages), contains('不能记作静态命令通过'));
+    expect(jsonEncode(model.requests[3].messages), contains('workspace.read'));
+    expect(
+      task.completedOperations
+          .where((operation) => operation.contains('command.run')),
+      hasLength(1),
+    );
+  }, timeout: const Timeout(Duration(seconds: 30)));
+
   test('pauses command failures that require permission', () async {
     final model = _FakeModel()..responses.add(_toolDecision());
     final tool = _FakeTool()
@@ -1747,6 +2199,415 @@ void main() {
       2,
     );
   });
+
+  for (final approvalNeeded in [true, false]) {
+    test(
+        'explicit reapproval reaches model and preserves normal approval gate $approvalNeeded',
+        () async {
+      final task = _singleHtmlProductionTask();
+      const operation =
+          ToolRequest(tool: AgentToolName.commandRun, reason: '检查', args: {
+        'executable': 'python3',
+        'arguments': ['-c', 'print(1)'],
+        'workingDirectory': '/workspace',
+        'declaredImpact': ['/workspace/game.html']
+      });
+      final root = jsonDecode(task.executionStateJson) as Map<String, dynamic>;
+      root['commandReapprovalRequest'] = {
+        'operation': jsonDecode(safeToolRequestCheckpoint(operation)),
+        'binding': root['workItemExecution']
+      };
+      task.executionStateJson = jsonEncode(root);
+      final model = _FakeModel()
+        ..responses.addAll([
+          _toolDecision(
+              name: AgentToolName.commandRun, arguments: operation.args),
+          _finishDecision('已检查'),
+        ]);
+      final tool = _FakeTool();
+      final result = await _loop(
+          model: model,
+          registry: WorkToolRegistry(definitions: [
+            WorkToolDefinition(
+                name: AgentToolName.commandRun,
+                access: WorkToolAccess.mutation,
+                schema: const WorkToolSchema(fields: {
+                  'executable': WorkToolValueType.string,
+                  'arguments': WorkToolValueType.stringList,
+                  'workingDirectory': WorkToolValueType.string,
+                  'declaredImpact': WorkToolValueType.stringList
+                }, required: {
+                  'executable'
+                }),
+                handler: tool.call,
+                mutationPipeline: WorkToolMutationPipeline(
+                    approval: (_) => approvalNeeded
+                        ? const WorkToolResult.waitingForApproval(
+                            message: '需要用户批准')
+                        : null)),
+          ])).execute(task);
+      expect(
+          model.requests.first.context['commandReapprovalRequest'], isA<Map>());
+      expect(
+          result.status,
+          approvalNeeded
+              ? WorkAgentLoopStatus.waitingForApproval
+              : WorkAgentLoopStatus.workItemCompleted);
+      expect(tool.calls, approvalNeeded ? 0 : 1);
+      expect(
+          (jsonDecode(task.executionStateJson) as Map)
+              .containsKey('commandReapprovalRequest'),
+          approvalNeeded);
+    }, timeout: const Timeout(Duration(seconds: 30)));
+  }
+
+  test('Windows aliases keep one HTML draft and allow append', () async {
+    final task = _singleHtmlProductionTask();
+    final model = _FakeModel()
+      ..responses.addAll([
+        _toolDecision(name: AgentToolName.workspacePatch, arguments: {
+          'path': r'C:\Work\draft.html',
+          'content': '<!doctype html><html>first',
+        }),
+        _toolDecision(name: AgentToolName.workspacePatch, arguments: {
+          'path': r'c:\work\draft.html',
+          'content': 'second</html>',
+          'append': true,
+        }),
+        _finishDecision('提交'),
+      ]);
+    final tool = _FakeTool()
+      ..behavior = (invocation) => WorkToolResult.success(
+          message: '文件已写入。',
+          data: {'path': invocation.arguments['path'], 'changed': true});
+    await _loop(
+            model: model,
+            registry: WorkToolRegistry(definitions: [_patchDefinition(tool)]))
+        .execute(task);
+    expect(tool.calls, 2);
+    expect(model.requests.last.context['previousToolFailure'], isNull);
+  }, timeout: const Timeout(Duration(seconds: 30)));
+
+  test(
+      'contract HTML context permits guarded revision rather than draft append',
+      () async {
+    final task = _singleHtmlProductionTask();
+    final model = _FakeModel()
+      ..responses.addAll([
+        _toolDecision(name: AgentToolName.workspacePatch, arguments: {
+          'path': 'game.html',
+          'content': '<!DOCTYPE html><html><body>完整旧版</body></html>',
+        }),
+        _finishDecision('提交'),
+      ]);
+    final tool = _FakeTool()
+      ..behavior = (invocation) => WorkToolResult.success(
+          message: '文件已写入。',
+          data: {'path': invocation.arguments['path'], 'changed': true});
+    await _loop(
+            model: model,
+            registry: WorkToolRegistry(definitions: [_patchDefinition(tool)]))
+        .execute(task);
+    final draft = model.requests.last.context['singleHtmlDraft'] as Map;
+    expect(draft['instruction'], contains('合同正式 HTML'));
+    expect(draft['instruction'], contains('expectedSha256'));
+    expect(draft['instruction'], isNot(contains('不要整份覆盖已有草稿')));
+  }, timeout: const Timeout(Duration(seconds: 30)));
+
+  test(
+      'contract HTML alternate-path repair never instructs appending a document',
+      () async {
+    final task = _singleHtmlProductionTask();
+    final model = _FakeModel()
+      ..responses.addAll([
+        _toolDecision(name: AgentToolName.workspacePatch, arguments: {
+          'path': 'game.html',
+          'content': '<!DOCTYPE html><html><body>完整</body></html>',
+        }),
+        _toolDecision(name: AgentToolName.workspacePatch, arguments: {
+          'path': 'another.html',
+          'content': '<!DOCTYPE html><html><body>新稿</body></html>',
+        }),
+        _finishDecision('提交'),
+      ]);
+    final tool = _FakeTool()
+      ..behavior = (invocation) => WorkToolResult.success(
+          message: '文件已写入。',
+          data: {'path': invocation.arguments['path'], 'changed': true});
+    await _loop(
+            model: model,
+            registry: WorkToolRegistry(definitions: [_patchDefinition(tool)]))
+        .execute(task);
+    expect(model.requests.last.context['previousToolFailure'],
+        contains('直接修订合同正式文件'));
+    expect(model.requests.last.context['previousToolFailure'],
+        isNot(contains('沿固定路径续写')));
+    expect(tool.calls, 1);
+  }, timeout: const Timeout(Duration(seconds: 30)));
+
+  test('single HTML work item reuses its draft path after a loop restart',
+      () async {
+    final task = _singleHtmlProductionTask();
+    final tool = _FakeTool()
+      ..behavior = (invocation) => WorkToolResult.success(
+            message: '文件已写入。',
+            data: {'path': invocation.arguments['path'], 'changed': true},
+          );
+    final registry = WorkToolRegistry(definitions: [_patchDefinition(tool)]);
+    final firstModel = _FakeModel()
+      ..responses.add(_toolDecision(
+        name: AgentToolName.workspacePatch,
+        arguments: {
+          'path': 'build-cross48/p1.html',
+          'content': '<!DOCTYPE html><html><head><title>初稿</title>',
+        },
+      ))
+      ..responses.add(_finishDecision('已保存单 HTML 草稿'));
+    final first =
+        await _loop(model: firstModel, registry: registry).execute(task);
+    expect(first.status, WorkAgentLoopStatus.workItemCompleted);
+    expect(
+      (jsonDecode(task.executionStateJson) as Map)['singleHtmlDraft']['path'],
+      'build-cross48/p1.html',
+    );
+
+    task
+      ..status = AgentTaskStatus.queued
+      ..resumeRequired = false
+      ..resultSummary = '';
+    final resumedModel = _FakeModel()
+      ..responses.add(_toolDecision(
+        name: AgentToolName.workspacePatch,
+        arguments: {
+          'path': 'build-cross48/a2.html',
+          'content': '<body>误写到另一个分段的内容</body>',
+        },
+      ))
+      ..responses.add(_toolDecision(
+        name: AgentToolName.workspacePatch,
+        arguments: {
+          'path': 'build-cross48/p1.html',
+          'content': '<body>续写内容</body></html>',
+          'append': true,
+        },
+      ))
+      ..responses.add(_finishDecision('草稿已续写'));
+    final resumed =
+        await _loop(model: resumedModel, registry: registry).execute(task);
+
+    expect(resumed.status, WorkAgentLoopStatus.workItemCompleted);
+    expect(tool.calls, 2, reason: '换名重建在工具执行前被拒绝，只有原路径续写落盘');
+    expect(
+      resumedModel.requests[1].context['singleHtmlDraft'],
+      containsPair('path', 'build-cross48/p1.html'),
+    );
+    expect(
+      resumedModel.requests[1].context['previousToolFailure'],
+      contains('build-cross48/p1.html'),
+    );
+    expect(
+      (jsonDecode(task.executionStateJson) as Map)['singleHtmlDraft']
+          ['conflicts'],
+      0,
+      reason: '按固定路径续写后清除冲突计数',
+    );
+  }, timeout: const Timeout(Duration(seconds: 30)));
+
+  test('single HTML draft blocks a same-path full rewrite and allows append',
+      () async {
+    final task = _singleHtmlProductionTask();
+    final tool = _FakeTool()
+      ..behavior = (invocation) => WorkToolResult.success(
+            message: '文件已写入。',
+            data: {'path': invocation.arguments['path'], 'changed': true},
+          );
+    final registry = WorkToolRegistry(definitions: [_patchDefinition(tool)]);
+    final firstModel = _FakeModel()
+      ..responses.add(_toolDecision(
+        name: AgentToolName.workspacePatch,
+        arguments: {
+          'path': 'build-cross48/c1.html',
+          'content': '<!DOCTYPE html><html><head><title>初稿</title>',
+        },
+      ))
+      ..responses.add(_finishDecision('已保存单 HTML 草稿'));
+    await _loop(model: firstModel, registry: registry).execute(task);
+
+    task
+      ..status = AgentTaskStatus.queued
+      ..resumeRequired = false
+      ..resultSummary = '';
+    final resumedModel = _FakeModel()
+      ..responses.add(_toolDecision(
+        name: AgentToolName.workspacePatch,
+        arguments: {
+          'path': 'build-cross48/c1.html',
+          'content': '<!DOCTYPE html><html><head><title>重写头部</title>',
+        },
+      ))
+      ..responses.add(_toolDecision(
+        name: AgentToolName.workspacePatch,
+        arguments: {
+          'path': 'build-cross48/c1.html',
+          'content': '<body>游戏脚本</body></html>',
+          'append': true,
+        },
+      ))
+      ..responses.add(_finishDecision('草稿已续写'));
+    final resumed =
+        await _loop(model: resumedModel, registry: registry).execute(task);
+
+    expect(resumed.status, WorkAgentLoopStatus.workItemCompleted);
+    expect(tool.calls, 2, reason: '同路径整份覆盖在工具执行前被拒，续写被执行');
+    expect(resumedModel.requests[1].context['previousToolFailure'],
+        contains('同路径整份覆盖'));
+    expect(
+      (jsonDecode(task.executionStateJson) as Map)['singleHtmlDraft']
+          ['conflicts'],
+      0,
+      reason: '成功沿草稿路径续写后清除冲突计数',
+    );
+  }, timeout: const Timeout(Duration(seconds: 30)));
+
+  test('repeated same-path full rewrites pause without another write',
+      () async {
+    final task = _singleHtmlProductionTask();
+    final tool = _FakeTool()
+      ..behavior = (invocation) => WorkToolResult.success(
+            message: '文件已写入。',
+            data: {'path': invocation.arguments['path'], 'changed': true},
+          );
+    final registry = WorkToolRegistry(definitions: [_patchDefinition(tool)]);
+    final firstModel = _FakeModel()
+      ..responses.add(_toolDecision(
+        name: AgentToolName.workspacePatch,
+        arguments: {
+          'path': 'build-cross48/c1.html',
+          'content': '<!DOCTYPE html><html><head><title>初稿</title>',
+        },
+      ))
+      ..responses.add(_finishDecision('已保存单 HTML 草稿'));
+    await _loop(model: firstModel, registry: registry).execute(task);
+
+    task
+      ..status = AgentTaskStatus.queued
+      ..resumeRequired = false
+      ..resultSummary = '';
+    final retryModel = _FakeModel()
+      ..responses.addAll([
+        _toolDecision(
+          name: AgentToolName.workspacePatch,
+          arguments: {
+            'path': 'build-cross48/c1.html',
+            'content': '<!DOCTYPE html><html><head><title>重写一</title>',
+          },
+        ),
+        _toolDecision(
+          name: AgentToolName.workspacePatch,
+          arguments: {
+            'path': 'build-cross48/c1.html',
+            'content': '<!DOCTYPE html><html><head><title>重写二</title>',
+          },
+        ),
+      ]);
+    final result =
+        await _loop(model: retryModel, registry: registry).execute(task);
+
+    expect(result.status, WorkAgentLoopStatus.paused);
+    expect(task.lastError, contains('重复尝试换路径或整份覆盖'));
+    expect(tool.calls, 1, reason: '两次整份覆盖尝试均在工具执行前被拦截');
+  }, timeout: const Timeout(Duration(seconds: 30)));
+
+  test('repeated alternate HTML drafts pause before a second write', () async {
+    final task = _singleHtmlProductionTask();
+    final tool = _FakeTool()
+      ..behavior = (invocation) => WorkToolResult.success(
+            message: '文件已写入。',
+            data: {'path': invocation.arguments['path'], 'changed': true},
+          );
+    final registry = WorkToolRegistry(definitions: [_patchDefinition(tool)]);
+    final firstModel = _FakeModel()
+      ..responses.add(_toolDecision(
+        name: AgentToolName.workspacePatch,
+        arguments: {
+          'path': 'draft.html',
+          'content': '<!DOCTYPE html><html><head><title>初稿</title>',
+        },
+      ))
+      ..responses.add(_finishDecision('草稿已保存'));
+    await _loop(model: firstModel, registry: registry).execute(task);
+
+    task
+      ..status = AgentTaskStatus.queued
+      ..resumeRequired = false
+      ..resultSummary = '';
+    final retryModel = _FakeModel()
+      ..responses.add(_toolDecision(
+        name: AgentToolName.workspacePatch,
+        arguments: {
+          'path': 'draft-a.html',
+          'content': '<!DOCTYPE html><html><head><title>换名一</title>',
+        },
+      ))
+      ..responses.add(_toolDecision(
+        name: AgentToolName.workspacePatch,
+        arguments: {
+          'path': 'draft-b.txt',
+          'content': '<!DOCTYPE html><html><head><title>换名二</title>',
+        },
+      ));
+    final result =
+        await _loop(model: retryModel, registry: registry).execute(task);
+
+    expect(result.status, WorkAgentLoopStatus.paused);
+    expect(task.lastError, contains('重复尝试换路径或整份覆盖'));
+    expect(tool.calls, 1, reason: '第一次给出一次针对性修复，第二次相同错误不再调用写工具');
+    expect(
+      (jsonDecode(task.executionStateJson) as Map)['singleHtmlDraft']
+          ['conflicts'],
+      2,
+    );
+  }, timeout: const Timeout(Duration(seconds: 30)));
+
+  test('multi-file v2 software can create separate HTML documents', () async {
+    final task = _singleHtmlProductionTask(files: ['game.html', 'guide.html']);
+    final model = _FakeModel()
+      ..responses.addAll([
+        _toolDecision(
+          name: AgentToolName.workspacePatch,
+          arguments: {
+            'path': 'game.html',
+            'content': '<!DOCTYPE html><html><body>游戏</body></html>',
+          },
+        ),
+        _toolDecision(
+          name: AgentToolName.workspacePatch,
+          arguments: {
+            'path': 'guide.html',
+            'content': '<!DOCTYPE html><html><body>说明</body></html>',
+          },
+        ),
+        _finishDecision('两个文件均已生成'),
+      ]);
+    final tool = _FakeTool()
+      ..behavior = (invocation) => WorkToolResult.success(
+            message: '文件已写入。',
+            data: {'path': invocation.arguments['path'], 'changed': true},
+          );
+
+    final result = await _loop(
+      model: model,
+      registry: WorkToolRegistry(definitions: [_patchDefinition(tool)]),
+    ).execute(task);
+
+    expect(result.status, WorkAgentLoopStatus.workItemCompleted);
+    expect(tool.calls, 2);
+    expect(
+      (jsonDecode(task.executionStateJson) as Map)
+          .containsKey('singleHtmlDraft'),
+      isFalse,
+    );
+  }, timeout: const Timeout(Duration(seconds: 30)));
 
   test('a repeated rebuild gets one corrective round and a natural finish',
       () async {
@@ -3804,6 +4665,63 @@ void main() {
         .join('\n');
     expect(thirdTurn, contains('已跳过重复执行'));
   });
+
+  test('群制作合同检查按本轮文件变更区分，其他命令保持防重放', () async {
+    for (final executable in ['true', 'other']) {
+      final task = _singleHtmlProductionTask();
+      var root = jsonDecode(task.executionStateJson) as Map<String, dynamic>;
+      void setDigest(String digest) {
+        root = jsonDecode(task.executionStateJson) as Map<String, dynamic>;
+        root['productionChanges'] = {
+          'binding': root['workItemExecution'],
+          'paths': {
+            '/work/game.html': {'changed': true, 'afterSha256': digest}
+          }
+        };
+        task.executionStateJson = jsonEncode(root);
+      }
+
+      setDigest('first');
+      var calls = 0;
+      var turns = 0;
+      final loop = WorkAgentLoop(
+        model: (_) async {
+          turns++;
+          if (turns == 2) setDigest('second');
+          return turns <= 3
+              ? _toolDecision(name: AgentToolName.commandRun, arguments: {
+                  'executable': executable,
+                  'arguments': <String>[],
+                  'workingDirectory': '/work',
+                  'declaredImpact': ['game.html']
+                })
+              : _finishDecision();
+        },
+        registry: WorkToolRegistry(definitions: [
+          WorkToolDefinition(
+              name: AgentToolName.commandRun,
+              access: WorkToolAccess.mutation,
+              schema: const WorkToolSchema(fields: {
+                'executable': WorkToolValueType.string,
+                'arguments': WorkToolValueType.stringList,
+                'workingDirectory': WorkToolValueType.string,
+                'declaredImpact': WorkToolValueType.stringList,
+              }, required: {
+                'executable',
+                'arguments'
+              }),
+              mutationPipeline: _recordingPipeline([]),
+              handler: (_) async {
+                calls++;
+                return const WorkToolResult.success(message: '已执行检查');
+              }),
+        ]),
+      );
+      final result = await loop.execute(task);
+      expect(calls, executable == 'true' ? 2 : 1,
+          reason: '${result.message} turns=$turns ${task.lastError}');
+    }
+  }, timeout: const Timeout(Duration(seconds: 30)));
 
   test('does not replay an approved request that mismatches its checkpoint',
       () async {

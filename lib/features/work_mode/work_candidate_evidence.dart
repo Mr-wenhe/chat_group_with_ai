@@ -18,6 +18,16 @@ class WorkCandidate {
   List<Map<String, dynamic>> get files => (manifest['files'] as List)
       .map((e) => Map<String, dynamic>.from(e as Map))
       .toList();
+
+  /// Compares frozen file identities, independently of version and timestamp.
+  bool hasSameFilesAs(WorkCandidate other) {
+    final hashes = {
+      for (final file in other.files) file['path']: file['sha256']
+    };
+    return files.length == other.files.length &&
+        files.every((file) => hashes[file['path']] == file['sha256']);
+  }
+
   File file(String relative) => File('${directory.path}/artifacts/$relative');
   Map<String, dynamic> get reference => {
         for (final key in const [
@@ -217,8 +227,48 @@ extension WorkCandidateEvidence on WorkCandidatePublisher {
     return record;
   }
 
-  /// Seal once, only after every acceptance conclusion and (for delivery) all
-  /// current signatures are present. Metadata cannot be rewritten after signing.
+  /// User acceptance is separate from test/reviewer evidence and signatures.
+  Future<File> sealUserConfirmedOutcome(WorkCandidate candidate,
+          WorkCollaborationState state, Map<String, dynamic> confirmation) =>
+      _serial(() async {
+        await verify(candidate, expectedDigest: candidate.digest);
+        final identity = jsonEncode([
+          state.taskId,
+          state.requestRevision,
+          state.teamRevision,
+          candidate.iterationId,
+          candidate.digest
+        ]);
+        if (state.taskId != candidate.manifest['taskId'] ||
+            state.requestRevision != candidate.manifest['requestRevision'] ||
+            state.teamRevision != candidate.manifest['teamRevision'] ||
+            state.currentIteration?['id'] != candidate.iterationId ||
+            state.currentIteration?['artifactDigest'] != candidate.digest ||
+            state.pendingInputIds.isNotEmpty ||
+            confirmation['identity'] != identity ||
+            confirmation['choice'] != 'deliver') {
+          throw StateError('用户确认与当前冻结成果不匹配。');
+        }
+        final file = File('${candidate.directory.path}/outcome.json');
+        final outcome = {
+          ...candidate.reference,
+          'acceptedByUser': true,
+          'tested': false,
+          'independentReview': false,
+          'confirmation': confirmation,
+        };
+        if (await file.exists()) {
+          if (jsonEncode(await WorkCandidatePublisher.readMetadata(file)) !=
+              jsonEncode(outcome)) {
+            throw StateError('已封存结论不可覆盖。');
+          }
+          return file;
+        }
+        await WorkCandidatePublisher._atomicJson(file, outcome);
+        return file;
+      });
+
+  /// Seal once after every acceptance conclusion and required member signature.
   Future<File> sealOutcome(
           WorkCandidate candidate, WorkCollaborationState state,
           {required bool accepted}) =>

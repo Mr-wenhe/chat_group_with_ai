@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'dart:typed_data';
 import 'dart:ui';
 
@@ -12,6 +13,48 @@ import 'package:syncfusion_flutter_pdf/pdf.dart';
 
 void main() {
   setUp(DocumentUnderstandingService.clearCache);
+
+  test('uploaded physics profile includes all sections in the model request',
+      () async {
+    final attachment = MediaAttachment(
+        type: 'file',
+        localPath: 'test/fixtures/attachment_preview/physics_profile.html',
+        fileName: '陆博文简介.html');
+    final context = await DocumentUnderstandingService.buildPromptContext(
+        query: '你看下这个html的内容大致给我讲一下', attachments: [attachment]);
+    for (final section in ['陆博文', '关于我', '研究方向', '教学理念', '日常', '新的眼光']) {
+      expect(context, contains(section));
+    }
+    expect(context, isNot(contains('linear-gradient')));
+    expect(await File(attachment.localPath).exists(), isTrue);
+  });
+
+  test('HTML chat attachments expose body instead of matching CSS', () async {
+    for (final extension in ['html', 'htm']) {
+      final attachment = MediaAttachment(
+          id: extension,
+          type: 'file',
+          localPath: '/tmp/profile.$extension',
+          fileName: 'profile.$extension');
+      final content = await prepareUserMessageContent(
+        Message(
+            groupId: 'dm:1',
+            senderId: 'user',
+            senderType: 'user',
+            content: '你看下这个html的内容大致给我讲一下',
+            media: [attachment]),
+        supportsVision: false,
+        documentTextReader: (_) async => '<html><head><style>'
+            'html { /* ${'css ' * 1500} */ }</style></head><body>'
+            '<h1>陆博文</h1><p>物理教授，研究量子物理。</p>'
+            '<script>hiddenScript()</script></body></html>',
+      );
+      expect(content, contains('陆博文'));
+      expect(content, contains('研究量子物理'));
+      expect(content, isNot(contains('hiddenScript')));
+      expect(content, isNot(contains('css css')));
+    }
+  });
 
   test('retrieves relevant Markdown chunks and injects traceable sources',
       () async {

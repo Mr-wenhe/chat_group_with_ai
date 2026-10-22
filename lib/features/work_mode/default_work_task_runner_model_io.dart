@@ -181,119 +181,171 @@ extension _DefaultWorkTaskRunnerModelIo on DefaultWorkTaskRunner {
     final modelRequestToken = CancelToken();
     final requestStartedAt = clock();
     var firstTokenMs = -1;
+    var responseActivityCount = 0;
+    var lastResponseActivityMs = -1;
     // 首个字符到达就完成它，撤掉首字节停滞看门狗。看门狗本身与总时限一起住在
     // _withModelCompletionDeadline 里，两处时限共用一个撤销点。
     final firstByte = Completer<void>();
     final runBoundary =
         await WorkTaskRunBoundary.currentRunBoundaryId(eventStore, task.id);
-    final response = await _withModelCompletionDeadline(
-      cancellation: cancellation,
-      requestToken: modelRequestToken,
-      firstByte: firstByte.future,
-      request: (requestCancelToken) => gateway.sendChatMessageStreamed(
-        apiKey: apiKey,
-        provider: provider,
-        apiProtocol: config.protocol,
-        customBaseUrl: config.customBaseUrl,
-        model: config.modelName,
-        messages: boundedMessages,
-        // Deterministic sampling reduces protocol drift; JSON mode is selected
-        // by AiRequestGateway for this agent/tool request.
-        temperature: 0.2,
-        maxTokens:
-            config.protocol == ApiProtocol.anthropicMessages ? outputTokens : 0,
-        receiveTimeout: const Duration(seconds: 300),
-        maxRetries: 0,
-        cancelToken: requestCancelToken,
-        purpose: AiRequestPurpose.agent,
-        conversationId: task.groupId,
-        characterId: task.characterId,
-        taskId: task.id,
-        runBoundary: runBoundary,
-        requiresTools: true,
-        userInitiated: true,
-        onEvent: (event) {
-          // Ignore late bytes after either a task stop or this request's hard
-          // deadline so stale progress cannot be written after a retry.
-          if (cancellationToken.isCancelled || requestCancelToken.isCancelled) {
-            return;
-          }
-          if (event.type != ChatStreamEventType.token) return;
-          final delta = event.delta ?? '';
-          if (delta.isNotEmpty && !firstByte.isCompleted) {
-            firstTokenMs = clock().difference(requestStartedAt).inMilliseconds;
-            firstByte.complete();
-          }
-          streamedCharacters += delta.length;
-          final now = clock();
+    late final Map<String, dynamic> response;
+    try {
+      response = await _withModelCompletionDeadline(
+        cancellation: cancellation,
+        requestToken: modelRequestToken,
+        firstByte: firstByte.future,
+        request: (requestCancelToken) => gateway.sendChatMessageStreamed(
+          apiKey: apiKey,
+          provider: provider,
+          apiProtocol: config.protocol,
+          customBaseUrl: config.customBaseUrl,
+          model: config.modelName,
+          messages: boundedMessages,
+          // Deterministic sampling reduces protocol drift; JSON mode is selected
+          // by AiRequestGateway for this agent/tool request.
+          temperature: 0.2,
+          maxTokens: config.protocol == ApiProtocol.anthropicMessages
+              ? outputTokens
+              : 0,
+          receiveTimeout: const Duration(seconds: 300),
+          maxRetries: 0,
+          cancelToken: requestCancelToken,
+          purpose: AiRequestPurpose.agent,
+          conversationId: task.groupId,
+          characterId: task.characterId,
+          taskId: task.id,
+          runBoundary: runBoundary,
+          requiresTools: true,
+          userInitiated: true,
+          finishOnTerminalFrame:
+              WorkTaskExecutionPolicy.isValidatedV2GroupTask(task),
+          reasoningEffort:
+              WorkTaskExecutionPolicy.isValidatedV2GroupTask(task) &&
+                      config.modelName.trim().toLowerCase() == 'step-5-preview'
+                  ? 'low'
+                  : null,
+          onResponseActivity:
+              WorkTaskExecutionPolicy.isValidatedV2GroupTask(task)
+                  ? () {
+                      if (!cancellationToken.isCancelled &&
+                          !requestCancelToken.isCancelled) {
+                        responseActivityCount++;
+                        lastResponseActivityMs =
+                            clock().difference(requestStartedAt).inMilliseconds;
+                        if (!firstByte.isCompleted) {
+                          firstTokenMs = lastResponseActivityMs;
+                          firstByte.complete();
+                        }
+                      }
+                    }
+                  : null,
+          onEvent: (event) {
+            // Ignore late bytes after either a task stop or this request's hard
+            // deadline so stale progress cannot be written after a retry.
+            if (cancellationToken.isCancelled ||
+                requestCancelToken.isCancelled) {
+              return;
+            }
+            if (event.type != ChatStreamEventType.token) return;
+            final delta = event.delta ?? '';
+            if (delta.isNotEmpty && !firstByte.isCompleted) {
+              firstTokenMs =
+                  clock().difference(requestStartedAt).inMilliseconds;
+              firstByte.complete();
+            }
+            streamedCharacters += delta.length;
+            final now = clock();
 
-          final publicUpdate = WorkPublicUpdateStream.boundedDraft(
-              publicUpdateStream.add(delta));
-          final publicUpdateChanged = publicUpdate.isNotEmpty &&
-              publicUpdate != lastPublishedPublicUpdate;
-          final shouldPublishPublicUpdate = publicUpdateChanged &&
-              (lastPublishedPublicUpdate.isEmpty ||
-                  publicUpdate.length - lastPublishedPublicUpdate.length >=
-                      24 ||
-                  now.difference(lastPublicUpdateAt) >=
-                      const Duration(milliseconds: 250));
-          if (shouldPublishPublicUpdate) {
-            lastPublishedPublicUpdate = publicUpdate;
-            lastPublicUpdateAt = now;
-            final draft = publicUpdate;
+            final publicUpdate = WorkPublicUpdateStream.boundedDraft(
+                publicUpdateStream.add(delta));
+            final publicUpdateChanged = publicUpdate.isNotEmpty &&
+                publicUpdate != lastPublishedPublicUpdate;
+            final shouldPublishPublicUpdate = publicUpdateChanged &&
+                (lastPublishedPublicUpdate.isEmpty ||
+                    publicUpdate.length - lastPublishedPublicUpdate.length >=
+                        24 ||
+                    now.difference(lastPublicUpdateAt) >=
+                        const Duration(milliseconds: 250));
+            if (shouldPublishPublicUpdate) {
+              lastPublishedPublicUpdate = publicUpdate;
+              lastPublicUpdateAt = now;
+              final draft = publicUpdate;
+              final characters = streamedCharacters;
+              progressWrites = progressWrites.then<void>((_) async {
+                if (cancellationToken.isCancelled ||
+                    requestCancelToken.isCancelled) {
+                  return;
+                }
+                await _record(
+                  task,
+                  WorkTaskEventKind.modelOutput,
+                  'AI 正在输出公开进度',
+                  detail: draft,
+                  safeMetadata: {
+                    'stream': 'public_update',
+                    'publicDraft': draft,
+                    'characters': characters,
+                  },
+                );
+              });
+            }
+
+            if (!progressThrottle.shouldPublish(
+              streamedCharacters: streamedCharacters,
+              now: now,
+            )) {
+              return;
+            }
             final characters = streamedCharacters;
             progressWrites = progressWrites.then<void>((_) async {
               if (cancellationToken.isCancelled ||
                   requestCancelToken.isCancelled) {
                 return;
               }
+              final safeMetadata = <String, Object?>{
+                'stream': 'model',
+                'characters': characters,
+                // 首字节耗时的现场记录：modelFirstTokenTimeout 这个阈值必须靠真实
+                // 分布校准，靠推断会把"慢启动但能成"的请求误杀。
+                if (firstTokenMs >= 0) 'firstTokenMs': firstTokenMs,
+              };
+              if (publicUpdate.isNotEmpty) {
+                safeMetadata['publicDraft'] = publicUpdate;
+              }
               await _record(
                 task,
-                WorkTaskEventKind.modelOutput,
-                'AI 正在输出公开进度',
-                detail: draft,
-                safeMetadata: {
-                  'stream': 'public_update',
-                  'publicDraft': draft,
-                  'characters': characters,
-                },
+                WorkTaskEventKind.toolOutput,
+                publicUpdate.isEmpty ? 'AI 正在整理公开进度' : 'AI 公开进度',
+                detail: publicUpdate.isEmpty ? '正在等待可公开的执行内容。' : publicUpdate,
+                safeMetadata: safeMetadata,
               );
             });
-          }
-
-          if (!progressThrottle.shouldPublish(
-            streamedCharacters: streamedCharacters,
-            now: now,
-          )) {
-            return;
-          }
-          final characters = streamedCharacters;
-          progressWrites = progressWrites.then<void>((_) async {
-            if (cancellationToken.isCancelled ||
-                requestCancelToken.isCancelled) {
-              return;
-            }
-            final safeMetadata = <String, Object?>{
-              'stream': 'model',
-              'characters': characters,
-              // 首字节耗时的现场记录：modelFirstTokenTimeout 这个阈值必须靠真实
-              // 分布校准，靠推断会把"慢启动但能成"的请求误杀。
-              if (firstTokenMs >= 0) 'firstTokenMs': firstTokenMs,
-            };
-            if (publicUpdate.isNotEmpty) {
-              safeMetadata['publicDraft'] = publicUpdate;
-            }
-            await _record(
-              task,
-              WorkTaskEventKind.toolOutput,
-              publicUpdate.isEmpty ? 'AI 正在整理公开进度' : 'AI 公开进度',
-              detail: publicUpdate.isEmpty ? '正在等待可公开的执行内容。' : publicUpdate,
-              safeMetadata: safeMetadata,
-            );
-          });
-        },
-      ),
-    );
+          },
+        ),
+      );
+    } on WorkModelDeadlineException catch (error) {
+      if (!task.groupId.startsWith('dm:') && !cancellation.isCancelled) {
+        await _record(task, WorkTaskEventKind.failed, '本次成员模型请求超时',
+            detail: '本次请求未取得完整响应，未采纳部分输出；'
+                '已接收 $streamedCharacters 个正文字符、$responseActivityCount 次生成活动。'
+                '检查点和文件已保留，请查看诊断后决定恢复。',
+            safeMetadata: {
+              'failureCode': error.code,
+              'receivedCharacters': streamedCharacters,
+              'responseActivityCount': responseActivityCount,
+              'lastResponseActivityMs': lastResponseActivityMs,
+              'elapsedMs': clock().difference(requestStartedAt).inMilliseconds,
+              'requestCharacters': boundedMessages.fold<int>(
+                  0,
+                  (n, m) =>
+                      n +
+                      (m['content'] is String
+                          ? (m['content'] as String).length
+                          : 0)),
+            });
+      }
+      rethrow;
+    }
     // A short final delta may not pass the live-update throttle before the
     // stream closes. Flush the decoded public field so the durable timeline
     // contains the complete user-facing content, not only an earlier prefix.

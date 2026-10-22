@@ -45,6 +45,9 @@ class CapturingChatApiService extends ChatApiService {
     int maxTokens = 1024,
     Duration receiveTimeout = const Duration(seconds: 120),
     CancelToken? cancelToken,
+    bool finishOnTerminalFrame = false,
+    String? reasoningEffort,
+    void Function()? onResponseActivity,
   }) async* {
     streamCount++;
     _capture(messages);

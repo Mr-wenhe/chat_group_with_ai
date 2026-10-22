@@ -310,7 +310,9 @@ class WorkFailure {
     if (failure.type != WorkFailureType.internal) return failure;
     final text =
         '${failure.reason} ${failure.technicalDetail} ${task.lastError}';
-    if (!text.contains('没有可读取的真实文件') && !text.contains('未将说明文字伪装成附件')) {
+    if (!text.contains('没有可读取的真实文件') &&
+        !text.contains('未将说明文字伪装成附件') &&
+        !text.contains('合同文件缺失、超限或不可读取')) {
       return failure;
     }
     return _fromSignals(

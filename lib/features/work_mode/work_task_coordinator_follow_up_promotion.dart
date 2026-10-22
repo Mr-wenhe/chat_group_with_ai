@@ -198,12 +198,19 @@ extension _WorkTaskCoordinatorFollowUpPromotion on WorkTaskCoordinator {
     }
     if (previousDiscussion != null &&
         (!answeringModelClarification || modelClarificationNeedsDiscussion)) {
+      if (_requiresDiscussionForTask(task)) {
+        // Promotion clears the previous execution checkpoint before it
+        // rebuilds the discussion state. Recreate the request-bound gate
+        // before the renewed discussion can be scheduled.
+        WorkTaskRequirementsConfirmation.requireForCurrentRequest(task);
+        task.lastError = '补充要求已纳入新需求版本，待你确认更新后的需求卡。';
+      }
       // A revision has to pass through the discussion gate again. Keep the
       // conversation reservation while the renewed state is discussed so the
       // scheduler cannot start the task with a non-ready marker.
       await _pauseForDiscussion(
         task,
-        '已进入新的讨论版本，等待群内重新确认修订方案。',
+        '已进入新的需求版本，待你确认更新后的需求卡。',
       );
       await _save(task);
       _maybeStartDiscussion(task);
@@ -300,6 +307,9 @@ extension _WorkTaskCoordinatorFollowUpPromotion on WorkTaskCoordinator {
       fresh.executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
           fresh.executionStateJson,
           WorkDiscussionState.forNewTask(fresh, routed: discussion));
+    }
+    if (_requiresDiscussionForTask(fresh)) {
+      WorkTaskRequirementsConfirmation.requireForCurrentRequest(fresh);
     }
 
     // Keep the completed source as a diagnostic checkpoint while transferring

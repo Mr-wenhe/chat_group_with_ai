@@ -2,9 +2,11 @@ part of 'work_task_panel.dart';
 
 class _TaskDetails extends StatefulWidget {
   final AgentTask task;
+  final WorkTaskEvent? latestEvent;
   final WorkTaskEvent? latestAction;
   final String? toolName;
   final String? actionError;
+  final String? progressHistoryError;
 
   /// 是否渲染面板上半区（「任务详情」开关、任务需求 / 运行状态 / 执行细节三张卡、
   /// 失败提示与「异常与日志」卡）。
@@ -15,24 +17,30 @@ class _TaskDetails extends StatefulWidget {
   final List<UsageLedgerEntry> usageEntries;
   final List<AiRequestDiagnostic> usageDiagnostics;
   final bool usageUnavailable;
+  final Set<UsageLedgerEntry> outOfBoundsUsageEntries;
 
   /// 反显期实体 id → 人话标签；null 表示不提供（文本原样显示 id）。
   final EntityLabels? entityLabels;
   final WorkTaskEventStream eventStreamFor;
+  final WorkTaskEventHistory? eventHistoryFor;
   final ValueChanged<WorkTaskEvent> onLatestEvent;
   final DateTime Function() clock;
 
   const _TaskDetails({
     required this.task,
+    required this.latestEvent,
     required this.latestAction,
     required this.toolName,
     required this.actionError,
+    required this.progressHistoryError,
     required this.showSummarySection,
     required this.usageEntries,
     required this.usageDiagnostics,
     required this.usageUnavailable,
+    required this.outOfBoundsUsageEntries,
     required this.entityLabels,
     required this.eventStreamFor,
+    required this.eventHistoryFor,
     required this.onLatestEvent,
     required this.clock,
   });
@@ -51,8 +59,10 @@ class _TaskDetailsState extends State<_TaskDetails> {
   /// （超出上限时在区域内部滚动）。异常块与「异常与日志」卡同样受这个开关控制。
   bool _summaryExpanded = false;
   bool _discussionExpanded = false;
-  static const double _discussionHeaderHeight = 48;
+  static const double _discussionHeaderHeight = 100;
   static const double _discussionBodyMaxHeight = 160;
+  static const int _tokensPerThousand = 1000;
+  static const int _tokensPerWan = 10000;
 
   /// 执行动态默认展开，打开面板就能看到最新一条公开进度。
   ///
@@ -118,22 +128,44 @@ class _TaskDetailsState extends State<_TaskDetails> {
       .where((entry) => entry.taskId == widget.task.id)
       .toList(growable: false);
 
+  List<UsageLedgerEntry> get _countedTaskUsageEntries => _taskUsageEntries
+      .where((entry) => !widget.outOfBoundsUsageEntries.contains(entry))
+      .toList(growable: false);
+
   List<AiRequestDiagnostic> get _taskUsageDiagnostics => widget.usageDiagnostics
       .where((entry) => entry.taskId == widget.task.id)
       .toList(growable: false);
 
+  String _formatTaskTokenCount(int count) {
+    if (count >= _tokensPerWan) return formatTokenCount(count);
+    if (count >= _tokensPerThousand) {
+      final thousands = (count / _tokensPerThousand).toStringAsFixed(1);
+      final value = thousands.endsWith('.0')
+          ? thousands.substring(0, thousands.length - 2)
+          : thousands;
+      return '$value 千';
+    }
+    return '$count 个';
+  }
+
   String _taskUsageLabel(List<UsageLedgerEntry> entries) {
-    final tokens = entries.fold<int>(
+    final countedEntries = entries
+        .where((entry) => !widget.outOfBoundsUsageEntries.contains(entry))
+        .toList(growable: false);
+    final tokens = countedEntries.fold<int>(
       0,
       (total, entry) => total + entry.inputTokens + entry.outputTokens,
     );
-    return '用量 $tokens Token';
+    final excluded = entries.length - countedEntries.length;
+    final excludedLabel = excluded == 0 ? '' : ' · 异常 $excluded 条';
+    return '用量 ${_formatTaskTokenCount(tokens)} Token$excludedLabel';
   }
 
   Future<void> _showTaskUsageDetails() {
-    final entries = _taskUsageEntries;
+    final allEntries = _taskUsageEntries;
+    final entries = _countedTaskUsageEntries;
     final diagnostics = _taskUsageDiagnostics;
-    final requestIds = entries.map((entry) => entry.requestId).toSet();
+    final requestIds = allEntries.map((entry) => entry.requestId).toSet();
     final unrepresentedDiagnostics = diagnostics
         .where((item) => !requestIds.contains(item.requestId))
         .toList(growable: false);
@@ -178,7 +210,7 @@ class _TaskDetailsState extends State<_TaskDetails> {
               children: [
                 if (widget.usageUnavailable)
                   const Text('当前设备账本不可用，未显示估算总量。')
-                else if (entries.isEmpty)
+                else if (allEntries.isEmpty)
                   const Text('没有带当前 taskId 的用量记录；旧记录不会按会话推断归属。')
                 else ...[
                   Text(
@@ -191,6 +223,11 @@ class _TaskDetailsState extends State<_TaskDetails> {
                   Text(
                     '估算用量 $estimatedUsage · 未知用量 $unknownUsage · 价格未知 $unknownPrices',
                   ),
+                  if (allEntries.length > entries.length)
+                    Text(
+                      '另有 ${allEntries.length - entries.length} 条历史记录超过当前模型能力上限，'
+                      '已从统计中排除，原账本保留。',
+                    ),
                   if (details.isNotEmpty)
                     ExpansionTile(
                       key: const Key('work-task-usage-breakdown'),
@@ -277,7 +314,11 @@ class _TaskDetailsState extends State<_TaskDetails> {
     final discussion = WorkDiscussionState.decodeExecutionState(
       widget.task.executionStateJson,
     );
-    final discussionState = discussion.state;
+    final discussionState =
+        WorkDiscussionState.requiresDiscussionForConversation(
+                widget.task.groupId)
+            ? discussion.state
+            : null;
     final labels = _labelsWithDomain(discussionState);
     final characterName =
         widget.entityLabels?.resolveOrNull(widget.task.characterId);
@@ -304,7 +345,8 @@ class _TaskDetailsState extends State<_TaskDetails> {
                     ? '待群内推举'
                     : widget.task.characterId.trim().isEmpty
                         ? '待确定'
-                        : widget.entityLabels?.labelFor(widget.task.characterId) ??
+                        : widget.entityLabels
+                                ?.labelFor(widget.task.characterId) ??
                             widget.task.characterId;
     final colors = Theme.of(context).colorScheme;
     final hintStyle = TextStyle(fontSize: 11, color: colors.onSurfaceVariant);
@@ -319,6 +361,9 @@ class _TaskDetailsState extends State<_TaskDetails> {
             .toDouble();
     return LayoutBuilder(
       builder: (context, constraints) {
+        final usageLabel = widget.usageUnavailable
+            ? '用量不可用'
+            : _taskUsageLabel(_taskUsageEntries);
         // Keep the live execution viewport fully inside the panel. Previously
         // it was nested in the summary scroll view, so its lower scrollbar
         // could be clipped by the outer viewport and become unclickable.
@@ -344,10 +389,7 @@ class _TaskDetailsState extends State<_TaskDetails> {
         // Their former fixed 160px cap ignored the timeline header and caused
         // a RenderFlex overflow in the real desktop overlay.
         final discussionBodyHeight = hasDiscussion && _discussionExpanded
-            ? (availableHeight -
-                    discussionHeaderHeight -
-                    summaryRegionReserve -
-                    minTimelineRegionHeight)
+            ? (availableHeight - discussionHeaderHeight - summaryRegionReserve)
                 .clamp(0.0, _discussionBodyMaxHeight)
                 .toDouble()
             : 0.0;
@@ -378,16 +420,59 @@ class _TaskDetailsState extends State<_TaskDetails> {
             children: <Widget>[
               if (discussionState?.collaboration != null) ...[
                 SizedBox(
-                    height: discussionHeaderHeight,
-                    child: Align(
-                        alignment: Alignment.centerLeft,
-                        child: TextButton(
-                          key: const Key('work-v2-discussion-details'),
-                          onPressed: () => setState(
-                              () => _discussionExpanded = !_discussionExpanded),
-                          child:
-                              Text(_discussionExpanded ? '收起问题与方案' : '问题与方案详情'),
-                        ))),
+                  height: discussionHeaderHeight,
+                  child: discussionHeaderHeight < _discussionHeaderHeight
+                      ? _CurrentWorkProgressCard(
+                          task: widget.task,
+                          state: discussionState!.collaboration!,
+                          latestEvent: widget.latestEvent,
+                          latestAction: displayAction,
+                          historyError: widget.progressHistoryError,
+                          entityLabels: labels,
+                          clock: widget.clock,
+                          compact: true,
+                        )
+                      : Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            Expanded(
+                              child: _CurrentWorkProgressCard(
+                                task: widget.task,
+                                state: discussionState!.collaboration!,
+                                latestEvent: widget.latestEvent,
+                                latestAction: displayAction,
+                                historyError: widget.progressHistoryError,
+                                entityLabels: labels,
+                                clock: widget.clock,
+                              ),
+                            ),
+                            SizedBox(
+                              height: 24,
+                              child: Align(
+                                alignment: Alignment.centerLeft,
+                                child: TextButton(
+                                  key: const Key('work-v2-discussion-details'),
+                                  style: TextButton.styleFrom(
+                                    minimumSize: Size.zero,
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 8,
+                                      vertical: 0,
+                                    ),
+                                    tapTargetSize:
+                                        MaterialTapTargetSize.shrinkWrap,
+                                  ),
+                                  onPressed: () => setState(() =>
+                                      _discussionExpanded =
+                                          !_discussionExpanded),
+                                  child: Text(_discussionExpanded
+                                      ? '收起问题与方案'
+                                      : '问题与方案详情'),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                ),
                 if (_discussionExpanded)
                   ConstrainedBox(
                     constraints:
@@ -397,9 +482,9 @@ class _TaskDetailsState extends State<_TaskDetails> {
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
                           SelectableText(WorkPublicUpdateStream.sanitize(
-                              discussionState!.collaboration!.plan)),
+                              discussionState.collaboration!.plan)),
                           Text(
-                              '阶段：${discussionState.collaboration!.phase} · 当前成员：${labels?.labelFor(widget.task.characterId) ?? widget.task.characterId}'),
+                              '阶段：${_collaborationPhaseLabel(discussionState.collaboration!)} · 当前成员：${labels?.labelFor(widget.task.characterId) ?? widget.task.characterId}'),
                           if (autonomous) ...[
                             Text('制作执行者：$makerLabel'),
                             for (final assignment in discussionState
@@ -446,7 +531,7 @@ class _TaskDetailsState extends State<_TaskDetails> {
               // 执行动态与底部操作按钮，见 `_showSummarySection`。
               if (_showSummarySection) ...<Widget>[
                 // 上半区唯一的展开/收起开关，固定在卡片区右上角，
-                // 与下方「执行动态 · 实时公开输出」标题行左右对称。
+                // 与下方「执行动态」标题行左右对称。
                 SizedBox(
                   height: _summaryHeaderHeight,
                   child: Row(
@@ -604,8 +689,7 @@ class _TaskDetailsState extends State<_TaskDetails> {
                                   const SizedBox(height: 8),
                                   _PublicDetail(
                                     title: '审批',
-                                    text: _safePanelText(
-                                        approvalText, labels),
+                                    text: _safePanelText(approvalText, labels),
                                     inline: true,
                                   ),
                                 ],
@@ -662,7 +746,8 @@ class _TaskDetailsState extends State<_TaskDetails> {
                                   if (widget.actionError != null)
                                     _PublicDetail(
                                       title: '操作失败',
-                                      text: _safePanelText(widget.actionError!, labels),
+                                      text: _safePanelText(
+                                          widget.actionError!, labels),
                                     ),
                                 ],
                               ),
@@ -689,21 +774,32 @@ class _TaskDetailsState extends State<_TaskDetails> {
                   height: _timelineHeaderHeight,
                   child: Row(
                     children: <Widget>[
-                      Expanded(
+                      Tooltip(
+                        message: '执行动态',
                         child: Text(
-                          '执行动态 · 实时公开输出',
+                          '执行动态',
+                          maxLines: 1,
+                          softWrap: false,
                           style: Theme.of(context).textTheme.titleSmall,
                         ),
                       ),
                       if (_taskUsageEntries.isNotEmpty ||
                           _taskUsageDiagnostics.isNotEmpty ||
                           widget.usageUnavailable)
-                        TextButton(
-                          key: const Key('work-task-usage-details'),
-                          onPressed: _showTaskUsageDetails,
-                          child: Text(widget.usageUnavailable
-                              ? '用量不可用'
-                              : _taskUsageLabel(_taskUsageEntries)),
+                        Flexible(
+                          child: Tooltip(
+                            message: usageLabel,
+                            child: TextButton(
+                              key: const Key('work-task-usage-details'),
+                              onPressed: _showTaskUsageDetails,
+                              child: Text(
+                                usageLabel,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                softWrap: false,
+                              ),
+                            ),
+                          ),
                         ),
                       _PanelToggleButton(
                         toggleKey: const Key('work-task-timeline-toggle'),
@@ -741,6 +837,7 @@ class _TaskDetailsState extends State<_TaskDetails> {
                           taskId: widget.task.id,
                           entityLabels: labels,
                           eventStreamFor: widget.eventStreamFor,
+                          eventHistoryFor: widget.eventHistoryFor,
                           onLatestEvent: widget.onLatestEvent,
                           clock: widget.clock,
                           expanded: _timelineExpanded,
@@ -757,6 +854,361 @@ class _TaskDetailsState extends State<_TaskDetails> {
       },
     );
   }
+}
+
+bool _isDiscussionModelWait(WorkTaskEvent event) =>
+    event.kind == WorkTaskEventKind.planning &&
+    const {
+      '正在等待成员模型回应',
+      '群讨论请求通道已确认',
+      '模型已有响应活动',
+      '正在接收成员模型响应',
+    }.contains(event.title);
+
+class _CurrentWorkProgressCard extends StatelessWidget {
+  const _CurrentWorkProgressCard({
+    required this.task,
+    required this.state,
+    required this.latestEvent,
+    required this.latestAction,
+    required this.historyError,
+    required this.entityLabels,
+    required this.clock,
+    this.compact = false,
+  });
+
+  final AgentTask task;
+  final WorkCollaborationState state;
+  final WorkTaskEvent? latestEvent;
+  final WorkTaskEvent? latestAction;
+  final String? historyError;
+  final EntityLabels? entityLabels;
+  final DateTime Function() clock;
+  final bool compact;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    final currentLatestEvent = latestEvent;
+    final openDefect = state.issues
+        .any((issue) => issue['kind'] == 'defect' && issue['status'] == 'open');
+    final userAction = WorkTaskUserAction.forTask(task).firstOrNull;
+    final discussionCanProgress = !task.groupId.startsWith('dm:') &&
+        task.status == AgentTaskStatus.paused &&
+        !task.resumeRequired &&
+        userAction == null &&
+        (const {'forming', 'clarifying'}.contains(state.phase) ||
+            !state.planReady) &&
+        !state.hasBlockingDecision &&
+        state.pendingInputIds.isEmpty;
+    final lastEventAge = currentLatestEvent == null
+        ? null
+        : clock().toUtc().difference(currentLatestEvent.timestamp);
+    final activeDiscussion = discussionCanProgress &&
+        lastEventAge != null &&
+        lastEventAge <= WorkDiscussionRunner.defaultRoleTimeout &&
+        currentLatestEvent?.kind != WorkTaskEventKind.failed;
+    final stalledDiscussion = discussionCanProgress && !activeDiscussion;
+    final waitingForMember =
+        activeDiscussion && _isDiscussionModelWait(currentLatestEvent!);
+    final waitingForGroupDiscussion = activeDiscussion &&
+        currentLatestEvent!.kind == WorkTaskEventKind.paused &&
+        currentLatestEvent.title == '等待群讨论完成';
+    final (stage, icon, tone) = activeDiscussion && openDefect
+        ? ('发现问题', Icons.report_problem_outlined, colors.error)
+        : activeDiscussion
+            ? ('讨论中', Icons.forum_outlined, colors.primary)
+            : stalledDiscussion
+                ? ('疑似停滞', Icons.hourglass_bottom_rounded, colors.error)
+                : _currentProgressPresentation(
+                    task,
+                    state,
+                    colors,
+                    openDefect,
+                    userAction,
+                    latestEvent,
+                  );
+    final workItem =
+        state.workItems.where((item) => item['status'] != 'done').firstOrNull;
+    final ownerId = activeDiscussion || const {'forming', 'clarifying'}.contains(state.phase)
+        ? state.coordinatorId
+        : workItem?['ownerId'] as String? ?? state.coordinatorId;
+    final owner =
+        ownerId.isEmpty ? '待团队确定' : entityLabels?.labelFor(ownerId) ?? ownerId;
+    final operation = task.isUserStopped
+        ? '已停止，保留当前检查点'
+        : task.status == AgentTaskStatus.failed
+            ? '执行失败，检查点已保留'
+            : activeDiscussion
+                ? waitingForMember
+                    ? currentLatestEvent.title
+                    : waitingForGroupDiscussion
+                        ? '等待群内成员回应'
+                        : '团队继续讨论并收敛方案'
+                : stalledDiscussion
+                    ? '最近没有新的讨论事件'
+                    : latestAction?.title ??
+                        (workItem == null
+                            ? _statusLabel(task.status)
+                            : '处理工作项：${entityLabels?.labelFor(workItem['id'] as String) ?? workItem['id']}');
+    final progressEvent = currentLatestEvent != null &&
+            (currentLatestEvent.kind == WorkTaskEventKind.toolOutput &&
+                    currentLatestEvent.safeMetadata['stream'] == 'model' ||
+                _isDiscussionModelWait(currentLatestEvent) ||
+                currentLatestEvent.kind == WorkTaskEventKind.paused &&
+                    currentLatestEvent.title == '等待群讨论完成')
+        ? null
+        : currentLatestEvent;
+    final lastProgress = historyError != null
+        ? '执行动态读取失败'
+        : progressEvent?.title ?? latestAction?.title ?? '尚无新的阶段事件';
+    final deferredDiscussion = task.status == AgentTaskStatus.paused &&
+        task.resumeRequired &&
+        userAction == null &&
+        !state.hasBlockingDecision;
+    final next = task.isUserStopped
+        ? '如需恢复，请点击任务面板“继续”'
+        : task.status == AgentTaskStatus.failed
+            ? '查看失败记录，处理原因后在任务面板重试'
+            : deferredDiscussion
+                ? '点击任务面板“继续”，从当前讨论检查点恢复'
+                : userAction != null
+                    ? '等待你${userAction.label}'
+                    : activeDiscussion
+                        ? waitingForMember
+                            ? '等待成员回应后继续收敛方案'
+                            : waitingForGroupDiscussion
+                                ? '等待群成员回应后继续收敛方案'
+                                : '团队继续收敛方案并更新工作分工'
+                        : stalledDiscussion
+                            ? '检查失败记录与恢复入口'
+                            : _nextCollaborationStep(state);
+    final requiredOperation = task.isUserStopped
+        ? '当前已停止；如需恢复由你点击继续'
+        : task.status == AgentTaskStatus.failed
+            ? '需要你操作：查看失败记录并决定重试'
+            : deferredDiscussion
+                ? '需要你操作：点击继续'
+                : userAction != null
+                    ? '需要你操作：${userAction.label}'
+                    : stalledDiscussion
+                        ? '需要你检查恢复入口'
+                        : '当前不需要你操作';
+    final elapsed = _durationLabel(task, clock());
+    if (compact) {
+      return DecoratedBox(
+        key: const Key('work-current-progress-card'),
+        decoration: BoxDecoration(
+          color: tone.withValues(alpha: 0.08),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: tone.withValues(alpha: 0.42)),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+          child: Row(
+            children: [
+              Icon(icon, size: 16, color: tone),
+              const SizedBox(width: 5),
+              Expanded(
+                child: Text(
+                  '$stage · 需求版本 ${state.requestRevision} · 候选轮次 ${state.iterations.length} · $requiredOperation',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: tone,
+                    fontSize: 10.5,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+    return DecoratedBox(
+      key: const Key('work-current-progress-card'),
+      decoration: BoxDecoration(
+        color: tone.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: tone.withValues(alpha: 0.42)),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                Icon(icon, size: 17, color: tone),
+                const SizedBox(width: 5),
+                Text(
+                  stage,
+                  style: TextStyle(
+                    color: tone,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(width: 7),
+                Expanded(
+                  child: Text(
+                    '需求版本 ${state.requestRevision} · 候选轮次 ${state.iterations.length}',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                        fontSize: 10.5, color: colors.onSurfaceVariant),
+                  ),
+                ),
+                Text(
+                  elapsed,
+                  style:
+                      TextStyle(fontSize: 10.5, color: colors.onSurfaceVariant),
+                ),
+              ],
+            ),
+            Text(
+              '负责人：$owner · 当前操作：${_safePanelText(operation, entityLabels)}',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontSize: 10.5),
+            ),
+            Text(
+              '最近进展：${_safePanelText(lastProgress, entityLabels)} · 接下来：${_safePanelText(next, entityLabels)} · $requiredOperation',
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontSize: 10.5,
+                color: userAction == null ? colors.onSurfaceVariant : tone,
+                fontWeight:
+                    userAction == null ? FontWeight.normal : FontWeight.w600,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+(String, IconData, Color) _currentProgressPresentation(
+  AgentTask task,
+  WorkCollaborationState state,
+  ColorScheme colors,
+  bool openDefect,
+  WorkTaskUserAction? userAction,
+  WorkTaskEvent? latestEvent,
+) {
+  if (task.status == AgentTaskStatus.failed) {
+    return ('失败', Icons.error_outline_rounded, colors.error);
+  }
+  if (task.status == AgentTaskStatus.cancelled) {
+    return ('已停止', Icons.stop_circle_outlined, colors.onSurfaceVariant);
+  }
+  if (userAction != null) {
+    switch (userAction.kind) {
+      case WorkTaskUserActionKind.confirmRequirements:
+        return ('待你确认', Icons.fact_check_outlined, colors.tertiary);
+      case WorkTaskUserActionKind.answerQuestion:
+        return ('需要你回答', Icons.help_outline_rounded, colors.primary);
+      case WorkTaskUserActionKind.authorizeFolder:
+      case WorkTaskUserActionKind.approveCommand:
+      case WorkTaskUserActionKind.installTool:
+        return ('等待授权', Icons.lock_clock_outlined, colors.tertiary);
+      case WorkTaskUserActionKind.confirmExecutorSwap:
+        return ('待你确认', Icons.groups_2_outlined, colors.tertiary);
+      case WorkTaskUserActionKind.addMember:
+        return ('需要你补充成员', Icons.group_add_outlined, colors.secondary);
+      case WorkTaskUserActionKind.openTask:
+        break;
+    }
+  }
+  switch (task.status) {
+    case AgentTaskStatus.failed:
+      return ('失败', Icons.error_outline_rounded, colors.error);
+    case AgentTaskStatus.cancelled:
+      return ('已停止', Icons.stop_circle_outlined, colors.onSurfaceVariant);
+    case AgentTaskStatus.interrupted:
+      return ('已中断', Icons.pause_circle_outline_rounded, colors.error);
+    case AgentTaskStatus.waitingForApproval:
+      return ('等待授权', Icons.lock_clock_outlined, colors.tertiary);
+    case AgentTaskStatus.queued:
+      return ('排队中', Icons.pending_outlined, colors.secondary);
+    case AgentTaskStatus.paused:
+      final reason = '${task.lastError} ${latestEvent?.title ?? ''}';
+      if (reason.contains('停滞') ||
+          reason.contains('无进展') ||
+          reason.contains('未采纳') ||
+          reason.contains('协议') ||
+          reason.contains('状态校验')) {
+        return ('疑似停滞', Icons.hourglass_bottom_rounded, colors.error);
+      }
+      return ('等待处理', Icons.pause_circle_outline_rounded, colors.tertiary);
+    case AgentTaskStatus.partiallyCompleted:
+      return ('部分完成', Icons.check_circle_outline_rounded, colors.tertiary);
+    case AgentTaskStatus.completed:
+      return state.phase == 'delivered'
+          ? ('已交付', Icons.task_alt_rounded, colors.primary)
+          : ('已完成', Icons.check_circle_outline_rounded, colors.primary);
+    case AgentTaskStatus.planning:
+    case AgentTaskStatus.runningTool:
+      return _phasePresentation(state, colors, openDefect);
+  }
+}
+
+(String, IconData, Color) _phasePresentation(
+  WorkCollaborationState state,
+  ColorScheme colors,
+  bool openDefect,
+) {
+  if (openDefect && state.phase == 'producing') {
+    return ('修复中', Icons.build_circle_outlined, colors.error);
+  }
+  if (openDefect && state.phase != 'verifying') {
+    return ('发现问题', Icons.report_problem_outlined, colors.error);
+  }
+  return switch (state.phase) {
+    'forming' || 'clarifying' => ('讨论中', Icons.forum_outlined, colors.primary),
+    'ready' => ('方案已确定', Icons.fact_check_outlined, colors.tertiary),
+    'producing' => ('制作中', Icons.construction_outlined, colors.secondary),
+    'verifying' => state.issues.any((issue) => issue['kind'] == 'defect')
+        ? ('复测中', Icons.replay_circle_filled_outlined, colors.tertiary)
+        : ('测试中', Icons.science_outlined, colors.primary),
+    'reviewing' => ('交付验收中', Icons.rule_folder_outlined, colors.tertiary),
+    'delivered' => ('已交付', Icons.task_alt_rounded, colors.primary),
+    _ => ('处理中', Icons.pending_outlined, colors.secondary),
+  };
+}
+
+String _collaborationPhaseLabel(WorkCollaborationState state) {
+  final openDefect = state.issues
+      .any((issue) => issue['kind'] == 'defect' && issue['status'] == 'open');
+  if (openDefect && state.phase == 'producing') return '修复中';
+  if (openDefect && state.phase != 'verifying') return '发现问题';
+  return switch (state.phase) {
+    'forming' || 'clarifying' => '讨论中',
+    'ready' => '方案已确定',
+    'producing' => '制作中',
+    'verifying' =>
+      state.issues.any((issue) => issue['kind'] == 'defect') ? '复测中' : '测试中',
+    'reviewing' => '交付验收中',
+    'delivered' => '已交付',
+    _ => '处理中',
+  };
+}
+
+String _nextCollaborationStep(WorkCollaborationState state) {
+  if (state.hasBlockingDecision || state.pendingInputIds.isNotEmpty) {
+    return '等待你查看并回答问题';
+  }
+  return switch (state.phase) {
+    'ready' => '由已确认的执行人开始制作',
+    'producing' => '完成当前实现并提交候选文件',
+    'verifying' => '测试成员执行本版验收',
+    'reviewing' => '核对测试证据和交付认可',
+    'delivered' => '交付已完成',
+    _ => '团队继续讨论并收敛方案',
+  };
 }
 
 class _FailureDetails extends StatelessWidget {

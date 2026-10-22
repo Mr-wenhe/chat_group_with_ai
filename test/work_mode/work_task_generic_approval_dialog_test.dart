@@ -15,6 +15,21 @@ ToolRequest _skillRequest() => const ToolRequest(
     );
 
 void main() {
+  for (final continues in [false, true]) {
+    testWidgets('普通审批拒绝提示匹配调用方行为：$continues', (tester) async {
+      await tester.pumpWidget(MaterialApp(
+        home: WorkTaskGenericApprovalDialog(
+          pending: _skillRequest(),
+          requiresNoUndo: true,
+          continuesAfterRejection: continues,
+        ),
+      ));
+      expect(find.text(continues ? '拒绝本次操作' : '拒绝并暂停'), findsOneWidget);
+      expect(find.textContaining('任务会继续寻找安全替代方案'),
+          continues ? findsOneWidget : findsNothing);
+    });
+  }
+
   test('skill mutations require the explicit no-undo decision', () {
     final task = AgentTask(
       id: 'skill-policy',

@@ -614,6 +614,121 @@ void main() {
     expect(emptyCloseSession.isSuccess, isFalse);
   });
 
+  test('browser.context is group usage only and validates bounded operations',
+      () async {
+    const allowedParser = AgentDecisionParser(allowBrowserContext: true);
+    const session = 'browser:0123456789abcdef01234567';
+    final valid = <Map<String, Object?>>[
+      {'operation': 'open'},
+      {
+        'operation': 'open',
+        'queryParameters': {'scene': 'track', 'dice': '4'},
+      },
+      {'operation': 'observe', 'sessionRef': session},
+      {'operation': 'close', 'sessionRef': session},
+      {'operation': 'click', 'sessionRef': session, 'label': '掷骰子'},
+      {
+        'operation': 'assert',
+        'sessionRef': session,
+        'acceptanceId': 'dice_result',
+        'expectedText': '点数',
+      },
+      {
+        'operation': 'assert',
+        'sessionRef': session,
+        'acceptanceId': '验收-起飞',
+        'expectedText': '点数',
+      },
+      {
+        'operation': 'assert',
+        'sessionRef': session,
+        'acceptanceId': '验收' * 64,
+        'expectedText': '点数',
+      },
+      {
+        'operation': 'resize',
+        'sessionRef': session,
+        'width': 375,
+        'height': 667,
+      },
+    ];
+    for (final arguments in valid) {
+      final raw = _json({
+        'action': 'tool',
+        'public_update': '我正在操作当前冻结网页。',
+        'tool': {'name': 'browser.context', 'arguments': arguments},
+        'completion': null,
+      });
+      expect((await allowedParser.parse(raw)).isSuccess, isTrue,
+          reason: arguments.toString());
+      expect((await parser.parse(raw)).isFailure, isTrue,
+          reason: '默认解析器不得给普通工作任务开放浏览器工具。');
+    }
+
+    for (final arguments in <Map<String, Object?>>[
+      {'operation': 'open', 'filePath': '/tmp/other.html'},
+      {
+        'operation': 'open',
+        'queryParameters': {'api_key': 'must-not-be-stored'},
+      },
+      {
+        'operation': 'open',
+        'queryParameters': {'scene': 'x' * 257},
+      },
+      {
+        'operation': 'open',
+        'queryParameters': {
+          'scene': ['track']
+        },
+      },
+      {
+        'operation': 'open',
+        'queryParameters': {
+          for (var i = 0; i < 9; i++) 'key$i': 'value',
+        },
+      },
+      {'operation': 'observe', 'sessionRef': 'browser:bad'},
+      {'operation': 'click', 'sessionRef': session, 'label': 'x' * 257},
+      {
+        'operation': 'assert',
+        'sessionRef': session,
+        'acceptanceId': '',
+        'expectedText': '完成',
+      },
+      {
+        'operation': 'assert',
+        'sessionRef': session,
+        'acceptanceId': '验收' * 65,
+        'expectedText': '完成',
+      },
+      {
+        'operation': 'assert',
+        'sessionRef': session,
+        'acceptanceId': 'bad\u0001id',
+        'expectedText': '完成',
+      },
+      {
+        'operation': 'resize',
+        'sessionRef': session,
+        'width': 2000,
+        'height': 667,
+      },
+      {
+        'operation': 'navigate',
+        'sessionRef': session,
+        'url': 'https://example.com',
+      },
+    ]) {
+      final result = await allowedParser.parse(_json({
+        'action': 'tool',
+        'public_update': '我正在检查浏览器请求。',
+        'tool': {'name': 'browser.context', 'arguments': arguments},
+        'completion': null,
+      }));
+      expect(result.isFailure, isTrue, reason: arguments.toString());
+    }
+  });
+
   test('技能导入只接受内置模板 ID 或结构化 GitHub 资源字段', () async {
     final requests = <Map<String, Object?>>[
       {

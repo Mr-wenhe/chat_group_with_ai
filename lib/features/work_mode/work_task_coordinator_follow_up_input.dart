@@ -40,6 +40,16 @@ extension _WorkTaskCoordinatorFollowUpInput on WorkTaskCoordinator {
             .hasMatch(request)) {
       return true;
     }
+    // A concrete destination directory plus a new deliverable is a separate
+    // group request even while an older task is waiting for a decision. Without
+    // this boundary, the chat composer feeds the whole project request into the
+    // old task's open question (and can restart its stalled discussion). Keep
+    // path references used as source material on the ordinary follow-up path.
+    if (_requiresDiscussionForTask(task) &&
+        decision.kind == WorkFollowUpKind.newArtifact &&
+        _hasExplicitNewOutputDirectory(request)) {
+      return true;
+    }
     // 终态记录不会再排空自己的队列（`_promoteQueuedFollowUp` 在 cancelled 上
     // 直接早退），所以队列绝不能把新请求钉在它上面——那会让用户下一句直接撞上
     // "已停止的任务不能继续追问"。非终态记录仍然靠队列守住连续修改红线。
@@ -54,6 +64,23 @@ extension _WorkTaskCoordinatorFollowUpInput on WorkTaskCoordinator {
     // "这条记录是否已经交还给用户"上。否则一条被应用关闭打断的旧记录会把后来的
     // 新交付物并进自己的时间线——标签写的是新请求，执行动态却是几个月前的运行。
     return _isReleasedForNewDeliverable(task);
+  }
+
+  bool _hasExplicitNewOutputDirectory(String request) {
+    final path = const WorkModeDirectoryService().requestedLocalPath(request);
+    if (path == null) return false;
+    final pathStart = request.indexOf(path);
+    if (pathStart < 0) return false;
+    final beforePath = request.substring(0, pathStart);
+    final afterPath = request.substring(pathStart + path.length);
+    final isDestination = RegExp(
+      r'(?:在|到|保存(?:到|在)?|输出(?:到|至)?|放在|写入|放入)(?:我的)?[\s:：]*$',
+      caseSensitive: false,
+    ).hasMatch(beforePath);
+    final namesDirectory =
+        RegExp(r'(?:目录|文件夹|directory|folder)', caseSensitive: false)
+            .hasMatch(afterPath);
+    return isDestination && namesDirectory;
   }
 
   /// 这条记录是否已经交还给用户：不会再自己往下跑，也没有在等用户回答。
@@ -333,11 +360,18 @@ extension _WorkTaskCoordinatorFollowUpInput on WorkTaskCoordinator {
             ..pendingToolRequestJson = ''
             ..executionStateJson = jsonEncode(execution);
         }
+        // A group follow-up changes the scope even when it arrives through a
+        // legacy discussion checkpoint. Bind a fresh confirmation to the
+        // renewed request before any retry/restart path can discuss it.
+        if (_requiresDiscussionForTask(task)) {
+          WorkTaskRequirementsConfirmation.requireForCurrentRequest(task);
+          task.lastError = '补充要求已纳入新需求版本，待你确认更新后的需求卡。';
+        }
         await _pauseForDiscussion(
           task,
           pendingDiscussion
-              ? '已纳入最新补充要求，等待群讨论重新确认方案。'
-              : '执行尚未开始，补充要求已触发新一轮群讨论确认。',
+              ? '已纳入最新补充要求，待你确认更新后的需求卡。'
+              : '执行尚未开始，补充要求已纳入新需求版本，待你确认更新后的需求卡。',
         );
         await _save(task);
         // The old run may already have drained before this follow-up reaches

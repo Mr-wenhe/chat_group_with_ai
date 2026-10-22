@@ -6,6 +6,24 @@ import 'package:flutter_test/flutter_test.dart';
 
 void main() {
   group('SseParser', () {
+    test('私有推理只报告生成活动，不进入正文或返回推理内容', () {
+      var activity = 0;
+      final parser = SseParser(onResponseActivity: () => activity++);
+      expect(
+          parser.ingest(
+              'data: {"choices":[{"delta":{"reasoning":"PRIVATE_THINKING"}}]}\n'),
+          isEmpty);
+      expect(
+          parser.ingest(
+              'data: {"choices":[{"delta":{"reasoning_content":"PRIVATE_COMPAT"}}]}\n'),
+          isEmpty);
+      expect(activity, 2);
+      expect(parser.doneEvent().content, isEmpty);
+      parser.ingest('data: {"choices":[{"delta":{"content":"OK"}}]}\n');
+      expect(activity, 3);
+      expect(parser.doneEvent().content, 'OK');
+    });
+
     test('有界 SSE 行转换器拒绝无换行超长帧', () async {
       final source = Stream<List<int>>.value(List<int>.filled(65, 0x61));
 
@@ -251,6 +269,19 @@ void main() {
       expect(done.promptTokens, 100);
       expect(done.completionTokens, 12);
       expect(done.cachedTokens, 40);
+    });
+
+    test('重复 usage 帧按最新快照覆盖，不累加', () {
+      final parser = SseParser();
+      parser.ingest(
+          'data: {"choices":[{"delta":{"content":"a"}}],"usage":{"prompt_tokens":11,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":1}}}\n');
+      parser.ingest(
+          'data: {"choices":[{"delta":{"content":"b"}}],"usage":{"prompt_tokens":17,"completion_tokens":5,"prompt_tokens_details":{"cached_tokens":3}}}\n');
+
+      final done = parser.doneEvent();
+      expect(done.promptTokens, 17);
+      expect(done.completionTokens, 5);
+      expect(done.cachedTokens, 3);
     });
 
     test('解析器终止后 [DONE] 不产生 done 事件', () {

@@ -50,7 +50,7 @@ void main() {
       expect((parts[2] as Map)['type'], 'image_url');
       final videoHint = parts[3] as Map<String, dynamic>;
       expect(videoHint['type'], 'text');
-      expect(videoHint['text'], '[用户发送了一段视频]');
+      expect(videoHint['text'], contains(unsupportedVideoContentNotice));
       // 两张图片的 mime 前缀必须各不相同且正确
       final url1 = (parts[1] as Map)['image_url']['url'] as String;
       final url2 = (parts[2] as Map)['image_url']['url'] as String;
@@ -125,7 +125,7 @@ void main() {
       );
 
       // 无图片时走仅视频分支，空文案不应残留
-      expect(result, '[用户发送了一段视频]');
+      expect(result, contains(unsupportedVideoContentNotice));
     });
 
     test('mimeType 缺失 → 回退 image/jpeg 前缀', () {

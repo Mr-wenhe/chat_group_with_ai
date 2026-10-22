@@ -1,3 +1,4 @@
+import 'work_task_completion_choice.dart';
 import 'dart:async';
 import 'dart:collection';
 import 'dart:convert';
@@ -10,6 +11,7 @@ import 'package:crypto/crypto.dart';
 import 'work_artifact_delivery_confirmation.dart';
 import 'work_artifact_delivery_notice.dart';
 import 'work_task_action_notice.dart';
+import 'work_rejected_commands.dart';
 import 'work_task_event.dart';
 import 'work_task_event_store.dart';
 import 'work_task_error_sanitizer.dart';
@@ -33,6 +35,7 @@ import 'work_role_router.dart';
 import 'work_task_run_boundary.dart';
 import 'work_tool_registry.dart';
 import 'work_task_user_action.dart';
+import 'work_task_requirements_confirmation.dart';
 import 'work_task_decision.dart';
 
 part 'work_task_coordinator_submission.dart';
@@ -53,6 +56,7 @@ part 'work_task_coordinator_checkpoint_policy.dart';
 part 'work_task_coordinator_contracts.dart';
 part 'work_task_coordinator_deletion.dart';
 part 'work_task_coordinator_decisions.dart';
+part 'work_task_coordinator_user_checkpoint.dart';
 
 /// Owns work-task scheduling independently from every chat-room widget.
 ///
@@ -108,6 +112,12 @@ class WorkTaskCoordinator {
       return false;
     }
   }
+
+  /// 面板与执行端共用终态限制；完成后仅允许补发尚未送达的附件。
+  static bool allowsCheckpointRetry(AgentTask task) =>
+      task.status != AgentTaskStatus.cancelled &&
+      (task.status != AgentTaskStatus.completed ||
+          workArtifactDeliveryRetryPending(task.executionStateJson));
 
   /// 与 `_carriesV2Collaboration` 同一判据的静态版本：这条记录是否带着一块
   /// 有效的协作状态。旧讨论入口对它是拒绝的，重置入口也必须一致。
@@ -380,6 +390,14 @@ class WorkTaskCoordinator {
   }) =>
       _implConfirmExecutorSwap(taskId, version: version, swap: swap);
 
+  /// Confirms the exact durable group requirement card before discussion can
+  /// call any member or start work. Stale cards are rejected by their version.
+  Future<void> confirmRequirements(
+    String taskId, {
+    required int version,
+  }) =>
+      _implConfirmRequirements(taskId, version: version);
+
   /// 用户在面板里为一条"还没有执行人"的群任务点选接手角色。
   ///
   /// 与 `confirmExecutorSwap` 的分工：那条路裁决"钉定人 vs 群推举人"的冲突，
@@ -438,6 +456,12 @@ class WorkTaskCoordinator {
   /// widgets only use the result to choose the existing route entry point.
   bool shouldRouteNewTaskForFollowUp(String taskId, String request) =>
       _implShouldRouteNewTaskForFollowUp(taskId, request);
+
+  Future<void> pauseForSupplement(String taskId) => _pauseForSupplement(taskId);
+
+  Future<void> chooseCandidateCompletion(String taskId, String identity,
+          {required bool test}) =>
+      _chooseCandidateCompletion(taskId, identity, test: test);
 
   /// Adds user input to the same durable task instead of replacing its run.
   Future<void> enqueueFollowUp(
@@ -574,6 +598,40 @@ class WorkTaskCoordinator {
     bool restoreQueuedFollowUps = true,
   }) =>
       _implResumeByUser(taskId, restoreQueuedFollowUps: restoreQueuedFollowUps);
+
+  /// Reopens only the selected rejection; normal tool approval still applies.
+  Future<void> requestCommandReapproval(String taskId, String checkpoint) =>
+      _serialize(() async {
+        _ensureOpen();
+        final task = _requireWorkTask(taskId);
+        if (_running.containsKey(taskId) ||
+            _startingTaskIds.contains(taskId) ||
+            _discussionRuns.containsKey(taskId) ||
+            _discussionStartingIds.contains(taskId) ||
+            !reviewableCommandCheckpointsFor(task).contains(checkpoint)) {
+          throw StateError('该拒绝记录已失效，或任务仍在执行，请刷新后重试。');
+        }
+        final root = _decodeExecutionMap(task.executionStateJson);
+        final fingerprint = sha256.convert(utf8.encode(checkpoint)).toString();
+        root['rejectedOperationFingerprints'] =
+            (root['rejectedOperationFingerprints'] as List)
+                .where((value) => value != fingerprint)
+                .toList();
+        root['commandReapprovalRequest'] = {
+          'operation': jsonDecode(checkpoint),
+          'binding': root['workItemExecution'],
+        };
+        task.executionStateJson = jsonEncode(root);
+        if (task.lastError.startsWith('相同操作此前已被拒绝') &&
+            task.completedOperations.isNotEmpty &&
+            safeToolRequestCheckpointJson(task.completedOperations.last) ==
+                checkpoint) {
+          task.lastError = '';
+        }
+        await _save(task);
+        await _record(task, WorkTaskEventKind.planning, '用户请求重新审批所选命令',
+            detail: '操作指纹：$fingerprint。仅重新开放该操作审批；没有执行命令，其他拒绝与历史记录保留。');
+      });
 
   /// Retries a classified failure from the last durable checkpoint.
   ///

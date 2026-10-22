@@ -16,15 +16,14 @@ const _pendingGenericErrorToasts = <String>{
   // 通用 UI 提示（保存/选文件/打开媒体失败等），从未走过清洗，
   // 与本次修复的「任务/备份 sanitize* 出口」不是同一批，留待用户决定是否一并收口。
   'lib/features/settings/user_profile_page.dart:160',
-  'lib/features/chat_group/chat_room_task_action_support.dart:54',
+  'lib/features/chat_group/chat_room_task_action_support.dart:99',
   'lib/features/chat_group/chat_room_input_attachments_support.dart:55',
   'lib/features/chat_group/chat_room_input_attachments_support.dart:90',
   'lib/features/chat_group/chat_room_input_attachments_support.dart:146',
   'lib/features/chat_group/chat_room_input_attachments_support.dart:201',
   'lib/features/chat_group/chat_room_input_attachments_support.dart:316',
-  'lib/features/chat_group/widgets/chat_message_media.dart:252',
-  'lib/features/chat_group/chat_group_form_page.dart:320',
-  'lib/features/ai_character/ai_character_form_page.dart:850',
+  'lib/features/chat_group/chat_group_form_page.dart:363',
+  'lib/features/ai_character/ai_character_form_page.dart:859',
 };
 
 const _allowedRawDisplays = <String, String>{};

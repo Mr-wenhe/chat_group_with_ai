@@ -87,6 +87,7 @@ extension _ChatRoomUiSupport on _ChatRoomPageState {
                 unawaited(_showAddMemberDialog());
               }
             : null,
+        onBatchReplaceModel: isHost ? _batchReplaceGroupMemberModels : null,
         mutedIds: _muteStore.mutedFor(widget.groupId),
         onToggleMute: _setCharacterMuted,
         onMention: _insertMention,
@@ -97,6 +98,32 @@ extension _ChatRoomUiSupport on _ChatRoomPageState {
         sharedMembers: _sharedMemberViews(),
       ),
     );
+  }
+
+  /// 只替换当前群的成员，不改动群外角色或内置检索助手。
+  Future<void> _batchReplaceGroupMemberModels() async {
+    final group = _db.chatGroupBox.get(widget.groupId);
+    if (group == null) return;
+    final characters = group.aiCharacterIds
+        .toSet()
+        .where((id) => id != roundtableNewsRoleId)
+        .map(_db.aiCharacterBox.get)
+        .whereType<AICharacter>()
+        .toList(growable: false);
+    final replaced = await batchReplaceCharacterModelConfig(
+      context: context,
+      characters: characters,
+      apiConfigs: ref.read(apiConfigsProvider),
+      subjectLabel: '群成员',
+    );
+    if (replaced == 0 || !_canTouchUi) return;
+    ref.invalidate(aiCharactersProvider);
+    _setUiState(() {
+      _hasAnyApiConfig = _characters.any(
+        (character) => _resolveApiConfig(character)?.hasCredential == true,
+      );
+    });
+    _reloadSearchRuntimeIfChanged();
   }
 
   /// 保存成功后刷新页面；错误交由成员面板展示，避免显示未落库的状态。

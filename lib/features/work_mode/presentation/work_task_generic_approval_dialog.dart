@@ -10,17 +10,20 @@ import 'package:flutter/material.dart';
 class WorkTaskGenericApprovalDialog extends StatelessWidget {
   final ToolRequest? pending;
   final bool requiresNoUndo;
+  final bool continuesAfterRejection;
 
   const WorkTaskGenericApprovalDialog({
     super.key,
     required this.pending,
     required this.requiresNoUndo,
+    this.continuesAfterRejection = false,
   });
 
   static Future<WorkChangeApprovalDecision?> show(
     BuildContext context, {
     required ToolRequest? pending,
     required bool requiresNoUndo,
+    bool continuesAfterRejection = false,
   }) {
     return showDialog<WorkChangeApprovalDecision>(
       context: context,
@@ -28,6 +31,7 @@ class WorkTaskGenericApprovalDialog extends StatelessWidget {
       builder: (_) => WorkTaskGenericApprovalDialog(
         pending: pending,
         requiresNoUndo: requiresNoUndo,
+        continuesAfterRejection: continuesAfterRejection,
       ),
     );
   }
@@ -49,6 +53,8 @@ class WorkTaskGenericApprovalDialog extends StatelessWidget {
                 ? '任务准备执行一项需要确认的操作。'
                 : WorkModePolicy.approvalSummary(pending!),
           ),
+          if (continuesAfterRejection)
+            const Text('拒绝仅禁止本次操作，任务会继续寻找安全替代方案；要暂停整个任务，请关闭此框后点击任务面板“停止”。'),
           if (requiresNoUndo) ...[
             const SizedBox(height: 12),
             const Text('应用内技能配置没有文件快照，执行后无法通过任务撤销恢复。'),
@@ -61,7 +67,7 @@ class WorkTaskGenericApprovalDialog extends StatelessWidget {
           onPressed: () => Navigator.of(context).pop(
             WorkChangeApprovalDecision.rejected,
           ),
-          child: const Text('拒绝并暂停'),
+          child: Text(continuesAfterRejection ? '拒绝本次操作' : '拒绝并暂停'),
         ),
         FilledButton(
           key: const Key('work-generic-approve'),

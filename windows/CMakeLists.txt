@@ -12,6 +12,9 @@ set(BINARY_NAME "伴伴")
 # OUTPUT_NAME in runner/CMakeLists.txt.
 set(BINARY_TARGET "chat_group")
 
+# Override pdfx's 2021 PDFium default when rendering untrusted attachments.
+set(PDFIUM_VERSION "8076" CACHE STRING "PDFium build for attachment previews")
+
 # The executable name, exported under its own variable because BINARY_NAME is
 # reassigned to the target name just before generated_plugins.cmake is included
 # (see below). runner/CMakeLists.txt reads this one for OUTPUT_NAME.

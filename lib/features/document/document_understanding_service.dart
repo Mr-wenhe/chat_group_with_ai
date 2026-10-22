@@ -4,6 +4,8 @@ import 'dart:io';
 import 'dart:isolate';
 import 'dart:typed_data';
 
+import 'package:html/parser.dart' as html_parser;
+
 import 'package:chat_group/core/models/attachment_data_uri.dart';
 import 'package:chat_group/core/models/media_attachment.dart';
 import 'package:chat_group/features/document/binary_document_parser.dart';
@@ -136,8 +138,15 @@ class DocumentUnderstandingService {
           throw const FileSystemException('文件超过解析上限');
         }
         if (format == 'json') jsonDecode(raw);
+        // HTML 的样式与脚本会挤掉正文检索片段；解析只读 DOM，不执行附件。
+        final document = const {'html', 'htm'}.contains(format)
+            ? html_parser.parse(raw)
+            : null;
+        document
+            ?.querySelectorAll('script, style, template, noscript')
+            .forEach((element) => element.remove());
         chunks = _chunk(
-          raw,
+          document?.body?.text.replaceAll(RegExp(r'\s+'), ' ').trim() ?? raw,
           attachment.fileName ?? _basename(attachment.localPath),
         );
       }
@@ -449,6 +458,7 @@ class DocumentUnderstandingService {
       return extension;
     }
     return switch (attachment.mimeType?.toLowerCase()) {
+      'text/html' || 'application/xhtml+xml' => 'html',
       'application/pdf' => 'pdf',
       'application/vnd.openxmlformats-officedocument.wordprocessingml.document' =>
         'docx',

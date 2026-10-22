@@ -142,6 +142,9 @@ class MemberSheet extends StatefulWidget {
 
   final VoidCallback? onAddMember;
 
+  /// 按源、目标模型配置批量替换当前成员使用的模型。
+  final Future<void> Function()? onBatchReplaceModel;
+
   /// 按角色解析 IP 形象图；null / 返回 null → 文本头像。
   final ImageProvider? Function(AICharacter character)? avatarImageOf;
 
@@ -166,6 +169,7 @@ class MemberSheet extends StatefulWidget {
     this.onToggleMute,
     this.onMention,
     this.onAddMember,
+    this.onBatchReplaceModel,
     this.avatarImageOf,
     this.ownerRole = '群主',
     this.ownerIsHost = true,
@@ -289,6 +293,35 @@ class _MemberSheetState extends State<MemberSheet> {
               ),
             ],
           ),
+          if (widget.onBatchReplaceModel != null) ...[
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Icon(Icons.swap_horiz_rounded,
+                    size: 16, color: colorScheme.primary),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    '批量更换群成员模型（含停用成员）',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                        fontSize: 12, color: colorScheme.onSurfaceVariant),
+                  ),
+                ),
+                TextButton.icon(
+                  onPressed: () async {
+                    await widget.onBatchReplaceModel!.call();
+                    if (mounted) setState(() {});
+                  },
+                  icon: const Icon(Icons.sync_alt_rounded, size: 14),
+                  label: const Text('批量替换', style: TextStyle(fontSize: 12)),
+                  style: TextButton.styleFrom(
+                      foregroundColor: colorScheme.primary),
+                ),
+              ],
+            ),
+          ],
           const SizedBox(height: 12),
           TextField(
             controller: _searchController,

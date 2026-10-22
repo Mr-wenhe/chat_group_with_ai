@@ -7,6 +7,7 @@ import 'package:flutter_test/flutter_test.dart';
 /// 新增反显点时把它加进来；确实要显示技术 id 的位置登记进 [_allowed]（键为
 /// `路径:行号`）并写明理由。
 const _displayFiles = <String>[
+  'lib/core/widgets/readable_json_dialog.dart',
   'lib/features/chat_group/widgets/chat_message_bubble.dart',
   'lib/features/chat_group/widgets/progress_log_bubble.dart',
   'lib/features/work_mode/presentation/work_task_panel.dart',
@@ -85,7 +86,8 @@ void main() {
   test('例外清单登记即生效', () {
     const line = r"Text('成员 ${member.id} 不可用')";
     expect(
-      isDisclosureViolation(line: line, at: 'x.dart:1', allowed: const <String>{}),
+      isDisclosureViolation(
+          line: line, at: 'x.dart:1', allowed: const <String>{}),
       isTrue,
     );
     expect(

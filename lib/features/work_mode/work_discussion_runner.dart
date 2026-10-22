@@ -1,8 +1,9 @@
+import 'work_contract_change.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
-import 'package:chat_group/core/retry_handler.dart';
+import 'package:chat_group/core/streaming/chat_stream_event.dart';
 import 'package:chat_group/services/chat_api_service.dart';
 import 'work_candidate_publication.dart';
 import 'package:chat_group/features/memory/memory_context_selector.dart';
@@ -26,6 +27,8 @@ import 'work_discussion_v2_protocol_text.dart';
 import 'work_usage_receipt.dart';
 import 'work_discussion_v2_stage.dart';
 import 'work_task_execution_policy.dart';
+import 'work_task_requirements_confirmation.dart';
+import 'package:path/path.dart' as p;
 
 import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/models/ai_character.dart';
@@ -41,7 +44,8 @@ import 'package:chat_group/features/agentic/context_window_manager.dart';
 import 'package:chat_group/features/ai_governance/ai_governance_models.dart';
 import 'package:chat_group/features/ai_governance/ai_governance_store.dart';
 import 'package:chat_group/features/ai_governance/ai_request_gateway.dart';
-import 'package:chat_group/features/work_mode/work_artifact_delivery_guard.dart';
+import 'package:chat_group/features/chat_group/roundtable_news_role_service.dart'
+    show roundtableNewsRoleId;
 import 'package:chat_group/features/work_mode/work_context_boundary.dart';
 import 'package:chat_group/features/work_mode/work_discussion_protocol.dart';
 import 'package:chat_group/features/work_mode/work_discussion_state.dart';
@@ -63,6 +67,7 @@ part 'work_discussion_round_completion.dart';
 
 part 'work_discussion_runner_setup.dart';
 part 'work_discussion_runner_model_io.dart';
+part 'work_discussion_group_stream.dart';
 part 'work_discussion_project_dossier.dart';
 part 'work_discussion_runner_decisions.dart';
 part 'work_discussion_v2_session.dart';
@@ -154,6 +159,7 @@ class WorkDiscussionRunner
   final WorkModeWorkspaceService? workspaceService;
   final Duration roleTimeout;
   final Duration credentialTimeout;
+  final Duration firstByteTimeout;
   final DateTime Function() clock;
 
   WorkDiscussionRunner({
@@ -166,6 +172,7 @@ class WorkDiscussionRunner
     this.workspaceService,
     this.roleTimeout = defaultRoleTimeout,
     this.credentialTimeout = defaultCredentialTimeout,
+    this.firstByteTimeout = const Duration(seconds: 180),
     DateTime Function()? clock,
   })  : credentials = credentials ?? SecureApiCredentialResolver(),
         gateway = gateway ??

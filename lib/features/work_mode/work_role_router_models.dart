@@ -284,6 +284,7 @@ WorkDeliverableContract _deliverableContract(
   final paths = pathMatches.map((match) => match.group(1)!).toList();
   final sourcePath = paths.isEmpty ? null : paths.first;
   final explicitOutputPath = _explicitOutputPath(request, pathMatches);
+  final explicitOutputDirectory = _explicitOutputDirectory(request);
   final isTestingRequest = RegExp(
     r'测试|验证|回归|qa|quality assurance|test|验收',
     caseSensitive: false,
@@ -333,9 +334,10 @@ WorkDeliverableContract _deliverableContract(
   final source = format == 'html' ||
       RegExp(r'代码|脚本|源码|程序|网页|网站', caseSensitive: false).hasMatch(lower);
   final contractLocation = _contractLocationForOutput(
-    outputPath,
-    request: lower,
-  );
+        outputPath,
+        request: lower,
+      ) ??
+      explicitOutputDirectory;
   final revision = RegExp(
     r'修改|更新|修复|重构|继续完善|刚才|上次|同一文件|相同文件|same file|previous',
     caseSensitive: false,
@@ -355,6 +357,33 @@ WorkDeliverableContract _deliverableContract(
     revisionTarget: revision ? (contractLocation ?? 'same-output') : '',
     requestRevision: requestRevision,
   );
+}
+
+/// Extracts an explicitly named output root only when the same sentence says
+/// to create or save an artifact under that directory. A bare absolute path
+/// may be an input/reference and must not silently become an output grant.
+String? _explicitOutputDirectory(String request) {
+  final directoryCues = RegExp(r'(?:这个|该)?(?:目录|文件夹)')
+      .allMatches(request)
+      .toList(growable: false);
+  final outputInDirectory = RegExp(
+    r'^\s*(?:(?:中|下|里|内)(?:面)?|[,，;；:：]\s*(?:里面|其中|其内))\s*'
+    r'(?:再|直接)?(?:创建|新建|生成|产出|输出|写入|保存|交付|放着|存放|create|generate|save|write|deliver)',
+    caseSensitive: false,
+  );
+  final absolutePath = RegExp(
+      r'^(?:[A-Za-z]:[\\/]|/)[\w\u3400-\u9fff ._-]+(?:[\\/][\w\u3400-\u9fff ._-]+)*$');
+  for (final cue in directoryCues) {
+    final trailing = request.substring(cue.end);
+    if (!outputInDirectory.hasMatch(trailing)) continue;
+    final prefix = request.substring(0, cue.start);
+    final locationStart = prefix.lastIndexOf('在');
+    if (locationStart < 0) continue;
+    var candidate = prefix.substring(locationStart + 1).trim();
+    candidate = candidate.replaceFirst(RegExp(r'^我的\s*'), '').trim();
+    if (absolutePath.hasMatch(candidate)) return candidate;
+  }
+  return null;
 }
 
 String? _explicitOutputPath(String request, List<RegExpMatch> pathMatches) {

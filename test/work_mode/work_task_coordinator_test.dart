@@ -2,15 +2,18 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:crypto/crypto.dart';
 import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/core/models/tool_permission.dart';
+import 'package:chat_group/features/agentic/tool_request.dart';
 import 'package:chat_group/features/work_mode/default_work_task_runner.dart';
 import 'package:chat_group/features/work_mode/work_artifact_delivery_confirmation.dart';
 import 'package:chat_group/features/work_mode/work_artifact_delivery_guard.dart';
 import 'package:chat_group/features/work_mode/work_folder_grant_service.dart';
 import 'package:chat_group/features/work_mode/work_task_action_notice.dart';
 import 'package:chat_group/features/work_mode/work_resource_lock_manager.dart';
+import 'package:chat_group/features/work_mode/work_rejected_commands.dart';
 import 'package:chat_group/features/work_mode/work_context_boundary.dart';
 import 'package:chat_group/features/work_mode/work_context_builder.dart';
 import 'package:chat_group/features/work_mode/work_discussion_state.dart';
@@ -25,6 +28,8 @@ import 'package:chat_group/features/work_mode/work_task_budget_wait.dart';
 import 'package:chat_group/features/work_mode/work_task_clarification.dart';
 import 'package:chat_group/features/work_mode/work_task_event.dart';
 import 'package:chat_group/features/work_mode/work_task_event_store.dart';
+import 'package:chat_group/features/work_mode/work_task_execution_policy.dart';
+import 'package:chat_group/features/work_mode/work_task_requirements_confirmation.dart';
 import 'package:chat_group/features/work_mode/work_task_user_action.dart';
 import 'package:chat_group/features/work_mode/work_task_decision.dart';
 import 'package:chat_group/features/work_mode/work_tool_registry.dart';
@@ -328,6 +333,7 @@ class _FakeDiscussionRunner implements WorkTaskDiscussionRunner {
   final Completer<void> firstStarted = Completer<void>();
   final Completer<void> release = Completer<void>();
   int runCount = 0;
+  int activeRuns = 0;
 
   @override
   Future<void> runDiscussion(
@@ -336,13 +342,18 @@ class _FakeDiscussionRunner implements WorkTaskDiscussionRunner {
     WorkTaskDiscussionStateSink updateState,
   ) async {
     runCount++;
+    activeRuns++;
     if (runCount == 1 && !firstStarted.isCompleted) {
       firstStarted.complete();
     }
-    await Future.any<void>([
-      release.future,
-      cancellation.whenCancelled,
-    ]);
+    try {
+      await Future.any<void>([
+        release.future,
+        cancellation.whenCancelled,
+      ]);
+    } finally {
+      activeRuns--;
+    }
   }
 }
 
@@ -479,6 +490,9 @@ AgentTask _v2DecisionTask(
         collaboration: state,
       ));
 }
+
+Map<String, dynamic> _executionMapForTest(AgentTask task) =>
+    Map<String, dynamic>.from(jsonDecode(task.executionStateJson) as Map);
 
 /// 一条带 v2 协作记录、讨论仍未完成的任务（`phase: blocked`）。
 ///
@@ -625,6 +639,18 @@ Future<void> _waitForInstallCall(_FakeWorkTaskRunner runner) async {
     await Future<void>.delayed(const Duration(milliseconds: 10));
   }
   fail('安装器未在限定时间内启动');
+}
+
+Future<void> _confirmRequirements(
+  WorkTaskCoordinator coordinator,
+  Box<AgentTask> taskBox,
+  String taskId,
+) async {
+  final task = taskBox.get(taskId)!;
+  final action = WorkTaskUserAction.forTask(task).singleWhere(
+    (item) => item.kind == WorkTaskUserActionKind.confirmRequirements,
+  );
+  await coordinator.confirmRequirements(taskId, version: action.version);
 }
 
 /// 只数调用次数的 v2 讨论运行器：用来验证"补充要求之后有没有重新调度讨论"。
@@ -1174,6 +1200,167 @@ void main() {
     expect(resolved.status, 'answered');
     expect(resolved.answer, contains('每枚棋子'));
     expect(WorkTaskClarification.isAnswerable(taskBox.get(task.id)!), isFalse);
+  });
+
+  for (final choice in ['retry-same-member', 'member-config-updated']) {
+    test('成员请求恢复不递增需求版本：$choice', () async {
+      final task = _v2DecisionTask('retry-$choice', decisions: [
+        {
+          'id': 'model-failure',
+          'revision': 1,
+          'kind': 'member',
+          'targetId': 'worker',
+          'status': 'pending',
+          'reason': '请求超时',
+          'answer': '',
+          'impact': '等待恢复',
+          'responseRef': '',
+          'options': [
+            {'id': choice, 'label': '原成员继续', 'impact': '保留原需求'}
+          ]
+        }
+      ]);
+      await coordinator.submit(task);
+      final before = WorkDiscussionState.fromExecutionState(
+              taskBox.get(task.id)!.executionStateJson)!
+          .collaboration!;
+      expect(
+          await coordinator.respondToDecision(task.id,
+              decisionId: 'model-failure',
+              revision: 1,
+              answer: '',
+              choiceId: choice),
+          isTrue);
+      final stored = taskBox.get(task.id)!;
+      final after =
+          WorkDiscussionState.fromExecutionState(stored.executionStateJson)!
+              .collaboration!;
+      expect(after.requestRevision, before.requestRevision);
+      expect(after.verificationRevision, before.verificationRevision);
+      expect(after.scope, before.scope);
+      expect(after.decisions.single['status'], 'answered');
+      expect(after.decisions.single['responseRef'], isNotEmpty);
+      expect(stored.lastError, contains('按原需求'));
+    }, timeout: const Timeout(Duration(seconds: 30)));
+  }
+
+  test('P3 answering a no-progress stop opens one bounded recovery window',
+      () async {
+    const stalledReason = '连续 12 个结果没有带来新的问题、证据、验收或文件内容变化。';
+    const evidence = '成员尝试记录：候选仍未在浏览器中打开。';
+    final task = _v2DecisionTask('decision-no-progress', decisions: [
+      {
+        'id': 'no-progress',
+        'revision': 1,
+        'status': 'pending',
+        'reason': '$stalledReason 请补充处理条件。',
+        'evidence': evidence,
+        'answer': '',
+        'impact': '避免无进展地继续消耗模型请求',
+        'responseRef': '',
+        'kind': 'dispute',
+        'targetId': '',
+      }
+    ]);
+    final execution = _executionMapForTest(task)
+      ..['v2ProgressGuard'] = {
+        'noProgressCount': 12,
+        'repeatedFailureCount': 0,
+        'progressFingerprints': ['prior-progress'],
+        'attempts': [evidence],
+        'missing': '实际浏览器执行证据',
+        'stalled': true,
+        'reason': stalledReason,
+      };
+    task.executionStateJson = jsonEncode(execution);
+    await coordinator.submit(task);
+
+    expect(
+      await coordinator.respondToDecision(
+        task.id,
+        decisionId: 'no-progress',
+        revision: 1,
+        answer: '保留候选，继续由独立成员实际浏览器测试；失败就修复后复测。',
+        responseMessageId: 'recovery-condition',
+      ),
+      isTrue,
+    );
+
+    final stored = taskBox.get(task.id)!;
+    final checkpoint = _executionMapForTest(stored);
+    final guard = checkpoint['v2ProgressGuard'] as Map;
+    expect(guard['noProgressCount'], 0);
+    expect(guard['stalled'], isFalse);
+    expect(guard.containsKey('reason'), isFalse);
+    expect(guard['attempts'], [evidence]);
+    expect(guard['progressFingerprints'], ['prior-progress']);
+    expect(
+      WorkDiscussionState.fromExecutionState(stored.executionStateJson)!
+          .collaboration!
+          .decisions
+          .single['evidence'],
+      evidence,
+    );
+
+    var nextExecution = checkpoint;
+    for (var index = 0;
+        index < WorkProgressGuard.noProgressResultLimit;
+        index++) {
+      final result = WorkProgressGuard.observe(
+        nextExecution,
+        const WorkProgressObservation(
+          kind: WorkProgressObservationKind.noProgress,
+          summary: '本轮没有可验证变化。',
+        ),
+        now: DateTime.utc(2026, 10, 20),
+      );
+      expect(
+        result.stalled,
+        index == WorkProgressGuard.noProgressResultLimit - 1,
+      );
+      nextExecution = result.executionState;
+    }
+  });
+
+  test('ordinary dispute answers do not reset the liveness guard', () async {
+    final task = _v2DecisionTask('decision-ordinary-dispute', decisions: [
+      {
+        'id': 'route',
+        'revision': 1,
+        'status': 'pending',
+        'reason': '是否沿外圈完整行进后再进入终点跑道？',
+        'evidence': '方案路线仍需统一。',
+        'answer': '',
+        'impact': '影响玩法规则',
+        'responseRef': '',
+        'kind': 'dispute',
+        'targetId': 'route-issue',
+      }
+    ]);
+    final execution = _executionMapForTest(task)
+      ..['v2ProgressGuard'] = {
+        'noProgressCount': 4,
+        'repeatedFailureCount': 0,
+        'attempts': ['已有一次停滞记录'],
+        'stalled': false,
+      };
+    task.executionStateJson = jsonEncode(execution);
+    await coordinator.submit(task);
+
+    expect(
+      await coordinator.respondToDecision(
+        task.id,
+        decisionId: 'route',
+        revision: 1,
+        answer: '是，沿 48 格外圈后进入各自 6 格终点跑道。',
+      ),
+      isTrue,
+    );
+    expect(
+      (_executionMapForTest(taskBox.get(task.id)!)['v2ProgressGuard']
+          as Map)['noProgressCount'],
+      4,
+    );
   });
 
   test('P3 late decision after task deletion cannot restore its record',
@@ -1966,7 +2153,7 @@ void main() {
     expect(victim.resumeRequired, isFalse);
   });
 
-  test('rejects external discussion overwrite and restarts a renewed revision',
+  test('rejects external discussion overwrite and gates a renewed revision',
       () async {
     final discussionRunner = _FakeDiscussionRunner();
     final guarded = WorkTaskCoordinator(
@@ -1996,11 +2183,17 @@ void main() {
       throwsStateError,
     );
     await guarded.enqueueFollowUp(task.id, '补充移动端验收边界');
-    for (var attempt = 0; attempt < 100; attempt++) {
-      if (discussionRunner.runCount >= 2) break;
-      await Future<void>.delayed(const Duration(milliseconds: 10));
-    }
-    expect(discussionRunner.runCount, 2);
+    final renewed = taskBox.get(task.id)!;
+    expect(
+        WorkTaskRequirementsConfirmation.hasMarker(renewed.executionStateJson),
+        isTrue);
+    expect(WorkTaskRequirementsConfirmation.isCurrent(renewed), isTrue);
+    expect(discussionRunner.runCount, 1, reason: '新需求版本确认前不得重启群讨论');
+    // The old discussion has been cancelled by the revision. The user may
+    // confirm while it drains; completion then restarts only the new revision.
+    await _confirmRequirements(guarded, taskBox, task.id);
+    await _waitUntil(() => discussionRunner.runCount == 2);
+    expect(discussionRunner.activeRuns, 1, reason: '旧讨论必须先退出，不能与确认后的新版讨论并行');
     expect(
       WorkDiscussionState.fromExecutionState(
         taskBox.get(task.id)!.executionStateJson,
@@ -2010,7 +2203,7 @@ void main() {
     );
   });
 
-  test('starts a renewed discussion when the old run already completed',
+  test('requires a renewed requirement confirmation after a run completes',
       () async {
     final discussionRunner = _CompletingBlockedDiscussionRunner();
     final guarded = WorkTaskCoordinator(
@@ -2033,11 +2226,11 @@ void main() {
     }
     expect(discussionRunner.runCount, 1);
     await guarded.enqueueFollowUp(task.id, '补充最终验收条件');
-    for (var attempt = 0; attempt < 100; attempt++) {
-      if (discussionRunner.runCount >= 2) break;
-      await Future<void>.delayed(const Duration(milliseconds: 10));
-    }
-    expect(discussionRunner.runCount, 2);
+    final renewed = taskBox.get(task.id)!;
+    expect(WorkTaskRequirementsConfirmation.isCurrent(renewed), isTrue);
+    expect(discussionRunner.runCount, 1, reason: '旧讨论完成不能代替新版需求确认');
+    await _confirmRequirements(guarded, taskBox, task.id);
+    await _waitUntil(() => discussionRunner.runCount == 2);
     expect(
       WorkDiscussionState.fromExecutionState(
         taskBox.get(task.id)!.executionStateJson,
@@ -2225,8 +2418,23 @@ void main() {
     expect(stored.queuedUserRequests, isEmpty);
     expect(pending.requestRevision, 2);
     expect(pending.phase, WorkDiscussionPhase.awaitingDiscussion);
+    expect(WorkTaskRequirementsConfirmation.isCurrent(stored), isTrue);
     expect(runner.startedTaskIds, isEmpty);
 
+    await expectLater(
+      coordinator.updateDiscussionState(
+        task.id,
+        pending.copyWith(
+          phase: WorkDiscussionPhase.ready,
+          understandingPercent: 100,
+          understandingEvidence: const ['执行人已纳入补充验收标准。'],
+          openQuestions: const [],
+          blockers: const [],
+        ),
+      ),
+      throwsStateError,
+    );
+    await _confirmRequirements(coordinator, taskBox, task.id);
     await coordinator.updateDiscussionState(
       task.id,
       pending.copyWith(
@@ -2887,6 +3095,82 @@ void main() {
 
     await coordinator.resumeByUser(task.id);
     await _waitUntil(() => discussionRunner.calls == 1);
+  });
+
+  test(
+      'group discussion cannot run before the current requirements are confirmed',
+      () async {
+    await coordinator.dispose();
+    final discussionRunner = _CountingV2DiscussionRunner();
+    coordinator = WorkTaskCoordinator(
+      taskBox: taskBox,
+      eventStore: eventStore,
+      runner: runner,
+      discussionRunner: discussionRunner,
+      installerIsMacOS: true,
+    );
+    final task = _v2PendingDiscussionTask(
+      'requirements-confirmation-gate',
+      conversationId: 'group-requirements-confirmation',
+    );
+    final initialShell =
+        WorkDiscussionState.fromExecutionState(task.executionStateJson)!;
+    final initialState = initialShell.collaboration!;
+    task.executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
+      task.executionStateJson,
+      initialShell.copyWith(
+        collaboration: WorkCollaborationState.tryParse(initialState.toJson()
+          ..['scope'] = '制作飞行棋 HTML'
+          ..['revision'] = initialState.revision + 1)!,
+      ),
+      expectedCollaborationRevision: initialState.revision,
+    );
+    WorkTaskRequirementsConfirmation.requireForCurrentRequest(task);
+    final action = WorkTaskUserAction.forTask(task).single;
+
+    await coordinator.submit(task);
+    await _drainEventLoop();
+    expect(discussionRunner.calls, 0);
+    expect(taskBox.get(task.id)?.status, AgentTaskStatus.paused);
+    expect(
+      WorkTaskUserAction.forTask(taskBox.get(task.id)!).single.kind,
+      WorkTaskUserActionKind.confirmRequirements,
+    );
+    final collaboration = WorkDiscussionState.fromExecutionState(
+      taskBox.get(task.id)!.executionStateJson,
+    )!
+        .collaboration!;
+    final unconfirmedJson = collaboration.toJson()
+      ..['revision'] = collaboration.revision + 1
+      ..['appliedEventIds'] = [...collaboration.appliedEventIds, 'unconfirmed'];
+    await expectLater(
+      coordinator.applyCollaborationUpdate(WorkCollaborationUpdate(
+        taskId: task.id,
+        conversationId: task.groupId,
+        expectedRevision: collaboration.revision,
+        eventId: 'unconfirmed',
+        sourceRole: 'coordinator',
+        sourceId: 'worker',
+        next: WorkCollaborationState.tryParse(unconfirmedJson)!,
+      )),
+      throwsStateError,
+    );
+
+    await coordinator.confirmRequirements(task.id, version: action.version);
+    await _waitUntil(() => discussionRunner.calls == 1);
+    final accepted = WorkDiscussionState.fromExecutionState(
+            taskBox.get(task.id)!.executionStateJson)!
+        .collaboration!;
+    expect(accepted.scope, contains('到达终点需点数精确'));
+    expect(accepted.scope, contains('四人同机轮流，每人 4 架棋子'));
+    expect(accepted.requestRevision, collaboration.requestRevision,
+        reason: '接受当前卡片不能伪造用户的新需求版本');
+    expect(
+      WorkTaskRequirementsConfirmation.hasMarker(
+        taskBox.get(task.id)!.executionStateJson,
+      ),
+      isFalse,
+    );
   });
 
   test('deferring an active discussion cancels it and keeps the checkpoint',
@@ -3632,10 +3916,14 @@ void main() {
     expect(fresh.plan, isEmpty);
     expect(fresh.lastArtifactPaths, isEmpty);
     expect(fresh.status, AgentTaskStatus.paused);
+    expect(WorkTaskRequirementsConfirmation.isCurrent(fresh), isTrue);
     final context = jsonDecode(fresh.contextSummary) as Map<String, dynamic>;
     expect(context['target'], '设计并实现一个 html 教师节贺卡');
     expect(context['artifactPaths'], isEmpty);
     expect(runner.startedTaskIds, isEmpty);
+    await _confirmRequirements(coordinator, taskBox, fresh.id);
+    expect(runner.startedTaskIds, isEmpty,
+        reason: '没有讨论 runner 时确认也不能直接运行制作任务');
   });
 
   test('explicit validation follow-up resumes the paused task checkpoint',
@@ -4366,6 +4654,46 @@ void main() {
         '生成一个新的 html 报告',
       ),
       isFalse,
+    );
+  });
+
+  test(
+      'an explicit new output directory forks a group task before old decisions',
+      () async {
+    final waiting = _task(
+      id: 'group-output-waiting',
+      conversationId: 'group-output-waiting',
+    )..status = AgentTaskStatus.paused;
+    await taskBox.put(waiting.id, waiting);
+
+    const screenshotPrompt = '大家讨论差不多了，现在需要大家决定最终方案，最终由@程序媛在我的 '
+        '/Users/fengye/Desktop/chat_group_out 这个目录中创建一个飞行棋的目录，里面放着一份飞行棋的html';
+    expect(
+      coordinator.followUpDecisionForTask(waiting.id, screenshotPrompt).kind,
+      WorkFollowUpKind.newArtifact,
+    );
+    expect(
+      coordinator.shouldRouteNewTaskForFollowUp(waiting.id, screenshotPrompt),
+      isTrue,
+      reason: '新交付目录请求不能被旧任务的待决问题吸收。',
+    );
+
+    final sourceReference = _task(
+      id: 'group-output-source',
+      conversationId: 'group-output-source',
+    )..status = AgentTaskStatus.paused;
+    await taskBox.put(sourceReference.id, sourceReference);
+    const readsSource =
+        '读取 /Users/fengye/Desktop/chat_group_out/需求说明.md 后生成 HTML';
+    expect(
+      coordinator.followUpDecisionForTask(sourceReference.id, readsSource).kind,
+      WorkFollowUpKind.newArtifact,
+    );
+    expect(
+      coordinator.shouldRouteNewTaskForFollowUp(
+          sourceReference.id, readsSource),
+      isFalse,
+      reason: '作为输入来源的目录不能被误判为新任务的输出目录。',
     );
   });
 
@@ -5699,6 +6027,139 @@ void main() {
     );
   });
 
+  test('explicit v2 resume opens one bounded window after no-progress pause',
+      () async {
+    final stalledGuard = {
+      'noProgressCount': WorkProgressGuard.noProgressResultLimit + 1,
+      'repeatedFailureCount': 1,
+      'lastFailureFingerprint': 'prior-failure',
+      'failureConditionFingerprint': 'prior-condition',
+      'progressFingerprints': ['prior-progress'],
+      'attempts': ['此前读取到相同内容'],
+      'missing': '需要新的文件变化',
+      'stalled': true,
+      'reason': '连续 9 个结果没有带来新的问题、证据、验收或文件内容变化。',
+    };
+    final groupTask = _v2DecisionTask('resume-v2-no-progress', decisions: [])
+      ..status = AgentTaskStatus.paused
+      ..resumeRequired = true
+      ..lastError = '任务停滞';
+    final groupExecution = _executionMapForTest(groupTask)
+      ..[WorkProgressGuard.jsonKey] = Map<String, dynamic>.from(stalledGuard);
+    groupTask.executionStateJson = jsonEncode(groupExecution);
+    final dmTask =
+        _task(id: 'resume-dm-no-progress', conversationId: 'dm:worker')
+          ..status = AgentTaskStatus.paused
+          ..resumeRequired = true
+          ..lastError = '任务停滞'
+          ..executionStateJson = jsonEncode({
+            WorkProgressGuard.jsonKey: Map<String, dynamic>.from(stalledGuard),
+          });
+    await taskBox.put(groupTask.id, groupTask);
+    await taskBox.put(dmTask.id, dmTask);
+
+    await coordinator.resumeByUser(groupTask.id);
+    await coordinator.resumeByUser(dmTask.id);
+
+    final groupGuard = _executionMapForTest(
+      taskBox.get(groupTask.id)!,
+    )[WorkProgressGuard.jsonKey] as Map;
+    expect(groupGuard['noProgressCount'], 0);
+    expect(groupGuard['stalled'], isFalse);
+    expect(groupGuard.containsKey('reason'), isFalse);
+    expect(groupGuard['repeatedFailureCount'], 1);
+    expect(groupGuard['progressFingerprints'], ['prior-progress']);
+    final dmGuard = _executionMapForTest(
+      taskBox.get(dmTask.id)!,
+    )[WorkProgressGuard.jsonKey] as Map;
+    expect(dmGuard['noProgressCount'], stalledGuard['noProgressCount']);
+    expect(dmGuard['stalled'], isTrue);
+    expect(runner.startedTaskIds, contains(dmTask.id));
+    expect(runner.startedTaskIds, isNot(contains(groupTask.id)),
+        reason: '未就绪的群讨论仍由原有讨论门禁拦截');
+    runner.complete(dmTask.id);
+  });
+
+  test(
+      'explicit command reapproval reopens only selected rejection without executing',
+      () async {
+    String operation(String code) => safeToolRequestCheckpoint(
+            ToolRequest(tool: AgentToolName.commandRun, reason: '检查', args: {
+          'executable': 'python3',
+          'arguments': ['-c', code],
+          'workingDirectory': '/workspace',
+        }));
+    final selected = operation('print(1)');
+    final other = operation('print(2)');
+    String fingerprint(String value) =>
+        sha256.convert(utf8.encode(value)).toString();
+    final task = _v2DecisionTask('reapproval', decisions: [])
+      ..status = AgentTaskStatus.paused
+      ..resumeRequired = true
+      ..lastError = '相同操作此前已被拒绝，未执行'
+      ..completedOperations = [other, selected];
+    final root = _executionMapForTest(task)
+      ..['rejectedOperationFingerprints'] = [
+        fingerprint(selected),
+        fingerprint(other)
+      ];
+    task.executionStateJson = jsonEncode(root);
+    await taskBox.put(task.id, task);
+    expect(reviewableCommandCheckpointsFor(task), [selected, other]);
+    await coordinator.requestCommandReapproval(task.id, selected);
+    expect(
+        _executionMapForTest(
+            taskBox.get(task.id)!)['rejectedOperationFingerprints'],
+        [fingerprint(other)]);
+    expect(task.completedOperations, [other, selected]);
+    expect(task.status, AgentTaskStatus.paused);
+    expect(runner.startedTaskIds, isEmpty);
+    expect(task.lastError, isEmpty);
+    expect(
+        commandReapprovalContextFor(task)!['operation'], jsonDecode(selected));
+    expect(
+        (await eventStore.read(task.id))
+            .events
+            .any((e) => e.title == '用户请求重新审批所选命令'),
+        isTrue);
+    await expectLater(
+        coordinator.requestCommandReapproval(task.id, operation('print(3)')),
+        throwsStateError);
+    task.status = AgentTaskStatus.planning;
+    await expectLater(
+        coordinator.requestCommandReapproval(task.id, other), throwsStateError);
+    final dm = _task(id: 'dm-reapproval', conversationId: 'dm:worker')
+      ..status = AgentTaskStatus.paused
+      ..completedOperations = [other]
+      ..executionStateJson = jsonEncode(root);
+    await taskBox.put(dm.id, dm);
+    expect(reviewableCommandCheckpointsFor(dm), isEmpty);
+    await expectLater(
+        coordinator.requestCommandReapproval(dm.id, other), throwsStateError);
+  });
+
+  test('resume migrates a legacy rejected command fingerprint', () async {
+    const rawCheckpoint = '{"tool":"command.run","reason":"需要批准 command.run",'
+        '"args":{"executable":"python3","arguments":["-c","print(1)"],'
+        '"workingDirectory":"/workspace","declaredImpact":["/workspace/game.html"]}}';
+    final checkpoint = safeToolRequestCheckpointJson(rawCheckpoint);
+    final task = _v2DecisionTask('resume-v2-rejected-command', decisions: [])
+      ..status = AgentTaskStatus.paused
+      ..resumeRequired = true
+      ..lastError = '相同操作此前已被拒绝，未执行；不会再次提交相同审批。'
+      ..completedOperations = [checkpoint];
+    await taskBox.put(task.id, task);
+
+    await coordinator.resumeByUser(task.id);
+
+    final resumed = taskBox.get(task.id)!;
+    expect(
+      _executionMapForTest(resumed)['rejectedOperationFingerprints'],
+      [sha256.convert(utf8.encode(checkpoint)).toString()],
+    );
+    expect(resumed.lastError, isNot(startsWith('相同操作此前已被拒绝')));
+  });
+
   test('restore publishes interrupted tasks without running them', () async {
     final interrupted = _task(id: 'interrupted', conversationId: 'group-a')
       ..status = AgentTaskStatus.interrupted
@@ -5769,6 +6230,87 @@ void main() {
     await second.resumeByUser(task.id);
     expect(runner.startedTaskIds, contains(task.id));
     runner.complete(task.id);
+  });
+
+  test(
+      'current lock planner replaces stale persisted locks, including empty plans',
+      () async {
+    final manager = WorkResourceLockManager(isWindows: false);
+    final held = manager.tryAcquire('other-task', const [
+      WorkResourceLockRequest.treeWrite('/workspace/old'),
+    ])!;
+    addTearDown(held.release);
+    final local = WorkTaskCoordinator(
+      taskBox: taskBox,
+      eventStore: eventStore,
+      runner: runner,
+      resourceLockManager: manager,
+      resourceLockPlan: (_) => const [],
+    );
+    addTearDown(local.dispose);
+    final task = _task(id: 'stale-lock-plan', conversationId: 'dm:stale')
+      ..executionStateJson = jsonEncode({
+        'resourceLocks': [
+          {'path': '/workspace/old', 'mode': 'treeWrite'},
+        ],
+        'unrelatedCheckpoint': 'keep',
+      });
+    await local.submit(task);
+    expect(runner.startedTaskIds, contains(task.id));
+    final state = jsonDecode(taskBox.get(task.id)!.executionStateJson) as Map;
+    expect(state['resourceLocks'], isEmpty);
+    expect(state['unrelatedCheckpoint'], 'keep');
+    runner.complete(task.id);
+  });
+
+  test('production DM does not reserve unrelated authorized directories',
+      () async {
+    final settings = await Hive.openBox<dynamic>('dm-lock-settings');
+    final grants = WorkFolderGrantService(
+      box: settings,
+      directoryValidator: (_) async => true,
+      writeDirectoryValidator: (_) async => true,
+      isWindows: false,
+    );
+    final desktop = await Directory('${directory.path}/Desktop').create();
+    final unrelated =
+        await Directory('${desktop.path}/chat_group_out').create();
+    for (final path in [unrelated.path, desktop.path]) {
+      await grants.requestFolder(
+        picker: ([String? _]) async => path,
+        forcePicker: true,
+        consent: (_) async => true,
+      );
+    }
+    final manager = WorkResourceLockManager(isWindows: false);
+    final held = manager.tryAcquire('other-task', [
+      WorkResourceLockRequest.treeWrite(unrelated.path),
+    ])!;
+    addTearDown(held.release);
+    final container = ProviderContainer(overrides: [
+      databaseServiceProvider.overrideWithValue(DatabaseService()),
+      workTaskEventStoreProvider.overrideWithValue(eventStore),
+      workTaskRunnerProvider.overrideWithValue(runner),
+      workFolderGrantServiceProvider.overrideWithValue(grants),
+      workResourceLockManagerProvider.overrideWithValue(manager),
+    ]);
+    addTearDown(container.dispose);
+    final local = container.read(workTaskCoordinatorProvider);
+    await local.restore();
+    final task = _task(id: 'desktop-dm', conversationId: 'dm:desktop')
+      ..userRequest = '在 ${desktop.path} 创建游戏 HTML 文件'
+      ..executionStateJson = jsonEncode({
+        'resourceLocks': [
+          {'path': unrelated.path, 'mode': 'treeWrite'},
+          {'path': desktop.path, 'mode': 'treeWrite'},
+        ],
+      });
+    await local.submit(task);
+    await _waitUntil(() => runner.startedTaskIds.contains(task.id));
+    expect(manager.waitingOwnerIds, isEmpty);
+    expect(manager.activeLockCount, 1, reason: '只有另一个任务持有的目录锁');
+    runner.complete(task.id);
+    await _settle();
   });
 
   test('persists a runner-derived resource lock plan before execution',
@@ -6480,7 +7022,8 @@ void main() {
     expect(state.artifactContract['type'], 'software');
   });
 
-  test('a supplement on an idle v2 task restarts the discussion', () async {
+  test('an idle v2 task requires confirmation before renewed discussion',
+      () async {
     await coordinator.dispose();
     final discussion = _CountingV2DiscussionRunner();
     coordinator = WorkTaskCoordinator(
@@ -6497,8 +7040,12 @@ void main() {
         sourceMessageId: 'review-input');
     await _drainEventLoop();
 
-    expect(taskBox.get(task.id)!.userRequest, contains('修改同一文件的标题'));
-    expect(discussion.calls, 2, reason: '新要求已纳入但应自动重新讨论');
+    final renewed = taskBox.get(task.id)!;
+    expect(renewed.userRequest, contains('修改同一文件的标题'));
+    expect(WorkTaskRequirementsConfirmation.isCurrent(renewed), isTrue);
+    expect(discussion.calls, 1, reason: '确认新版需求前不启动新一轮讨论');
+    await _confirmRequirements(coordinator, taskBox, task.id);
+    await _waitUntil(() => discussion.calls == 2);
   });
 
   /// 还没有执行人、但检查点里已经有合格候选的群任务：路由把执行人交给群推举
@@ -6587,6 +7134,26 @@ void main() {
       )?.executorId,
       isNull,
     );
+  });
+
+  test('v2确认前点选执行人递增协作版本并保留需求确认门禁', () async {
+    final discussionRunner = await useDiscussionRunner();
+    final task = await storeExecutorSelectionTask('v2-executor-pick',
+        collaborationPhase: 'forming');
+    WorkTaskRequirementsConfirmation.requireForCurrentRequest(task);
+    await taskBox.put(task.id, task);
+    final before = WorkDiscussionState.fromExecutionState(
+        task.executionStateJson)!.collaboration!;
+    await coordinator.selectDiscussionExecutor(task.id, characterId: 'engine');
+    await _settle();
+    final stored = taskBox.get(task.id)!;
+    final after = WorkDiscussionState.fromExecutionState(
+        stored.executionStateJson)!;
+    expect(after.collaboration!.revision, before.revision + 1);
+    expect(after.requestRevision, 1);
+    expect(after.executorId, 'engine');
+    expect(WorkTaskRequirementsConfirmation.isCurrent(stored), isTrue);
+    expect(discussionRunner.runCount, 0);
   });
 
   test('已经有执行人的任务不接受再次指定', () async {

@@ -272,6 +272,8 @@ extension _DefaultWorkTaskRunnerTools on DefaultWorkTaskRunner {
             startByte: startByte,
             byteLength: byteLength,
             allowSensitive: approved,
+            alignUtf8Range:
+                WorkTaskExecutionPolicy.isValidatedV2GroupTask(task),
           );
           if (_approvalDecision(task.executionStateJson) ==
                   WorkChangeApprovalDecision.rejected &&

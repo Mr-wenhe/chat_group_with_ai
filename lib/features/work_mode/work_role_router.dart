@@ -166,8 +166,10 @@ class WorkRoleRouter {
       List<String> confirmedMemberIds = const []}) {
     final availableSkills = skills.toList();
     final kinds = stageKindsForRequest(request);
-    final mentions = analyzeMentionedCharacterIds(request, characters);
-    final intent = _workRoleMentionIntent(request, characters);
+    final mentionRequest =
+        _normalizeAdjacentLocativeWorkMentions(request, characters);
+    final mentions = analyzeMentionedCharacterIds(mentionRequest, characters);
+    final intent = _workRoleMentionIntent(mentionRequest, characters);
     final errors = <String>[
       if (intent.ambiguousExecutorIds.isNotEmpty) '指定多个最终执行人，请明确责任，未自动选择。',
       if (mentions.ambiguousNames.isNotEmpty)
@@ -300,8 +302,10 @@ class WorkRoleRouter {
       );
     }
     final directId = conversationDirectId ?? suppliedDirectId;
-    final mentions = analyzeMentionedCharacterIds(normalizedRequest, members);
-    final mentionIntent = _workRoleMentionIntent(normalizedRequest, members);
+    final mentionRequest =
+        _normalizeAdjacentLocativeWorkMentions(normalizedRequest, members);
+    final mentions = analyzeMentionedCharacterIds(mentionRequest, members);
+    final mentionIntent = _workRoleMentionIntent(mentionRequest, members);
     final contract = _deliverableContract(
       normalizedRequest,
       explicitExecutorId: mentionIntent.explicitExecutorId,

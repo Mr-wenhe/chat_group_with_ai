@@ -108,6 +108,7 @@ class ChatApiService {
     Duration? receiveTimeout,
     int maxRetries = RetryHandler.defaultMaxRetries,
     CancelToken? cancelToken,
+    String? reasoningEffort,
     bool structuredJson = false,
     bool allowReasoningContentFallback = false,
     required int maxResponseBytes,
@@ -135,6 +136,7 @@ class ChatApiService {
         cancelToken: cancelToken,
         maxResponseBytes: maxResponseBytes,
         structuredJson: structuredJson,
+        reasoningEffort: reasoningEffort,
         allowReasoningContentFallback: allowReasoningContentFallback,
         stepPlanLowReasoning: _isStepPlanEndpoint(
           provider: provider,
@@ -237,6 +239,7 @@ class ChatApiService {
     Duration? receiveTimeout,
     CancelToken? cancelToken,
     required int? maxResponseBytes,
+    String? reasoningEffort,
     bool structuredJson = false,
     bool stepPlanLowReasoning = false,
     bool allowReasoningContentFallback = false,
@@ -275,6 +278,7 @@ class ChatApiService {
           maxTokens: maxTokens,
           streaming: false,
           structuredJson: structuredJson,
+          reasoningEffort: reasoningEffort,
           stepPlanLowReasoning: stepPlanLowReasoning,
         ),
         options: Options(
@@ -420,6 +424,9 @@ class ChatApiService {
     Duration receiveTimeout = const Duration(seconds: 120),
     int maxRetries = RetryHandler.defaultMaxRetries,
     CancelToken? cancelToken,
+    bool finishOnTerminalFrame = false,
+    String? reasoningEffort,
+    void Function()? onResponseActivity,
     void Function(ChatStreamEvent event)? onEvent,
   }) {
     return _sendChatMessageStreamedInternal(
@@ -435,6 +442,9 @@ class ChatApiService {
       maxRetries: maxRetries,
       cancelToken: cancelToken,
       structuredJson: false,
+      finishOnTerminalFrame: finishOnTerminalFrame,
+      reasoningEffort: reasoningEffort,
+      onResponseActivity: onResponseActivity,
       onEvent: onEvent,
     );
   }
@@ -455,6 +465,9 @@ class ChatApiService {
     Duration receiveTimeout = const Duration(seconds: 120),
     int maxRetries = RetryHandler.defaultMaxRetries,
     CancelToken? cancelToken,
+    bool finishOnTerminalFrame = false,
+    String? reasoningEffort,
+    void Function()? onResponseActivity,
     void Function(ChatStreamEvent event)? onEvent,
   }) {
     return _sendChatMessageStreamedInternal(
@@ -470,6 +483,9 @@ class ChatApiService {
       maxRetries: maxRetries,
       cancelToken: cancelToken,
       structuredJson: true,
+      finishOnTerminalFrame: finishOnTerminalFrame,
+      reasoningEffort: reasoningEffort,
+      onResponseActivity: onResponseActivity,
       onEvent: onEvent,
     );
   }
@@ -487,6 +503,9 @@ class ChatApiService {
     required int maxRetries,
     CancelToken? cancelToken,
     required bool structuredJson,
+    bool finishOnTerminalFrame = false,
+    String? reasoningEffort,
+    void Function()? onResponseActivity,
     void Function(ChatStreamEvent event)? onEvent,
   }) async {
     if (kIsWeb) {
@@ -512,6 +531,7 @@ class ChatApiService {
             cancelToken: cancelToken,
             allowReasoningContentFallback: structuredJson,
             structuredJson: structuredJson,
+            reasoningEffort: reasoningEffort,
             stepPlanLowReasoning: _isStepPlanEndpoint(
               provider: provider,
               customBaseUrl: customBaseUrl,
@@ -531,6 +551,9 @@ class ChatApiService {
           receiveTimeout: receiveTimeout,
           cancelToken: cancelToken,
           structuredJson: structuredJson,
+          finishOnTerminalFrame: finishOnTerminalFrame,
+          reasoningEffort: reasoningEffort,
+          onResponseActivity: onResponseActivity,
           onEvent: onEvent,
         );
       },
@@ -601,6 +624,10 @@ class ChatApiService {
     int maxTokens = 1024,
     Duration receiveTimeout = const Duration(seconds: 120),
     CancelToken? cancelToken,
+    // Group work may finish before trailing usage frames; default callers wait.
+    bool finishOnTerminalFrame = false,
+    String? reasoningEffort,
+    void Function()? onResponseActivity,
   }) {
     return _streamChatMessageInternal(
       apiKey: apiKey,
@@ -614,6 +641,9 @@ class ChatApiService {
       receiveTimeout: receiveTimeout,
       cancelToken: cancelToken,
       structuredJson: false,
+      finishOnTerminalFrame: finishOnTerminalFrame,
+      reasoningEffort: reasoningEffort,
+      onResponseActivity: onResponseActivity,
     );
   }
 
@@ -629,6 +659,9 @@ class ChatApiService {
     required Duration receiveTimeout,
     CancelToken? cancelToken,
     required bool structuredJson,
+    bool finishOnTerminalFrame = false,
+    String? reasoningEffort,
+    void Function()? onResponseActivity,
   }) async* {
     if (kIsWeb) {
       yield ChatStreamEvent.error(_webNetworkUnsupportedMessage,
@@ -661,6 +694,7 @@ class ChatApiService {
     final data = _requestBody(
       apiProtocol: apiProtocol,
       model: modelName,
+      reasoningEffort: reasoningEffort,
       messages: messages,
       temperature: temperature,
       maxTokens: maxTokens,
@@ -674,10 +708,13 @@ class ChatApiService {
 
     final parser = SseParser(
       allowReasoningContentFallback: structuredJson,
+      onResponseActivity: onResponseActivity,
     );
     final protocolParser = apiProtocol == ApiProtocol.openAiChatCompletions
         ? null
-        : _ProtocolStreamParser(apiProtocol);
+        : _ProtocolStreamParser(apiProtocol,
+            onResponseActivity: onResponseActivity,
+            separateThoughts: finishOnTerminalFrame);
     try {
       final response = await _dio.post<ResponseBody>(
         url,
@@ -739,6 +776,15 @@ class ChatApiService {
                 )
               : event;
           if (parser.terminated || protocolParser?.terminated == true) return;
+        }
+        if (finishOnTerminalFrame &&
+            (apiProtocol == ApiProtocol.openAiChatCompletions
+                ? parser.hasTerminalFrame
+                : protocolParser!.hasTerminalFrame)) {
+          yield apiProtocol == ApiProtocol.openAiChatCompletions
+              ? parser.doneEvent()
+              : protocolParser!.doneEvent();
+          return;
         }
       }
       // 流正常结束，仅当解析器未被终止（非 [DONE] 路径）时产出 done 事件，

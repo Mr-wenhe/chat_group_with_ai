@@ -13,6 +13,8 @@ import 'package:chat_group/core/storage/api_credential_resolver.dart';
 import 'package:chat_group/features/work_mode/work_context_boundary.dart';
 import 'package:chat_group/features/work_mode/work_discussion_runner.dart';
 import 'package:chat_group/features/work_mode/work_discussion_state.dart';
+import 'package:chat_group/features/chat_group/roundtable_news_role_service.dart'
+    show RoundtableNewsRoleService, roundtableNewsRoleId;
 import 'package:chat_group/features/work_mode/work_task_coordinator.dart';
 import 'package:dio/dio.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -408,6 +410,7 @@ void main() {
       aiCharacterIds: characters.map((character) => character.id).toList(),
     );
     await database.chatGroupBox.put(group.id, group);
+    await RoundtableNewsRoleService.ensureForGroup(database, group.id);
 
     final contract = <String, dynamic>{
       'deliverableType': 'source',
@@ -437,6 +440,7 @@ void main() {
       );
 
     final callIds = <String>[];
+    final submittedPrompts = <String>[];
     final updates = <WorkDiscussionState>[];
     final runner = WorkDiscussionRunner(
       database: database,
@@ -452,6 +456,9 @@ void main() {
         cancelToken,
       }) async {
         callIds.add(character.id);
+        submittedPrompts.add(messages
+            .map((message) => message['content'].toString())
+            .join('\n'));
         final coordinator =
             messages.first['content'].toString().contains('协调/执行人');
         return <String, dynamic>{
@@ -492,6 +499,11 @@ void main() {
     expect(finalState.deliverableContract?['explicitExecutorId'], isNull);
     expect(finalState.understandingPercent, 100);
     expect(callIds.take(3), ['product', 'front', 'test']);
+    expect(callIds, isNot(contains(roundtableNewsRoleId)));
+    expect(submittedPrompts.join('\n'), isNot(contains(roundtableNewsRoleId)));
+    expect(database.chatGroupBox.get(group.id)!.aiCharacterIds,
+        contains(roundtableNewsRoleId),
+        reason: '群成员配置保持原样');
     expect(
         callIds.where((id) => id == 'product').length, greaterThanOrEqualTo(2));
     expect(callIds.where((id) => id == 'test').length, greaterThanOrEqualTo(2));

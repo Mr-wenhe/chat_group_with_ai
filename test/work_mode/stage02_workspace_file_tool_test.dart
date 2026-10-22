@@ -86,6 +86,20 @@ void main() {
     );
   }
 
+  test('group range read supplies full digest; default read remains compatible',
+      () async {
+    final file = File('${root.path}/part.md');
+    final bytes = utf8.encode('中文材料与完整正文');
+    await file.writeAsBytes(bytes);
+    final tool = toolFor(task('read-digest'));
+    final legacy = await tool.readWithOptions('part.md');
+    expect(legacy.containsKey('sha256'), isFalse);
+    final group = await tool.readWithOptions('part.md',
+        startByte: 1, byteLength: 5, alignUtf8Range: true);
+    expect(group['ok'], isTrue);
+    expect(group['sha256'], sha256.convert(bytes).toString());
+  });
+
   test('routes list/read/write through Stage02 services and supports undo',
       () async {
     final current = task('stage02-write');
@@ -386,6 +400,29 @@ void main() {
     expect(result['content'], 'before');
   });
 
+  test('file mutations do not lock unrelated children of the authorized root',
+      () async {
+    final held = await resourceLocks.acquire('other-task', [
+      WorkResourceLockRequest.treeWrite('${root.path}/chat_group_out'),
+    ]);
+    addTearDown(held.release);
+    final tool = toolFor(task('desktop-file-mutations'));
+    final path = '${root.path}/game.html';
+    final renamedPath = '${root.path}/renamed.html';
+    final operations = [
+      () => tool.write(path, '<!DOCTYPE html><title>Game</title>'),
+      () => tool.write(path, '<!DOCTYPE html><title>Updated</title>'),
+      () => tool.rename(path, renamedPath),
+      () => tool.delete(renamedPath),
+    ];
+    for (final operation in operations) {
+      final result = await operation().timeout(const Duration(seconds: 2));
+      expect(result['ok'], isTrue, reason: result.toString());
+    }
+    expect(resourceLocks.waitingOwnerIds, isEmpty);
+    expect(resourceLocks.activeLockCount, 1);
+  });
+
   test('does not silently fall back to patch or command execution', () async {
     final tool = Stage02WorkspaceFileTool(
       files: files,
@@ -622,7 +659,9 @@ void main() {
       taskId: current.id,
       actionType: WorkChangeActionType.modify,
       exactPaths: [File(target).resolveSymbolicLinksSync()],
-      knownAffectedDirectories: [Directory(root.path).resolveSymbolicLinksSync()],
+      knownAffectedDirectories: [
+        Directory(root.path).resolveSymbolicLinksSync()
+      ],
       estimatedBytes: 4,
       snapshotAvailable: true,
       reversible: true,
@@ -654,7 +693,8 @@ void main() {
     expect(await File(target).readAsString(), '旧版本');
   });
 
-  test('merge reads a sensitive part once its exact read is approved', () async {
+  test('merge reads a sensitive part once its exact read is approved',
+      () async {
     // 令牌按模型给出的原始拼写铸造——与 workspace.read 的审批同一条口径。
     final current = task('stage02-merge-sensitive-approved');
     final target = '${root.path}/report.md';
@@ -665,7 +705,9 @@ void main() {
       taskId: current.id,
       actionType: WorkChangeActionType.modify,
       exactPaths: [File(target).resolveSymbolicLinksSync()],
-      knownAffectedDirectories: [Directory(root.path).resolveSymbolicLinksSync()],
+      knownAffectedDirectories: [
+        Directory(root.path).resolveSymbolicLinksSync()
+      ],
       estimatedBytes: 4,
       snapshotAvailable: true,
       reversible: true,

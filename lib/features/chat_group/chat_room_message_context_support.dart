@@ -344,6 +344,7 @@ extension _ChatRoomMessageContextSupport on _ChatRoomPageState {
       userMessage,
       recentHistory,
       currentUserMessage,
+      characterId: character.id,
     );
     if (documentContext.isNotEmpty) {
       msgs.add({'role': 'system', 'content': documentContext});
@@ -393,11 +394,7 @@ extension _ChatRoomMessageContextSupport on _ChatRoomPageState {
     return msgs;
   }
 
-  /// 解析历史与当前消息里的文档附件，生成可注入 prompt 的文档上下文。
-  ///
-  /// 无查询词或无可解析附件时返回空串（不触发任何解析开销）。
-  /// 解析过程可能较慢，通过 [DocumentProcessingToken] 支持用户中途取消，
-  /// 并用 identical 校验确保只有"当前那次"解析才更新进度 UI。
+  /// 提取最近对话的焦点。
   String _extractRecentFocus(List<Message> messages) {
     return ChatOrchestrator.extractRecentFocus(messages);
   }

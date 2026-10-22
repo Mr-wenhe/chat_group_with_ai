@@ -454,7 +454,8 @@ extension _DefaultWorkTaskRunnerContext on DefaultWorkTaskRunner {
         : task.contextSummary.trim();
     final handoff = WorkHandoffState.fromTask(task);
     final execution = _decodeMap(task.executionStateJson)['workItemExecution'];
-    final usageAssignment = execution is Map && execution['stage'] == 'usage'
+    final usageAssignment = execution is Map &&
+            const {'usage', 'verify'}.contains(execution['stage'])
         ? WorkDiscussionState.fromExecutionState(task.executionStateJson)
             ?.collaboration
             ?.usageAssignments
@@ -466,6 +467,14 @@ extension _DefaultWorkTaskRunnerContext on DefaultWorkTaskRunner {
         : (usageAssignment['requiredCapabilities'] as List)
             .cast<String>()
             .toSet();
+    final canUseBrowserContext = usageAssignment != null &&
+        candidate != null &&
+        _canUseBrowserContext(
+          task,
+          character,
+          usageAssignment,
+          candidate,
+        );
     final documentFiles = candidate?.files
             .where((entry) => const {'docx', 'pdf'}.contains(p
                 .extension(entry['path'] as String)
@@ -483,7 +492,24 @@ extension _DefaultWorkTaskRunnerContext on DefaultWorkTaskRunner {
     return [
       base,
       if (_decodeMap(task.executionStateJson)['workItemExecution'] is Map)
-        '当前成员工作项：${jsonEncode(_decodeMap(task.executionStateJson)['workItemExecution'])}；协作方案与验收：${jsonEncode(WorkDiscussionState.fromExecutionState(task.executionStateJson)?.collaboration?.toPromptJson())}。只完成当前工作项，不代表整个任务完成。material 工作项须写本任务必要且可打开的工作材料；软件包含需求/技术/测试材料，produce 工作项按合同文件制作。verify 工作项须实际读取或执行验证，禁止改产物和断言；finish.evidence 仅含一个 JSON 字符串 {method,result:"passed|failed|blocked",acceptanceIds:[全部覆盖项],report:"完整报告",defects:[{acceptanceId,reproduction,expected,actual,retestCondition}]}。软件测试命令标准输出须为 JSON {artifactDigest:"当前候选摘要",tests:[{id,status:"passed|failed",method:"对应 requiredCapability",reproduction,expected,actual}]}；必须实际执行对应测试，退出码0或 HTML 结构/打开不能替代交互覆盖，能力缺失返回 blocked。不删失败用例刷绿。',
+        '当前成员工作项：${jsonEncode(_decodeMap(task.executionStateJson)['workItemExecution'])}；协作方案与验收：${jsonEncode(WorkDiscussionState.fromExecutionState(task.executionStateJson)?.collaboration?.toPromptJson())}。只完成当前工作项，不代表整个任务完成。',
+      if ((_decodeMap(task.executionStateJson)['workItemExecution']
+              as Map?)?['stage'] ==
+          'material')
+        '当前仅制作需求/技术/测试工作材料。写入后用 workspace.read 读回核对，finish.evidence 必须是已实际读取成功的材料文件完整路径数组，不放 JSON 测试报告、说明文字或尚未生成的交付文件。材料可打开且内容完整即可提交本工作项，不运行最终 HTML 的校验命令、不声称游戏测试通过；后续 produce 与独立验证仍由原流程执行。',
+      if (WorkTaskExecutionPolicy.isValidatedV2GroupTask(task) &&
+          const {'material', 'produce'}.contains(
+              (_decodeMap(task.executionStateJson)['workItemExecution']
+                  as Map?)?['stage']))
+        '分段写入与连续修复：先按当前工作项和已确认合同选定正式文件完整路径；已有内容有重复或缺项时，保留该目标路径修复。分段文件只是中间稿：先读回本轮已写分段，再用 append:true 仅追加尚不存在的后续内容。修复重复内容必须使用 expectedSha256、expectedFragment、replacement 精确替换；expectedSha256 逐字复制最近 workspace.read 返回的 sha256，不猜测、不省略；没有摘要时先取得真实摘要，不能反复提交缺字段补丁。若确需完整重写，必须显式 append:false、overwrite:true 且 content 包含完整待保留内容，不能把新的 head/style 追加到旧稿末尾，也不能用不完整头部覆盖已完成脚本。workspace.read 返回 truncated:true 只代表本次读取被截断，不代表磁盘文件缺失后半段；用 startByte、byteLength（每段不超过 6000 字节）分段读取到实际末尾再决定续写位置，不反复从 0 读取同一预览。写全后用 workspace.patch 的 parts 按序合并到该正式目标，再读回这个目标；不能只改分段又反复读取未更新的旧合并版，不能靠改分段名称重新起稿。审批恢复后先根据真实写入记录确认当前分段与待合并目标，继续未完成的续写或合并，不重建已完成部分。恢复不是重新开工，artifacts 与 completedActions 中的已写文件仍然存在；软件头部与样式已写好时，先读回末尾接着追加界面和脚本逻辑，不再换名重写 head/style；最终合并到合同要求的 HTML，不能把中间稿当作候选交付。',
+      if ((_decodeMap(task.executionStateJson)['workItemExecution']
+              as Map?)?['stage'] ==
+          'produce')
+        '当前按已确认合同制作交付文件，finish.evidence 使用实际生成的文件路径。本工作项须有真实工具写入，且合同目标的内容摘要相对开工基线实际变化；历史写入、只读旧文件、只写分段、改时间或重写相同内容不算本轮制作完成。优化或修复必须落实到目标文件，再读回验证，不能只重复旧功能介绍。制作人自检不代替冻结候选后的独立测试，不把材料完成当作软件完成。交付文件已合并、内容完整且本轮合同静态命令已有实际成功记录时，提交 finish 结束制作工作项，由运行时冻结候选并安排独立测试；这里的 finish 只提交候选，不代表整个任务通过。独立浏览器只支持具名控件 click、observe、assert、resize，以及 open 时已确认的 queryParameters，不支持键盘或输入框填值；测试入口须用可点击按钮或已确认参数，不能只用快捷键，棋子须有可区分的可访问名称。没有新缺陷或文件变化时，不重复读同一文件、不换名创建尾部/结构/最终检查脚本、不重跑已成功的同一检查。额外自检工具缺失或跳过必须如实说明，不能记为通过；独立验收能力缺失仍须阻塞，不得降级。真实检查失败时修复对应缺陷再复查，文件变化后的旧结果不授权新文件。',
+      if ((_decodeMap(task.executionStateJson)['workItemExecution']
+              as Map?)?['stage'] ==
+          'verify')
+        'verify 工作项须实际读取或执行验证，禁止创建校验脚本、改产物和断言；已提供 browser.context 时直接 open 当前候选并按已确认步骤 click/assert，不能探测或安装其他浏览器来替代现有入口；finish.evidence 仅含一个 JSON 字符串 {method,result:"passed|failed|blocked",acceptanceIds:[全部覆盖项],report:"完整报告",defects:[{acceptanceId,reproduction,expected,actual,retestCondition}]}。软件测试命令标准输出须为 JSON {artifactDigest:"当前候选摘要",tests:[{id,status:"passed|failed",method:"对应 requiredCapability",reproduction,expected,actual}]}；必须实际执行对应测试，退出码0或 HTML 结构/打开不能替代交互覆盖，能力缺失返回 blocked。不删失败用例刷绿。',
       if ((_decodeMap(task.executionStateJson)['workItemExecution']
               as Map?)?['stage'] ==
           'usage')
@@ -493,6 +519,8 @@ extension _DefaultWorkTaskRunnerContext on DefaultWorkTaskRunner {
             '${usageCapabilities.contains('document.body') ? ' 文字检查：从 workspace.document(operation:"read",startChunk:0) 开始，按 nextChunkStart 读完本人责任范围的 totalChunkCount；不能用搜索片段当全文，也不能用正文提取判断版式。检查错字、标点、术语、编号、引用、歧义、重复和空泛表达；文案要具体清楚、适合读者，不删事实、引用、数字或明示要求，也不以 AI 来源检测分数验收。' : ''}'
             '${usageCapabilities.contains('document.visual') ? ' 视觉检查：使用本人模型实际收到每个指定文件的必要页图，逐页调用 workspace.document(operation:"render",page:N)，核对页码、总页数和渲染 manifest；缺页要补齐，不能用正文提取代替版式检查。检查遮挡、错位、截断、分页、跨页表格、图文关系和样式一致性。模型看不到图、必要页/渲染器/字体覆盖不完整时明确 blocked。' : ''}'
             '${usageCapabilities.contains('document.body') || usageCapabilities.contains('document.visual') ? ' report 写出全部发现，引用真实原文或页图证据，指出原句/页码/区域、影响和可执行修改；不确定的专有名词或渲染差异先核实，不制造问题。缺陷的 sourceLocation 仅使用解析器允许的 fileName、paragraph、lineStart、lineEnd、page、sheet 字段，具体原句和区域写在 report/defects 文本中。文档反馈额外包含 documentEvidence:{pageNumbers:[本人实际看过的页码],sourceLocations:[本人实际读到的原文位置]}，每个缺陷都要有本人观察到的 sourceLocation。制作人修订并发布新候选后，重新读取/渲染对应内容再复测，旧页图与收据失效。' : ''}',
+      if (canUseBrowserContext)
+        '当前场景可使用 browser.context。工具参数必须使用实际 schema：open 为 {"operation":"open"}；click 为 {"operation":"click","sessionRef":"原样复制返回值","label":"控件可访问名称"}；observe/close 仅含 operation 与 sessionRef；assert 为 {"operation":"assert","sessionRef":"原样复制返回值","acceptanceId":"当前验收ID","expectedText":"已确认的预期文字"}。每完成一项就立即 assert 并记录该项结果，然后进入下一项，不把聊天中自述“通过”当作断言，不反复从已完成用例起步。browserCurrentPage 是最近工具实测页面，历史正文和更早截图不能当作当前局面；没有新证据不要重开已完成用例。open 只打开当前冻结候选中唯一的 HTML；可选 queryParameters 仅用于方案已确认的可复现测试夹具（最多 8 项、键值有长度限制且拒绝敏感字段名），不能指定路径或 URL。返回的 sessionRef 必须原样用于后续 observe、click、assert、resize、close。浏览器在隔离的离线 WKWebView 中运行，不提供任意路径、URL 或脚本执行。当前没有键盘、输入框填值、悬停或拖拽操作；click 只按可见文字或可访问名称点控件。制作确定性测试入口时使用具名按钮或已确认 queryParameters，不能只提供键盘快捷键；每枚棋子使用可区分的可访问名称。每次操作后检查页面实际文字和截图；textTruncated 为 true 时不能用截断文本断言。每项验收的 expectedText 必须来自该项已确认的 expectedResult 或 method。软件游戏要实际操作并观察状态变化，覆盖掷骰、回合、起飞与移动、撞子回基地、终点胜负和重新开始；按钮存在、读源码、打开页面或命令退出码都不算完成。出现页面卡住、操作结果不确定或控制项不可用时先 observe/close 并如实报告，不能盲目重放或改用源码通过。',
       if ((_decodeMap(task.executionStateJson)['workItemExecution']
                   as Map?)?['stage'] ==
               'usage' &&

@@ -19,7 +19,10 @@ import 'package:chat_group/features/chat_group/widgets/message_selectable_text.d
 import 'package:chat_group/features/chat_group/widgets/video_bubble.dart';
 import 'package:chat_group/features/chat_group/widgets/wecom_chat_components.dart';
 import 'package:chat_group/features/document/document_understanding_service.dart';
+import 'package:chat_group/features/document/attachment_preview_dialog.dart';
+import 'package:chat_group/features/document/attachment_preview_format.dart';
 import 'package:chat_group/features/work_mode/work_detail_attachment.dart';
+import 'package:chat_group/features/work_mode/presentation/work_task_overlay_host.dart';
 import 'package:chat_group/features/work_mode/work_mode_task_lifecycle.dart';
 import 'package:chat_group/features/work_mode/work_task_user_action.dart';
 import 'package:flutter/material.dart';
@@ -63,6 +66,7 @@ String _avatarTextFrom(String? avatar, String? name) {
 /// with no dependency on `_ChatRoomPageState`.
 class ChatMessageBubble extends StatelessWidget {
   final Message message;
+  final bool isDirectChat;
   final AICharacter? sender;
   final List<AICharacter> characters;
   final ColorScheme cs;
@@ -131,6 +135,7 @@ class ChatMessageBubble extends StatelessWidget {
   const ChatMessageBubble({
     super.key,
     required this.message,
+    this.isDirectChat = false,
     this.sender,
     this.memberName,
     required this.characters,
@@ -285,6 +290,8 @@ class ChatMessageBubble extends StatelessWidget {
                           message: message,
                           isUser: isUser,
                           cs: cs,
+                          isDirectChat: isDirectChat,
+                          entityLabels: entityLabels,
                         ),
                         _buildContent(context, message),
                         if (taskAction != null)
@@ -339,27 +346,112 @@ class ChatMessageBubble extends StatelessWidget {
       shape: BoxShape.rectangle,
       borderRadius: const BorderRadius.all(Radius.circular(4)),
       background: accent.withValues(alpha: 0.14),
-      textStyle: TextStyle(
-          fontSize: 14, fontWeight: FontWeight.w600, color: accent),
+      textStyle:
+          TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: accent),
     );
   }
 
   Widget _buildTaskAction(BuildContext context, WorkTaskUserAction action) {
     final callback = onTaskAction;
-    return Padding(
-      padding: const EdgeInsets.only(top: 10),
-      child: Semantics(
-        button: true,
-        label: action.semanticLabel,
-        onTap: callback == null ? null : () => callback(action),
-        child: ExcludeSemantics(
-          child: OutlinedButton.icon(
-            key: ValueKey<String>(action.messageId),
-            onPressed: callback == null ? null : () => callback(action),
-            icon: const Icon(Icons.open_in_new_rounded, size: 17),
-            label: Text(action.label),
+    if (isDirectChat) {
+      return Padding(
+        padding: const EdgeInsets.only(top: 10),
+        child: Semantics(
+          button: true,
+          label: action.semanticLabel,
+          onTap: callback == null ? null : () => callback(action),
+          child: ExcludeSemantics(
+            child: OutlinedButton.icon(
+              key: ValueKey<String>(action.messageId),
+              onPressed: callback == null ? null : () => callback(action),
+              icon: const Icon(Icons.open_in_new_rounded, size: 17),
+              label: Text(action.label),
+            ),
           ),
         ),
+      );
+    }
+    final colors = Theme.of(context).colorScheme;
+    final (statusIcon, statusText, statusColor) = switch (action.kind) {
+      WorkTaskUserActionKind.confirmRequirements => (
+          Icons.fact_check_outlined,
+          '待你确认',
+          colors.tertiary,
+        ),
+      WorkTaskUserActionKind.answerQuestion => (
+          Icons.help_outline_rounded,
+          '需要你回答',
+          colors.primary,
+        ),
+      WorkTaskUserActionKind.authorizeFolder ||
+      WorkTaskUserActionKind.approveCommand ||
+      WorkTaskUserActionKind.installTool =>
+        (
+          Icons.lock_clock_outlined,
+          '等待授权或处理',
+          colors.tertiary,
+        ),
+      WorkTaskUserActionKind.confirmExecutorSwap => (
+          Icons.groups_2_outlined,
+          '需要确认执行人',
+          colors.secondary,
+        ),
+      WorkTaskUserActionKind.addMember => (
+          Icons.group_add_outlined,
+          '等待补充成员',
+          colors.secondary,
+        ),
+      WorkTaskUserActionKind.openTask => (
+          Icons.pending_actions_rounded,
+          '任务需要处理',
+          colors.error,
+        ),
+    };
+    return Padding(
+      padding: const EdgeInsets.only(top: 10),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          DecoratedBox(
+            decoration: BoxDecoration(
+              color: statusColor.withValues(alpha: 0.10),
+              border: Border.all(color: statusColor.withValues(alpha: 0.45)),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(statusIcon, size: 16, color: statusColor),
+                  const SizedBox(width: 6),
+                  Text(
+                    statusText,
+                    style: TextStyle(
+                      color: statusColor,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 6),
+          Semantics(
+            button: true,
+            label: action.semanticLabel,
+            onTap: callback == null ? null : () => callback(action),
+            child: ExcludeSemantics(
+              child: OutlinedButton.icon(
+                key: ValueKey<String>(action.messageId),
+                onPressed: callback == null ? null : () => callback(action),
+                icon: const Icon(Icons.open_in_new_rounded, size: 17),
+                label: Text(action.label),
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }

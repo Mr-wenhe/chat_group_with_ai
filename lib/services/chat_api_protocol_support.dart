@@ -119,6 +119,7 @@ extension _ChatApiServiceProtocolSupport on ChatApiService {
     required bool streaming,
     bool structuredJson = false,
     bool stepPlanLowReasoning = false,
+    String? reasoningEffort,
   }) {
     return switch (apiProtocol) {
       ApiProtocol.anthropicMessages => _anthropicRequestBody(
@@ -132,6 +133,9 @@ extension _ChatApiServiceProtocolSupport on ChatApiService {
           'model': model,
           'messages': messages,
           'temperature': temperature,
+          if (model.trim().toLowerCase() == 'step-5-preview' &&
+              const {'low', 'medium', 'high'}.contains(reasoningEffort))
+            'reasoning_effort': reasoningEffort,
           if (maxTokens > 0) 'max_tokens': maxTokens,
           if (streaming) 'stream': true,
           if (streaming) 'stream_options': {'include_usage': true},
@@ -371,11 +375,11 @@ extension _ChatApiServiceProtocolSupport on ChatApiService {
       _ => data['usage'],
     };
     if (usage is! Map) return null;
-    final prompt = _intValue(
-      protocol == ApiProtocol.geminiGenerateContent
-          ? usage['promptTokenCount']
-          : usage['input_tokens'] ?? usage['prompt_tokens'],
-    );
+    final prompt = protocol == ApiProtocol.anthropicMessages
+        ? _anthropicInputTokens(usage, _intValue)
+        : _intValue(protocol == ApiProtocol.geminiGenerateContent
+            ? usage['promptTokenCount']
+            : usage['input_tokens'] ?? usage['prompt_tokens']);
     final completion = _intValue(
       protocol == ApiProtocol.geminiGenerateContent
           ? usage['candidatesTokenCount']
@@ -455,9 +459,15 @@ class _ProtocolStreamParser {
   int? _promptTokens;
   int? _completionTokens;
   int? _cachedTokens;
+  final Map<String, dynamic> _anthropicInputUsage = {};
   bool terminated = false;
+  bool hasTerminalFrame = false;
+  bool _truncated = false;
 
-  _ProtocolStreamParser(this.protocol);
+  final void Function()? onResponseActivity;
+  final bool separateThoughts;
+  _ProtocolStreamParser(this.protocol,
+      {this.onResponseActivity, this.separateThoughts = false});
 
   ChatStreamEvent? ingestLine(String line) {
     final trimmed = line.trim();
@@ -486,12 +496,14 @@ class _ProtocolStreamParser {
 
   ChatStreamEvent doneEvent() {
     terminated = true;
-    return ChatStreamEvent.done(
-      _content.toString(),
-      _model,
-      _promptTokens,
-      _completionTokens,
-      _cachedTokens,
+    return ChatStreamEvent(
+      type: ChatStreamEventType.done,
+      content: _content.toString(),
+      model: _model,
+      promptTokens: _promptTokens,
+      completionTokens: _completionTokens,
+      cachedTokens: _cachedTokens,
+      truncated: _truncated,
     );
   }
 
@@ -501,13 +513,26 @@ class _ProtocolStreamParser {
     final usage = payload['usage'] ??
         (message is Map<String, dynamic> ? message['usage'] : null);
     if (usage is Map) {
-      _promptTokens ??= _intValue(usage['input_tokens']);
-      _completionTokens ??= _intValue(usage['output_tokens']);
-      _cachedTokens ??= _intValue(usage['cache_read_input_tokens']);
+      for (final key in const [
+        'input_tokens',
+        'cache_creation_input_tokens',
+        'cache_read_input_tokens'
+      ]) {
+        if (usage.containsKey(key)) _anthropicInputUsage[key] = usage[key];
+      }
+      _promptTokens = _anthropicInputTokens(_anthropicInputUsage, _intValue) ??
+          _promptTokens;
+      _completionTokens =
+          _intValue(usage['output_tokens']) ?? _completionTokens;
+      _cachedTokens =
+          _intValue(usage['cache_read_input_tokens']) ?? _cachedTokens;
     }
     _model ??= _string(message is Map ? message['model'] : payload['model']);
     if (type == 'content_block_delta') {
       final delta = payload['delta'];
+      if (delta is Map && _string(delta['thinking'])?.isNotEmpty == true) {
+        onResponseActivity?.call();
+      }
       final text = delta is Map ? _string(delta['text']) : null;
       return _token(text);
     }
@@ -517,6 +542,15 @@ class _ProtocolStreamParser {
 
   ChatStreamEvent? _responses(Map<String, dynamic> payload) {
     final type = payload['type']?.toString() ?? _eventName;
+    if (const {
+      'response.reasoning_text.delta',
+      'response.reasoning_summary_text.delta'
+    }.contains(type)) {
+      if (_string(payload['delta'])?.isNotEmpty == true) {
+        onResponseActivity?.call();
+      }
+      return _clearEvent();
+    }
     if (type == 'response.output_text.delta') {
       return _token(_string(payload['delta']));
     }
@@ -556,7 +590,27 @@ class _ProtocolStreamParser {
     if (candidates is List &&
         candidates.isNotEmpty &&
         candidates.first is Map) {
-      final text = _messageText((candidates.first as Map)['content']);
+      final candidate = candidates.first as Map;
+      final finishReason = candidate['finishReason'];
+      hasTerminalFrame = finishReason == 'STOP' || finishReason == 'MAX_TOKENS';
+      _truncated = separateThoughts && finishReason == 'MAX_TOKENS';
+      var content = candidate['content'];
+      if (separateThoughts && content is Map && content['parts'] is List) {
+        final parts = content['parts'] as List;
+        if (parts.any((part) =>
+            part is Map &&
+            part['thought'] == true &&
+            _string(part['text'])?.isNotEmpty == true)) {
+          onResponseActivity?.call();
+        }
+        content = {
+          ...content,
+          'parts': parts
+              .where((part) => part is! Map || part['thought'] != true)
+              .toList()
+        };
+      }
+      final text = _messageText(content);
       if (text.isNotEmpty) return _token(text);
     }
     return _clearEvent();
@@ -565,6 +619,7 @@ class _ProtocolStreamParser {
   ChatStreamEvent? _token(String? text) {
     _eventName = null;
     if (text == null || text.isEmpty) return _clearEvent();
+    onResponseActivity?.call();
     _content.write(text);
     return ChatStreamEvent.token(text);
   }
@@ -600,4 +655,13 @@ class _ProtocolStreamParser {
     }
     return '';
   }
+}
+
+// Anthropic reports cache reads/writes outside input_tokens, unlike OpenAI.
+int? _anthropicInputTokens(Map usage, int? Function(Object?) read) {
+  final input = read(usage['input_tokens']);
+  if (input == null) return null;
+  final created = read(usage['cache_creation_input_tokens']) ?? 0;
+  final cached = read(usage['cache_read_input_tokens']) ?? 0;
+  return input < 0 || created < 0 || cached < 0 ? -1 : input + created + cached;
 }

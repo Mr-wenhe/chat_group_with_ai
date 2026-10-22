@@ -1,15 +1,19 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'package:crypto/crypto.dart';
+import 'package:chat_group/features/agentic/tool_request.dart';
 
 import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/models/agent_task.dart';
+import 'package:chat_group/core/models/media_attachment.dart';
 import 'package:chat_group/core/text/entity_labels.dart';
 import 'package:chat_group/core/models/message.dart';
 import 'package:chat_group/features/ai_governance/ai_governance_models.dart';
 // 任务胶囊与聊天页共用右上角，几何断言要量会话控件行的真实高度。
 import 'package:chat_group/features/chat_group/widgets/compact_conversation_controls.dart';
 import 'package:chat_group/features/chat_group/widgets/chat_message_bubble.dart';
+import 'package:chat_group/features/document/attachment_preview_dialog.dart';
 import 'package:chat_group/features/work_mode/presentation/work_task_overlay_host.dart';
 import 'package:chat_group/features/work_mode/presentation/work_task_decision_dialog.dart';
 import 'package:chat_group/features/work_mode/presentation/work_task_panel.dart';
@@ -24,6 +28,7 @@ import 'package:chat_group/features/work_mode/work_task_coordinator.dart';
 import 'package:chat_group/features/work_mode/work_task_event.dart';
 import 'package:chat_group/features/work_mode/work_task_decision.dart';
 import 'package:chat_group/features/work_mode/work_task_event_store.dart';
+import 'package:chat_group/features/work_mode/work_task_requirements_confirmation.dart';
 import 'package:chat_group/features/work_mode/work_task_run_boundary.dart';
 import 'package:chat_group/features/work_mode/work_task_user_action.dart';
 import 'package:chat_group/features/work_mode/work_snapshot_service.dart';
@@ -37,6 +42,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hive/hive.dart';
 
 import '../helpers/lifecycle_hive.dart';
+import 'work_candidate_test_support.dart';
 
 /// Keeps a submitted task in flight so a test can drive its own checkpoints.
 class _HoldingWorkTaskRunner implements WorkTaskRunner {
@@ -285,6 +291,56 @@ Future<void> _dragMiniBar(WidgetTester tester, Offset delta) async {
 }
 
 void main() {
+  testWidgets(
+      'reapproval chooses only the displayed rejected command and cancel does nothing',
+      (tester) async {
+    final task = _decisionTask('reapproval-ui', 'group');
+    final checkpoint = safeToolRequestCheckpoint(const ToolRequest(
+        tool: AgentToolName.commandRun,
+        reason: 'check',
+        args: {
+          'executable': 'python3',
+          'arguments': ['-c', 'print(1)']
+        }));
+    final root = jsonDecode(task.executionStateJson) as Map<String, dynamic>;
+    root['rejectedOperationFingerprints'] = [
+      sha256.convert(utf8.encode(checkpoint)).toString()
+    ];
+    task.executionStateJson = jsonEncode(root);
+    task.completedOperations = [checkpoint];
+    final selections = <String>[];
+    await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+            body: WorkTaskPanel(
+      tasks: [task],
+      eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+      onSelectTask: (_) {},
+      onStop: (_) {},
+      onContinue: (_) {},
+      onOpenConversation: (_) {},
+      onCollapse: () {},
+      onClose: () {},
+      onCommandReapproval: (_, selected) {
+        selections.add(selected);
+      },
+    ))));
+    await tester.pump();
+    final entry = find.byKey(const Key('work-task-command-reapproval'));
+    await tester.ensureVisible(entry);
+    await tester.tap(entry);
+    await tester.pump();
+    expect(find.text('选择要重新提交审批的命令'), findsOneWidget);
+    await tester.tap(find.text('取消'));
+    await tester.pump();
+    expect(selections, isEmpty);
+    await tester.tap(entry);
+    await tester.pump();
+    await tester.tap(find.textContaining('print(1)'));
+    await tester.pump();
+    expect(selections, [checkpoint]);
+    await tester.pumpWidget(const SizedBox.shrink());
+  }, timeout: const Timeout(Duration(seconds: 30)));
+
   testWidgets('decision dialog reports only pages actually displayed',
       (tester) async {
     final task = _decisionTask('shown-pages', 'qa-pages');
@@ -333,7 +389,7 @@ void main() {
     expect(seen.map((d) => d.id), ['format', 'second']);
     await tester.pumpWidget(const SizedBox.shrink());
   });
-  testWidgets('v2 discussion details preserve timeline space in a short panel',
+  testWidgets('v2 discussion details remain readable in a short panel',
       (tester) async {
     final task = _decisionTask('short-discussion', 'qa-short');
     final original =
@@ -362,11 +418,346 @@ void main() {
                       onCollapse: () {},
                       onClose: () {},
                     ))))));
+    expect(find.byKey(const Key('work-current-progress-card')), findsOneWidget);
+    expect(find.textContaining('负责人：worker'), findsOneWidget);
+    expect(find.textContaining('需要你操作：回答问题'), findsOneWidget);
     await tester.tap(find.byKey(const Key('work-v2-discussion-details')));
     await tester.pump();
     expect(tester.takeException(), isNull);
     expect(find.text('收起问题与方案'), findsOneWidget);
-    expect(find.text('执行动态 · 实时公开输出'), findsOneWidget);
+    final plan = find.textContaining('Long requirement');
+    expect(plan, findsOneWidget);
+    final viewport = find
+        .ancestor(of: plan, matching: find.byType(SingleChildScrollView))
+        .first;
+    expect(tester.getSize(viewport).height, greaterThan(0));
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('open defects stay visible while discussion waits for a member',
+      (tester) async {
+    final task = _decisionTask('found-defect-progress', 'progress-defect');
+    final now = DateTime.utc(2026, 10, 17, 7);
+    final discussion =
+        WorkDiscussionState.fromExecutionState(task.executionStateJson)!;
+    final raw = discussion.collaboration!.toJson()
+      ..['phase'] = 'clarifying'
+      ..['decisions'] = <Map<String, dynamic>>[]
+      ..['issues'] = [
+        {
+          'id': 'defect-1',
+          'sourceId': 'worker',
+          'kind': 'defect',
+          'status': 'open',
+          'target': '骰子回合',
+          'problem': '投出点数后回合没有交接',
+          'evidenceRef': 'report-1',
+          'resolution': '',
+          'resolutionRef': '',
+          'retestCondition': '再次掷骰并确认轮到下一位',
+          'requestRevision': 1,
+        }
+      ]
+      ..['revision'] = discussion.collaboration!.revision + 1;
+    final next = WorkCollaborationState.tryParse(raw)!;
+    task
+      ..status = AgentTaskStatus.paused
+      ..resumeRequired = false
+      ..startedAt = now
+      ..executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
+        task.executionStateJson,
+        discussion.copyWith(collaboration: next),
+        expectedCollaborationRevision: discussion.collaboration!.revision,
+      );
+
+    await tester.pumpWidget(MaterialApp(
+      home: Scaffold(
+        body: WorkTaskPanel(
+          tasks: [task],
+          eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+          eventHistoryFor: (_) async => [
+            WorkTaskEvent(
+              taskId: task.id,
+              sequence: 1,
+              timestamp: now.subtract(const Duration(seconds: 10)),
+              kind: WorkTaskEventKind.planning,
+              title: '正在等待成员模型回应',
+            ),
+          ],
+          onSelectTask: (_) {},
+          onStop: (_) {},
+          onContinue: (_) {},
+          onOpenConversation: (_) {},
+          onCollapse: () {},
+          onClose: () {},
+          clock: () => now,
+        ),
+      ),
+    ));
+
+    await _pumpUntilFound(tester, find.text('发现问题'));
+    expect(find.text('发现问题'), findsOneWidget);
+    expect(find.text('讨论中'), findsNothing);
+    expect(find.textContaining('当前操作：正在等待成员模型回应'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox.shrink());
+  }, timeout: const Timeout(Duration(seconds: 30)));
+
+  testWidgets(
+      'reopened task replays persisted progress and de-duplicates live events',
+      (tester) async {
+    final task = _decisionTask('replayed-progress', 'progress-room');
+    final initialState =
+        WorkDiscussionState.fromExecutionState(task.executionStateJson)!;
+    final noPendingQuestion = initialState.collaboration!.toJson()
+      ..['decisions'] = <Map<String, dynamic>>[]
+      ..['revision'] = initialState.collaboration!.revision + 1;
+    task.executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
+      task.executionStateJson,
+      initialState.copyWith(
+        collaboration: WorkCollaborationState.tryParse(noPendingQuestion)!,
+      ),
+      expectedCollaborationRevision: initialState.collaboration!.revision,
+    );
+    final live = StreamController<WorkTaskEvent>.broadcast();
+    addTearDown(live.close);
+    final history = <WorkTaskEvent>[
+      WorkTaskEvent(
+        taskId: task.id,
+        sequence: 1,
+        timestamp: DateTime.utc(2026, 10, 16, 9),
+        kind: WorkTaskEventKind.planning,
+        title: '讨论已开始',
+      ),
+      WorkTaskEvent(
+        taskId: task.id,
+        sequence: 2,
+        timestamp: DateTime.utc(2026, 10, 16, 9, 1),
+        kind: WorkTaskEventKind.paused,
+        title: '成员协议状态校验失败，等待修复提示',
+      ),
+    ];
+    await tester.pumpWidget(MaterialApp(
+      home: Scaffold(
+        body: SizedBox(
+          width: 520,
+          height: 680,
+          child: WorkTaskPanel(
+            tasks: <AgentTask>[task],
+            showTaskSummarySection: true,
+            eventStreamFor: (_) => live.stream,
+            eventHistoryFor: (_) async => history,
+            onSelectTask: (_) {},
+            onStop: (_) {},
+            onContinue: (_) {},
+            onOpenConversation: (_) {},
+            onCollapse: () {},
+            onClose: () {},
+          ),
+        ),
+      ),
+    ));
+    await _pumpUntilFound(tester, find.text('成员协议状态校验失败，等待修复提示'));
+    await tester.pump();
+    expect(find.text('疑似停滞'), findsOneWidget);
+    live.add(history.last);
+    await tester.pump();
+    expect(find.text('成员协议状态校验失败，等待修复提示'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  }, timeout: const Timeout(Duration(seconds: 30)));
+
+  for (final phase in ['clarifying', 'verifying']) {
+    testWidgets('pinned progress excludes member and group wait events: $phase',
+        (tester) async {
+      final task = _decisionTask('group-live-progress', 'progress-group');
+      final original =
+          WorkDiscussionState.fromExecutionState(task.executionStateJson)!;
+      final raw = original.collaboration!.toJson()
+        ..['decisions'] = <Map<String, dynamic>>[]
+        ..['phase'] = phase
+        ..['team'] = [
+          ...original.collaboration!.team,
+          {
+            'memberId': 'maker',
+            'role': 'developer',
+            'qualificationRef': 'skill',
+            'qualified': true,
+            'available': true,
+          }
+        ]
+        ..['workItems'] = [
+          {
+            'id': 'implementation',
+            'ownerId': 'maker',
+            'kind': 'produce',
+            'resultRef': '',
+            'dependencies': <String>[],
+            'status': 'pending',
+            'requestRevision': original.collaboration!.requestRevision,
+          }
+        ]
+        ..['revision'] = original.collaboration!.revision + 1;
+      task
+        ..resumeRequired = false
+        ..executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
+          task.executionStateJson,
+          original.copyWith(
+            phase: WorkDiscussionPhase.awaitingDiscussion,
+            blockers: const <String>[],
+            openQuestions: const <String>[],
+            collaboration: WorkCollaborationState.tryParse(raw)!,
+          ),
+          expectedCollaborationRevision: original.collaboration!.revision,
+        );
+      final now = DateTime.utc(2026, 10, 16, 12);
+      final history = <WorkTaskEvent>[
+        WorkTaskEvent(
+          taskId: task.id,
+          sequence: 1,
+          timestamp: now.subtract(const Duration(minutes: 1)),
+          kind: WorkTaskEventKind.planning,
+          title: '正式方案已更新',
+        ),
+        WorkTaskEvent(
+          taskId: task.id,
+          sequence: 2,
+          timestamp: now.subtract(const Duration(seconds: 10)),
+          kind: WorkTaskEventKind.planning,
+          title: '群讨论已取得运行槽',
+        ),
+        WorkTaskEvent(
+          taskId: task.id,
+          sequence: 3,
+          timestamp: now.subtract(const Duration(seconds: 5)),
+          kind: WorkTaskEventKind.planning,
+          title: '正在等待成员模型回应',
+        ),
+        WorkTaskEvent(
+          taskId: task.id,
+          sequence: 4,
+          timestamp: now.subtract(const Duration(seconds: 5)),
+          kind: WorkTaskEventKind.paused,
+          title: '等待群讨论完成',
+        ),
+        WorkTaskEvent(
+          taskId: task.id,
+          sequence: 5,
+          timestamp: now,
+          kind: WorkTaskEventKind.planning,
+          title: '模型已有响应活动',
+        ),
+      ];
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: Center(
+            child: SizedBox(
+              width: 420,
+              height: 420,
+              child: WorkTaskPanel(
+                tasks: <AgentTask>[task],
+                showTaskSummarySection: true,
+                eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+                eventHistoryFor: (_) async => history,
+                onSelectTask: (_) {},
+                onStop: (_) {},
+                onContinue: (_) {},
+                onOpenConversation: (_) {},
+                onCollapse: () {},
+                onClose: () {},
+                clock: () => now,
+              ),
+            ),
+          ),
+        ),
+      ));
+
+      await _pumpUntilFound(tester, find.text('讨论中'));
+      expect(find.textContaining('当前操作：模型已有响应活动'), findsOneWidget);
+      expect(find.textContaining('负责人：worker'), findsOneWidget);
+      expect(find.textContaining('最近进展：正式方案已更新'), findsOneWidget);
+      expect(
+          find.descendant(
+              of: find.byKey(const Key('work-current-progress-card')),
+              matching: find.textContaining('群讨论已取得运行槽')),
+          findsNothing);
+      expect(find.textContaining('负责人：'), findsOneWidget);
+      expect(find.textContaining('等待成员回应后继续收敛方案'), findsOneWidget);
+      expect(find.textContaining('尚无新的阶段事件'), findsNothing);
+      await tester.pumpWidget(const SizedBox.shrink());
+    }, timeout: const Timeout(Duration(seconds: 30)));
+  }
+
+  testWidgets('direct chat does not read or show group discussion progress',
+      (tester) async {
+    final task = _decisionTask('direct-v2-checkpoint', 'dm:worker');
+    await tester.pumpWidget(MaterialApp(
+      home: Scaffold(
+        body: WorkTaskPanel(
+          tasks: <AgentTask>[task],
+          showTaskSummarySection: true,
+          eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+          eventHistoryFor: (_) async => const <WorkTaskEvent>[],
+          onSelectTask: (_) {},
+          onStop: (_) {},
+          onContinue: (_) {},
+          onOpenConversation: (_) {},
+          onCollapse: () {},
+          onClose: () {},
+        ),
+      ),
+    ));
+
+    await tester.pump();
+    expect(find.byKey(const Key('work-current-progress-card')), findsNothing);
+    expect(find.byKey(const Key('work-v2-discussion-details')), findsNothing);
+    await tester.pumpWidget(const SizedBox.shrink());
+  }, timeout: const Timeout(Duration(seconds: 30)));
+
+  testWidgets('requirements gate is shown as waiting for the user to confirm',
+      (tester) async {
+    final task = _decisionTask('progress-requirements', 'requirements-room');
+    WorkTaskRequirementsConfirmation.requireForCurrentRequest(task);
+    await tester.pumpWidget(MaterialApp(
+      home: Scaffold(
+        body: WorkTaskPanel(
+          tasks: [task],
+          eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+          onSelectTask: (_) {},
+          onStop: (_) {},
+          onContinue: (_) {},
+          onOpenConversation: (_) {},
+          onCollapse: () {},
+          onClose: () {},
+        ),
+      ),
+    ));
+
+    expect(find.textContaining('待你确认'), findsWidgets);
+    expect(find.textContaining('需要你操作：确认本版需求'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+  testWidgets('task failure overrides an older collaboration phase',
+      (tester) async {
+    final task = _decisionTask('progress-failure', 'failure-room')
+      ..status = AgentTaskStatus.failed
+      ..lastError = '协议校验失败，任务已暂停。';
+    await tester.pumpWidget(MaterialApp(
+      home: Scaffold(
+        body: WorkTaskPanel(
+          tasks: [task],
+          eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+          onSelectTask: (_) {},
+          onStop: (_) {},
+          onContinue: (_) {},
+          onOpenConversation: (_) {},
+          onCollapse: () {},
+          onClose: () {},
+        ),
+      ),
+    ));
+
+    expect(find.textContaining('失败'), findsWidgets);
     await tester.pumpWidget(const SizedBox.shrink());
   });
   testWidgets('P3 chat reminder button opens its exact decision task',
@@ -396,6 +787,32 @@ void main() {
     expect(opened?.taskId, task.id);
     expect(opened?.blockerId, action.blockerId);
     expect(opened?.version, action.version);
+  });
+
+  testWidgets('direct chat keeps the existing task reminder presentation',
+      (tester) async {
+    final task = _decisionTask('direct-chat-reminder', 'dm:worker');
+    final action = WorkTaskUserAction.forTask(task).single;
+    await tester.pumpWidget(MaterialApp(
+      home: Scaffold(
+        body: ChatMessageBubble(
+          message: Message(
+            id: action.messageId,
+            groupId: task.groupId,
+            senderId: 'system',
+            senderType: Message.senderTypeSystem,
+            content: '请选择交付格式',
+          ),
+          isDirectChat: true,
+          characters: const [],
+          cs: const ColorScheme.light(),
+          senderColor: (_) => Colors.blue,
+          ownerName: '我',
+        ),
+      ),
+    ));
+    expect(find.byKey(ValueKey(action.messageId)), findsOneWidget);
+    expect(find.text('需要你回答'), findsNothing);
   });
 
   group('WorkTaskPanel', () {
@@ -902,7 +1319,8 @@ void main() {
             tasks: <AgentTask>[task],
             eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
             entityLabels: EntityLabels(resolvers: <EntityIdResolver>[
-                (id) => id == 'elected' ? '乙' : '甲']),
+              (id) => id == 'elected' ? '乙' : '甲'
+            ]),
             onConfirmExecutorSwap: (taskId, version, swap) async {
               choices.add('$taskId:$swap');
             },
@@ -1132,6 +1550,80 @@ void main() {
 
       expect(submittedReply, '/Users/me/Desktop/exports');
     });
+
+    testWidgets('shows the v2 question and its options in the reply box',
+        (tester) async {
+      final task = _decisionTask('v2-question-panel', 'v2-question-room');
+      final discussion =
+          WorkDiscussionState.fromExecutionState(task.executionStateJson)!;
+      final raw = discussion.collaboration!.toJson()
+        ..['decisions'] = [
+          {
+            'id': 'dice-rules',
+            'revision': 1,
+            'status': 'pending',
+            'reason': '测试是否需要固定骰值来稳定复现起飞和撞子？',
+            'answer': '',
+            'impact': '影响独立测试能否重复验收',
+            'responseRef': '',
+            'kind': 'choice',
+            'targetId': 'dice-rules',
+            'missingCondition': '缺少可重复的骰值',
+            'options': [
+              {
+                'id': 'query',
+                'label': '增加本地固定骰值入口',
+                'impact': '允许测试复现',
+              },
+              {
+                'id': 'none',
+                'label': '保留纯随机掷骰',
+                'impact': '测试结果依赖随机性',
+              },
+            ],
+          },
+        ]
+        ..['revision'] = discussion.collaboration!.revision + 1;
+      task
+        ..status = AgentTaskStatus.paused
+        ..resumeRequired = false
+        ..executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
+          task.executionStateJson,
+          discussion.copyWith(
+            openQuestions: const ['请补充群讨论所需的必要信息。'],
+            collaboration: WorkCollaborationState.tryParse(raw)!,
+          ),
+          expectedCollaborationRevision: discussion.collaboration!.revision,
+        );
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: WorkTaskPanel(
+            tasks: <AgentTask>[task],
+            eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+            onSelectTask: (_) {},
+            onStop: (_) {},
+            onContinue: (_) {},
+            onReply: (taskId, reply) async {},
+            onOpenDecision: (_) {},
+            onOpenConversation: (_) {},
+            onCollapse: () {},
+            onClose: () {},
+          ),
+        ),
+      ));
+
+      expect(find.text('回答待决问题'), findsOneWidget);
+      final question = tester.widget<SelectableText>(
+        find.byKey(const Key('work-task-reply-question')),
+      );
+      expect(
+        question.data,
+        '测试是否需要固定骰值来稳定复现起飞和撞子？\n'
+        '可选方案：增加本地固定骰值入口；保留纯随机掷骰',
+      );
+      await tester.pumpWidget(const SizedBox.shrink());
+    }, timeout: const Timeout(Duration(seconds: 30)));
 
     testWidgets('shows the budgeted action count rather than a tool index',
         (tester) async {
@@ -1434,7 +1926,8 @@ void main() {
             onOpenConversation: (_) {},
             onCollapse: () {},
             onClose: () {},
-            entityLabels: EntityLabels(resolvers: <EntityIdResolver>[(id) => '产品经理']),
+            entityLabels:
+                EntityLabels(resolvers: <EntityIdResolver>[(id) => '产品经理']),
           ),
         ),
       ));
@@ -2389,6 +2882,65 @@ void main() {
       expect(continued, isTrue);
     });
 
+    for (final scenario in [
+      (
+        name: 'completed with stale failure',
+        status: AgentTaskStatus.completed,
+        resend: false,
+        visible: false
+      ),
+      (
+        name: 'cancelled without user stop',
+        status: AgentTaskStatus.cancelled,
+        resend: false,
+        visible: false
+      ),
+      (
+        name: 'completed awaiting attachment resend',
+        status: AgentTaskStatus.completed,
+        resend: true,
+        visible: true
+      ),
+    ]) {
+      testWidgets('retry visibility: ${scenario.name}', (tester) async {
+        final task = _task(
+            id: 'retry-status',
+            conversationId: 'group-one',
+            characterId: 'worker-id')
+          ..status = scenario.status;
+        if (scenario.resend) {
+          task.executionStateJson = jsonEncode({
+            'artifactDeliveryNoticePublished': true,
+            'artifactDeliveryRetryOnly': true,
+            'artifactDeliveryMessageId': 'delivery-message',
+          });
+        }
+        WorkFailure.persistOnTask(
+            task, WorkFailure.defaults(WorkFailureType.retryableNetwork));
+        var retried = false;
+        await tester.pumpWidget(MaterialApp(
+            home: Scaffold(
+                body: WorkTaskPanel(
+          tasks: [task],
+          eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+          onSelectTask: (_) {},
+          onStop: (_) {},
+          onContinue: (_) {},
+          onRetry: (_) async => retried = true,
+          onOpenConversation: (_) {},
+          onCollapse: () {},
+          onClose: () {},
+        ))));
+        final button = find.byKey(const Key('work-task-retry'));
+        expect(button, scenario.visible ? findsOneWidget : findsNothing);
+        if (scenario.visible) {
+          await tester.tap(button);
+          await tester.pump();
+          expect(retried, isTrue);
+        }
+      });
+    }
+
     testWidgets('offers continue instead of a dead retry after a user stop',
         (tester) async {
       // 停止后记录上仍可能带着可重试的失败标记（`_implStop` 不清它）。面板过去
@@ -2465,8 +3017,95 @@ void main() {
         ),
       ));
 
+      expect(find.textContaining('如需恢复，请点击任务面板'), findsOneWidget);
       expect(find.byKey(const Key('work-task-continue')), findsOneWidget);
       await tester.tap(find.byKey(const Key('work-task-continue')));
+      await tester.pump();
+      expect(continued, isTrue);
+    });
+
+    testWidgets('failed v2 progress shows failure and a real recovery action',
+        (tester) async {
+      final task = _decisionTask('failed-progress', 'group-one')
+        ..status = AgentTaskStatus.failed
+        ..lastError = '工作材料证据路径无法读取。';
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+            body: WorkTaskPanel(
+          tasks: [task],
+          eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+          onSelectTask: (_) {},
+          onStop: (_) {},
+          onRetry: (_) {},
+          onContinue: (_) {},
+          onOpenConversation: (_) {},
+          onCollapse: () {},
+          onClose: () {},
+        )),
+      ));
+      expect(find.textContaining('当前操作：执行失败，检查点已保留'), findsOneWidget);
+      expect(find.textContaining('查看失败记录，处理原因后在任务面板重试'), findsOneWidget);
+      expect(find.textContaining('需要你操作：查看失败记录并决定重试'), findsOneWidget);
+      expect(find.textContaining('当前不需要你操作'), findsNothing);
+      await tester.pumpWidget(const SizedBox.shrink());
+    }, timeout: const Timeout(Duration(seconds: 30)));
+
+    testWidgets('offers continue after deferring an unfinished v2 discussion',
+        (tester) async {
+      final task = _decisionTask('deferred-unfinished', 'group-one')
+        ..status = AgentTaskStatus.paused
+        ..resumeRequired = true;
+      var continued = false;
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: WorkTaskPanel(
+            tasks: <AgentTask>[task],
+            eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+            onSelectTask: (_) {},
+            onStop: (_) {},
+            onContinue: (_) async => continued = true,
+            onOpenConversation: (_) {},
+            onCollapse: () {},
+            onClose: () {},
+          ),
+        ),
+      ));
+      final button = find.byKey(const Key('work-task-continue'));
+      expect(tester.widget<FilledButton>(button).onPressed, isNotNull);
+      await tester.tap(button);
+      await tester.pump();
+      expect(continued, isTrue);
+    });
+
+    testWidgets('offers discussion resume despite a stale nonretryable failure',
+        (tester) async {
+      final task = _decisionTask('deferred-v2-with-failure', 'group-one')
+        ..status = AgentTaskStatus.paused
+        ..resumeRequired = true;
+      WorkFailure.persistOnTask(
+        task,
+        WorkFailure.defaults(WorkFailureType.internal),
+      );
+      var continued = false;
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: WorkTaskPanel(
+            tasks: <AgentTask>[task],
+            eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+            onSelectTask: (_) {},
+            onStop: (_) {},
+            onContinue: (_) async => continued = true,
+            onOpenConversation: (_) {},
+            onCollapse: () {},
+            onClose: () {},
+          ),
+        ),
+      ));
+
+      final button = find.byKey(const Key('work-task-continue'));
+      expect(tester.widget<FilledButton>(button).onPressed, isNotNull);
+      await tester.tap(button);
       await tester.pump();
       expect(continued, isTrue);
     });
@@ -3010,6 +3649,106 @@ void main() {
   });
 
   group('WorkTaskOverlayHost', () {
+    for (final direct in [false, true]) {
+      testWidgets('desktop attachment preview hides the pill (direct=$direct)',
+          (tester) async {
+        final updates = StreamController<List<AgentTask>>.broadcast();
+        addTearDown(updates.close);
+        final conversationId = direct ? 'dm:worker' : 'group-preview';
+        await tester.pumpWidget(MaterialApp(
+          builder: (_, child) => Overlay(initialEntries: [
+            OverlayEntry(
+                builder: (_) => WorkTaskOverlayHost(
+                      taskStream: updates.stream,
+                      eventStreamFor: (_) =>
+                          const Stream<WorkTaskEvent>.empty(),
+                      onStopTask: (_) async {},
+                      onContinueTask: (_) async {},
+                      child: child!,
+                    )),
+          ]),
+          home: Scaffold(
+            body: ChatMessageMedia(
+              message: Message(
+                id: 'preview-message',
+                groupId: conversationId,
+                senderId: 'worker',
+                senderType: Message.senderTypeAi,
+                content: '',
+                media: [
+                  MediaAttachment(
+                      type: 'file',
+                      localPath: '/missing-preview-regression.html',
+                      fileName: '滚动检查.html')
+                ],
+              ),
+              isUser: false,
+              isDirectChat: direct,
+              cs: const ColorScheme.light(),
+            ),
+          ),
+        ));
+        updates.add([
+          _task(
+              id: 'preview-task',
+              conversationId: conversationId,
+              characterId: 'worker')
+        ]);
+        await tester.pump();
+        await tester.tap(find.byKey(const Key('work-task-collapse')));
+        await tester.pump();
+        expect(find.byKey(const Key('work-task-mini-bar')), findsOneWidget);
+        await tester.tap(find.text('滚动检查.html'));
+        await tester.pump();
+        expect(find.byType(AttachmentPreviewDialog), findsOneWidget);
+        expect(find.byKey(const Key('work-task-mini-bar')), findsNothing);
+        await tester.tap(find.byTooltip('关闭'));
+        await tester.pump(const Duration(milliseconds: 400));
+        expect(find.byKey(const Key('work-task-mini-bar')), findsOneWidget);
+        await tester.pumpWidget(const SizedBox.shrink());
+      }, skip: !Platform.isMacOS && !Platform.isWindows);
+    }
+
+    testWidgets('group attachment preview hides and restores the overlay',
+        (tester) async {
+      final updates = StreamController<List<AgentTask>>.broadcast();
+      addTearDown(updates.close);
+      final preview = Completer<void>();
+      await tester.pumpWidget(MaterialApp(
+        home: WorkTaskOverlayHost(
+          taskStream: updates.stream,
+          eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+          onStopTask: (_) async {},
+          onContinueTask: (_) async {},
+          child: Builder(
+              builder: (context) => Align(
+                    alignment: Alignment.centerLeft,
+                    child: TextButton(
+                        onPressed: () =>
+                            WorkTaskOverlayHost.withPanelHiddenForPreview(
+                                context, () => preview.future),
+                        child: const Text('打开群附件')),
+                  )),
+        ),
+      ));
+      updates.add([
+        _task(
+            id: 'preview-task', conversationId: 'group-one', characterId: 'dev')
+      ]);
+      await tester.pump();
+      await tester.pump();
+      expect(find.byKey(const Key('work-task-panel')), findsOneWidget);
+      await tester.tap(find.text('打开群附件'));
+      await tester.pump();
+      expect(find.byKey(const Key('work-task-panel')), findsNothing);
+      expect(find.byKey(const Key('work-task-reopen')), findsNothing);
+      expect(find.byKey(const Key('work-task-mini-bar')), findsNothing);
+      preview.complete();
+      await tester.pump();
+      expect(find.byKey(const Key('work-task-panel')), findsOneWidget);
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+
     testWidgets('collapse does not stop the running task', (tester) async {
       final task = _task(
         id: 'running-task',
@@ -4064,6 +4803,55 @@ void main() {
       await taskBox.clear();
     });
 
+    testWidgets('群任务面板回复精确回答待决项，不创建新需求', (tester) async {
+      final raw = candidateTestState().toJson()
+        ..['decisions'] = [
+          {
+            'id': 'restore',
+            'revision': 1,
+            'status': 'pending',
+            'kind': 'question',
+            'targetId': '',
+            'reason': '如何恢复测试',
+            'evidence': '浏览器入口待修复',
+            'answer': '',
+            'impact': '继续原任务',
+            'responseRef': '',
+            'promptedReminder': 'initial'
+          }
+        ];
+      final task = candidateTestTask(WorkCollaborationState.tryParse(raw)!)
+        ..status = AgentTaskStatus.paused;
+      await tester.runAsync(() => taskBox.put(task.id, task));
+      await tester.pumpWidget(MaterialApp(
+          home: WorkTaskOverlayHost(
+        coordinator: coordinator,
+        eventStore: eventStore,
+        child: const Scaffold(body: SizedBox.expand()),
+      )));
+      await tester.pump();
+      await _pumpUntilFound(
+          tester, find.byKey(const Key('work-task-reply-input')));
+      await tester.enterText(
+          find.byKey(const Key('work-task-reply-input')), '使用已授权浏览器继续');
+      await tester.pump();
+      await tester.ensureVisible(find.byKey(const Key('work-task-reply-send')));
+      await tester.runAsync(() async {
+        await tester.tap(find.byKey(const Key('work-task-reply-send')));
+      });
+      await tester.pump();
+      final state =
+          WorkDiscussionState.fromExecutionState(task.executionStateJson)!
+              .collaboration!;
+      expect(state.decisions.single['status'], 'answered');
+      expect(state.decisions.single['answer'], '使用已授权浏览器继续');
+      expect(task.queuedUserRequests, isEmpty);
+      expect(
+          WorkTaskRequirementsConfirmation.hasMarker(task.executionStateJson),
+          isFalse);
+      await tester.pumpWidget(const SizedBox.shrink());
+    }, timeout: const Timeout(Duration(seconds: 30)));
+
     testWidgets(
         'dismissing the approval modal points the user back at the task panel',
         (tester) async {
@@ -4761,6 +5549,18 @@ void main() {
         currency: 'USD',
         exactUsage: true,
       ),
+      _usageEntry(
+        requestId: 'usage-outlier',
+        taskId: task.id,
+        characterId: 'developer',
+        runBoundary: 13,
+        inputTokens: 100000000,
+        cachedInputTokens: 0,
+        outputTokens: 3,
+        estimatedCostMicros: 900000,
+        currency: 'USD',
+        exactUsage: true,
+      ),
     ];
     final diagnostics = [
       AiRequestDiagnostic(
@@ -4790,7 +5590,10 @@ void main() {
           tasks: [task],
           usageEntries: entries,
           usageDiagnostics: diagnostics,
-          entityLabels: EntityLabels(resolvers: <EntityIdResolver>[(id) => id == 'developer' ? '开发' : '测试']),
+          outOfBoundsUsageEntries: {entries.last},
+          entityLabels: EntityLabels(resolvers: <EntityIdResolver>[
+            (id) => id == 'developer' ? '开发' : '测试'
+          ]),
           eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
           onSelectTask: (_) {},
           onStop: (_) {},
@@ -4802,13 +5605,14 @@ void main() {
       ),
     ));
 
-    expect(find.text('用量 140 Token'), findsOneWidget);
+    expect(find.text('用量 140 个 Token · 异常 1 条'), findsOneWidget);
     await tester.tap(find.byKey(const Key('work-task-usage-details')));
     await tester.pumpAndSettle();
     expect(find.textContaining('输入 110 Token（缓存 25，已包含在输入中）'), findsOneWidget);
     expect(find.textContaining('USD'), findsOneWidget);
     expect(find.textContaining('JPY'), findsOneWidget);
     expect(find.textContaining('估算用量 1 · 未知用量 1 · 价格未知 0'), findsOneWidget);
+    expect(find.textContaining('1 条历史记录超过当前模型能力上限'), findsOneWidget);
     expect(find.byKey(const Key('work-task-usage-breakdown')), findsOneWidget);
 
     await tester.tap(find.text('按运行段和成员展开'));

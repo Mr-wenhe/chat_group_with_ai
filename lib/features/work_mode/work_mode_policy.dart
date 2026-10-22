@@ -123,7 +123,7 @@ class WorkModePolicy {
         AgentToolName.commandRun =>
           '执行命令：${request.args['executable'] ?? request.args['command'] ?? ''}',
         AgentToolName.weatherForecast => '查询未来天气预报',
-        AgentToolName.browserContext => '读取当前浏览器页面上下文',
+        AgentToolName.browserContext => '在离线浏览器中操作当前软件候选',
         AgentToolName.skillCreate => '创建应用内技能元数据',
         AgentToolName.skillDownload => '安装应用内技能模板',
         AgentToolName.skillGithubSearch => '通过生产搜索 Gateway 发现 GitHub 技能',

@@ -67,7 +67,7 @@ class WorkUsageObservation {
             .map((location) => Map<String, dynamic>.unmodifiable(location)));
 
   bool get valid =>
-      {'macos-native', 'document'}.contains(runtime) &&
+      {'macos-native', 'macos-webkit', 'document'}.contains(runtime) &&
       sessionRef.isNotEmpty &&
       beforeRef.isNotEmpty &&
       afterRef.isNotEmpty &&
@@ -131,6 +131,30 @@ class WorkUsageObservation {
       verificationRevision == state.verificationRevision &&
       (runtime != 'document' || documentPath != null) &&
       (state.artifactContract['type'] != 'software' || runtime != 'document');
+
+  /// Review accepts browser outcomes only from this member's current runtime observation.
+  String? browserReviewResult(
+      WorkCollaborationState state, String member, String acceptanceId,
+      {required bool? matched, required bool textTruncated}) {
+    if (runtime != 'macos-webkit' ||
+        operation != 'assert' ||
+        !matches(state, member) ||
+        textTruncated ||
+        !state.usageAssignments.any((a) =>
+            a['memberId'] == member &&
+            (a['acceptanceIds'] as List).contains(acceptanceId)) ||
+        !state.acceptances.any((a) =>
+            a['id'] == acceptanceId &&
+            a['requiredCapability'] == 'browser.context')) {
+      return null;
+    }
+    if (matched == false) return 'failed';
+    return matched == true &&
+            businessResultVerified &&
+            verifiedAcceptanceIds.contains(acceptanceId)
+        ? 'passed'
+        : null;
+  }
 
   static WorkUsageObservation? tryParse(Object? raw) {
     if (raw is! Map || raw.keys.any((key) => key is! String)) return null;
@@ -379,9 +403,20 @@ class WorkUsageReceiptStore {
           return false;
         }
         for (final reference in observation.outputRefs) {
-          if (observation.runtime == 'macos-native' &&
+          if ({'macos-native', 'macos-webkit'}.contains(observation.runtime) &&
               reference.startsWith('native:')) {
             await events.readNativeEvidence(state.taskId, reference);
+          } else if (observation.runtime == 'macos-webkit' &&
+              reference.startsWith('detail:')) {
+            final digest = reference.substring('detail:'.length);
+            final detail =
+                await events.readDiscussionDetail(state.taskId, digest);
+            if (!sha256
+                .convert(utf8.encode(detail))
+                .toString()
+                .startsWith(digest)) {
+              return false;
+            }
           } else if (observation.runtime == 'document' &&
               reference.startsWith('document:')) {
             await events.readDocumentEvidence(state.taskId, reference);

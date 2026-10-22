@@ -1,4 +1,5 @@
 import 'work_usage_receipt.dart';
+import 'work_task_execution_policy.dart';
 import 'dart:async';
 import 'dart:convert';
 
@@ -481,7 +482,9 @@ class WorkToolRegistry {
             as Map)['workItemExecution'] as Map?);
     if (binding?['stage'] == 'verify' &&
         definition.isMutation &&
-        call.name != AgentToolName.commandRun) {
+        call.name != AgentToolName.commandRun &&
+        !(call.name == AgentToolName.browserContext &&
+            WorkTaskExecutionPolicy.isValidatedV2GroupTask(context.task))) {
       return const WorkToolResult.permissionDenied(
           message: '审查阶段不能改写产物或测试断言；请回群讨论修订。',
           failureCode: 'discussionPhaseDenied');

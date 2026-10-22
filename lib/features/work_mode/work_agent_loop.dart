@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:convert';
 import 'work_collaboration_state.dart';
+import 'work_rejected_commands.dart';
+import 'work_contract_change.dart';
 import 'dart:math';
 
 import 'package:chat_group/core/models/agent_task.dart';

@@ -313,6 +313,13 @@ class WorkContextBuilder {
     WorkContextCompressionModel? model,
   }) async {
     final safe = _clip(_normalise(snapshot));
+    // The model may shorten only these diagnostics, never the v2 authority.
+    if (!safe.conversationId.startsWith('dm:') &&
+        safe.discussionState?.collaboration != null &&
+        safe.completedSummaries.isEmpty &&
+        safe.recentToolResults.isEmpty) {
+      return safe;
+    }
     if (model != null) {
       try {
         final compressed = await model(safe);

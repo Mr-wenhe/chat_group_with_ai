@@ -70,6 +70,9 @@ class WorkDeliveryMetadata {
       safe.add(
           {'relative': relative, 'path': path, 'bytes': size, 'sha256': hash});
     }
+    if (raw['acceptedByUserWithoutTesting'] == true) {
+      result['acceptedByUserWithoutTesting'] = true;
+    }
     result['files'] = safe;
     result['verified'] = false;
     result['incomplete'] = raw['incomplete'] == true || safe.isEmpty;

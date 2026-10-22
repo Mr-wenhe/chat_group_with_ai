@@ -5,6 +5,45 @@ class _Credentials implements ApiCredentialResolver {
   Future<String?> resolve(ApiConfig config) async => 'test-key';
 }
 
+class _ReviewFixtureDatabase extends DatabaseService {
+  _ReviewFixtureDatabase(this.root);
+  final Directory root;
+  @override
+  Future<Directory> get mediaDir => Directory('${root.path}/media').create(recursive: true);
+}
+
+class _MaterialFinishClient extends ChatApiService {
+  _MaterialFinishClient(this.replies, {this.modelError});
+  final List<String> replies;
+  final Object? modelError;
+  final capturedMessages = <List<Map<String, dynamic>>>[];
+  int modelCalls = 0;
+
+  @override
+  Future<Map<String, dynamic>> sendStructuredChatMessageStreamed({
+    required String apiKey,
+    required ApiProvider provider,
+    ApiProtocol apiProtocol = ApiProtocol.defaultValue,
+    String? customBaseUrl,
+    required String model,
+    required List<Map<String, dynamic>> messages,
+    double temperature = 0.85,
+    int maxTokens = 1024,
+    Duration receiveTimeout = const Duration(seconds: 120),
+    int maxRetries = 3,
+    CancelToken? cancelToken,
+    bool finishOnTerminalFrame = false,
+    String? reasoningEffort,
+    void Function()? onResponseActivity,
+    void Function(ChatStreamEvent event)? onEvent,
+  }) async {
+    capturedMessages.add(messages);
+    modelCalls++;
+    if (modelError != null) throw modelError!;
+    return {'success': true, 'message': replies[modelCalls > 1 ? 1 : 0]};
+  }
+}
+
 class _ReasoningEnvelopeAdapter implements HttpClientAdapter {
   int calls = 0;
   final temperatures = <double>[];
@@ -54,7 +93,59 @@ class _ModelClient extends ChatApiService {
   /// 跑完讨论之后断言本列表为空。
   final List<String> contractViolations = [];
 
-  _ModelClient(this.respond, {this.expectedMaxTokens = 0});
+  final Stream<ChatStreamEvent> Function(CancelToken?)? streamOverride;
+  final bool reportActivity;
+  _ModelClient(this.respond,
+      {this.expectedMaxTokens = 0,
+      this.streamOverride,
+      this.reportActivity = false});
+  @override
+  Stream<ChatStreamEvent> streamChatMessage({
+    required String apiKey,
+    required ApiProvider provider,
+    ApiProtocol apiProtocol = ApiProtocol.defaultValue,
+    String? customBaseUrl,
+    required String model,
+    required List<Map<String, dynamic>> messages,
+    double temperature = 0.85,
+    int maxTokens = 1024,
+    Duration receiveTimeout = const Duration(seconds: 120),
+    CancelToken? cancelToken,
+    bool finishOnTerminalFrame = false,
+    String? reasoningEffort,
+    void Function()? onResponseActivity,
+  }) async* {
+    if (reportActivity) onResponseActivity?.call();
+    if (streamOverride != null) {
+      yield* streamOverride!(cancelToken);
+      return;
+    }
+    final response = await sendChatMessageWithResponseLimit(
+        apiKey: apiKey,
+        provider: provider,
+        apiProtocol: apiProtocol,
+        customBaseUrl: customBaseUrl,
+        model: model,
+        messages: messages,
+        temperature: temperature,
+        maxTokens: maxTokens,
+        receiveTimeout: receiveTimeout,
+        maxResponseBytes: WorkDiscussionRunner.maxResponseBytes,
+        cancelToken: cancelToken);
+    if (response['success'] == false) {
+      yield ChatStreamEvent.error(response['message'] as String? ?? '测试请求失败');
+    } else {
+      yield ChatStreamEvent(
+          type: ChatStreamEventType.done,
+          content: response['message'] as String? ??
+              response['content'] as String? ??
+              '',
+          truncated: response['truncated'] == true,
+          promptTokens: response['promptTokens'] as int?,
+          completionTokens: response['completionTokens'] as int?);
+    }
+  }
+
   @override
   Future<Map<String, dynamic>> sendChatMessageWithResponseLimit(
       {required String apiKey,
@@ -68,6 +159,7 @@ class _ModelClient extends ChatApiService {
       Duration? receiveTimeout,
       int maxRetries = 3,
       CancelToken? cancelToken,
+      String? reasoningEffort,
       bool structuredJson = false,
       bool allowReasoningContentFallback = false,
       required int maxResponseBytes}) {
@@ -315,11 +407,13 @@ Map<String, dynamic> approval(Map<String, dynamic> s) => {
 WorkDiscussionRunner modelRunner(
         Future<Map<String, dynamic>> Function(AICharacter, Map<String, dynamic>)
             respond,
-        {void Function(AICharacter, List<Map<String, dynamic>>)? onMessages}) =>
+        {void Function(AICharacter, List<Map<String, dynamic>>)? onMessages,
+        WorkModeWorkspaceService? workspaceService}) =>
     WorkDiscussionRunner(
         database: db,
         credentials: _Credentials(),
         eventStore: events,
+        workspaceService: workspaceService,
         investigate: execution.investigate,
         completion: (
             {required character,
@@ -354,11 +448,13 @@ Future<void> waitFor(bool Function() condition) async {
 }
 
 void _registerProgressGuardTest() {
-  test('重复自己的认可不能伪造进展，P2 阻塞且不凑满旧总轮数', () async {
+  test('模型点名不能跳过本人意见，空回应不能伪造进展，P2 有界阻塞', () async {
     var calls = 0;
     final runner = modelRunner((member, context) async {
       calls++;
-      final response = await confirm(member, context);
+      final response = member.id == 'dev'
+          ? await confirm(member, context)
+          : _turn('respond', text: '尚无新的判断。');
       final body =
           jsonDecode(response['message'] as String) as Map<String, dynamic>;
       body['next_member_id'] = 'dev';

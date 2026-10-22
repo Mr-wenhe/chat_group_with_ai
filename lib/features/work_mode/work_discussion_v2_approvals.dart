@@ -79,6 +79,7 @@ extension _V2DiscussionApprovals on _V2DiscussionSession {
         !state.issues.any((i) =>
             i['kind'] == 'idea' &&
             i['id'] == subject &&
+            i['requestRevision'] == state.requestRevision &&
             i['status'] == 'open')) {
       throw StateError('提案不存在');
     }
@@ -166,7 +167,7 @@ extension _V2DiscussionApprovals on _V2DiscussionSession {
       await _adoptIdea(subject);
     }
     if (approval['approved'] == false &&
-        !(state.isAutonomous && {'plan', 'delivery'}.contains(kind))) {
+        !(state.isAutonomous && {'plan', 'idea', 'delivery'}.contains(kind))) {
       final idea = state.issues
           .where((i) => i['id'] == subject && i['kind'] == 'idea')
           .firstOrNull;
@@ -216,8 +217,44 @@ extension _V2DiscussionApprovals on _V2DiscussionSession {
         (decision['options'] as List).isNotEmpty) {
       throw StateError('协调决议必须针对当前方案或候选，不能替用户回答选项');
     }
-    final opinions = current.currentApprovals
-        .where((a) => a['kind'] == kind && a['subjectId'] == subject);
+    final opinions = <String, Map<String, dynamic>>{};
+    final missingOpinions = <String>[];
+    final missingUsage = <String>[];
+    for (final participantId in current.participantIds) {
+      final opinion = current.currentApprovals
+          .where((approval) =>
+              approval['memberId'] == participantId &&
+              approval['kind'] == kind &&
+              approval['subjectId'] == subject &&
+              approval['requestRevision'] == current.requestRevision &&
+              approval['teamRevision'] == current.teamRevision &&
+              approval['verificationRevision'] ==
+                  current.verificationRevision &&
+              approval['source'] == 'memberModel' &&
+              approval['iterationId'] ==
+                  (kind == 'delivery' ? candidate!['id'] : '') &&
+              approval['artifactDigest'] ==
+                  (kind == 'delivery' ? candidate!['artifactDigest'] : ''))
+          .lastOrNull;
+      if (opinion == null) {
+        missingOpinions.add(participantId);
+      } else {
+        opinions[participantId] = opinion;
+      }
+      if (kind == 'delivery' &&
+          current.currentUsageFor(participantId) == null) {
+        missingUsage.add(participantId);
+      }
+    }
+    if (missingOpinions.isNotEmpty || missingUsage.isNotEmpty) {
+      final reasons = <String>[
+        if (missingOpinions.isNotEmpty)
+          '尚缺当前版本的本人意见：${missingOpinions.join('、')}',
+        if (missingUsage.isNotEmpty)
+          '尚缺当前候选的本人实际使用收据：${missingUsage.join('、')}',
+      ];
+      throw StateError('协调决议未采纳，${reasons.join('；')}。待意见和收据齐备后再继续。');
+    }
     final event = _key('ruling', '${task.id}:${current.revision}:$responseRef');
     await _commit(
         'coordinatorRuling',
@@ -238,9 +275,7 @@ extension _V2DiscussionApprovals on _V2DiscussionSession {
                   kind == 'delivery' ? candidate!['artifactDigest'] : '',
               'opinionEventIds': [
                 for (final id in current.participantIds)
-                  if (opinions.where((a) => a['memberId'] == id).lastOrNull !=
-                      null)
-                    opinions.where((a) => a['memberId'] == id).last['eventId']
+                  opinions[id]!['eventId']
               ],
               'reason': decision['reason'],
               'responseRef': responseRef,
@@ -265,17 +300,16 @@ extension _V2DiscussionApprovals on _V2DiscussionSession {
       return;
     }
     final issue = current.issues.where((i) => i['id'] == subject).single;
+    if (!userRuling && issue['requestRevision'] != current.requestRevision) {
+      throw StateError('提案版本已过期，需协调成员重新提交并逐人认可。');
+    }
     final ref = issue['resolutionRef'] as String;
     final store = runner.eventStore;
     if (store == null || !ref.startsWith('proposal:')) {
       throw StateError('提案缺少完整范围、计划及验收详情');
     }
-    final proposal = Map<String, dynamic>.from(
-        jsonDecode(await store.readDiscussionDetail(task.id, ref.substring(9)))
-            as Map);
-    if (_key('proposal', jsonEncode(proposal)) != ref) {
-      throw StateError('提案详情已变化');
-    }
+    final proposal = _proposalFromDetail(
+        ref, await store.readDiscussionDetail(task.id, ref.substring(9)));
     if (_scopeConflicts(proposal)) {
       final originalIssue = issue['problem'] as String;
       await _decision(

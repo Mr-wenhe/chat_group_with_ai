@@ -1,6 +1,36 @@
 part of 'default_work_task_runner.dart';
 
 extension _DefaultWorkTaskRunnerProductionDelivery on DefaultWorkTaskRunner {
+  Future<bool> _deliverUserConfirmedCandidate(AgentTask task,
+      {bool Function()? hasArrivingInput}) async {
+    if (WorkTaskCompletionChoice.choice(task) != 'deliver' ||
+        !WorkTaskCompletionChoice.pending(task) ||
+        task.queuedUserRequests.isNotEmpty ||
+        hasArrivingInput?.call() == true) {
+      throw StateError('用户确认与当前冻结成果不匹配。');
+    }
+    final state = _candidateState(task);
+    final publisher = await candidatePublisher(task);
+    final candidate = (await publisher.recover())
+        .singleWhere((c) => c.iterationId == state.currentIteration!['id']);
+    await publisher.verify(candidate, expectedDigest: candidate.digest);
+    await publisher.sealUserConfirmedOutcome(
+        candidate,
+        state,
+        Map<String, dynamic>.from(
+            WorkTaskCompletionChoice.root(task)[WorkTaskCompletionChoice.key]
+                as Map));
+    _coordinatorDeliveryTasks.add(task.id);
+    try {
+      final delivered =
+          await sendCandidateVersion(task, candidate, kind: 'final');
+      await _checkDeliveryInput(task, candidate, hasArrivingInput);
+      return delivered;
+    } finally {
+      _coordinatorDeliveryTasks.remove(task.id);
+    }
+  }
+
   Future<void> _republishProductionBaseline(AgentTask task) async {
     final state = _candidateState(task);
     final publisher = await candidatePublisher(task);
@@ -144,8 +174,8 @@ extension _DefaultWorkTaskRunnerProductionDelivery on DefaultWorkTaskRunner {
           : _productionMemberFailure(task, state, member) ??
               await _productionCredentialFailure(member);
       if (failure != null) {
-        await _productionDecision(task, 'member', id,
-            '成员 $id 当前不可用：$failure。请恢复或确认已有合格成员接任，未代签。',
+        await _productionDecision(
+            task, 'member', id, '成员 $id 当前不可用：$failure。请恢复或确认已有合格成员接任，未代签。',
             persist: false);
         throw StateError('成员 $id 当前不可用：$failure。');
       }

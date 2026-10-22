@@ -3,6 +3,22 @@ part of 'work_discussion_runner.dart';
 /// Narrow the next contribution without dropping obligations or signing for a
 /// member. These are prompt hints; the existing gates remain authoritative.
 extension _V2DiscussionTurnFocus on _V2DiscussionSession {
+  List<Map<String, dynamic>> _formalPlanRevisionChecklist() => [
+        for (final issue in state.issues)
+          if (issue['status'] == 'open' &&
+              _canReviewFormalPlanIssue(issue, issue['sourceId'] as String))
+            {
+              for (final key in const [
+                'id',
+                'target',
+                'problem',
+                'retestCondition',
+                'evidenceRef'
+              ])
+                key: issue[key],
+            }
+      ];
+
   Map<String, dynamic> _turnFocus(String memberId) {
     if (!WorkDiscussionState.fromExecutionState(task.executionStateJson)!
         .isProductionExecutorConsistent) {
@@ -12,11 +28,46 @@ extension _V2DiscussionTurnFocus on _V2DiscussionSession {
             '用户已经指定制作执行者，当前方案工作项责任不一致。保留用户范围和验收，重新提交由指定成员负责的单制作人方案及全员场景。'
       };
     }
-    final open = state.issues.where((i) => i['status'] == 'open').firstOrNull;
+    final rejectedIdea = _ideaNeedingRevision;
+    if (memberId == state.coordinatorId && rejectedIdea != null) {
+      return {
+        'stage': WorkDiscussionStage.prepareProposal.name,
+        'issueId': rejectedIdea['id'],
+        'formalPlanRevisionChecklist': _formalPlanRevisionChecklist(),
+        'objective':
+            '当前完整提案已过期或收到真实反对。previousProposal 仅是已核验的历史修订依据，不能继续认可或采纳。保留真实异议和用户范围，'
+                '按 formalPlanRevisionChecklist 中每个 id 核对其完整问题与复测条件，集中修订全部未决正式方案缺口，不把已知问题逐条留到下一版；'
+                '提交完整 proposal，issue_id 继续关联此提案问题。'
+                '新提案仍需全员重新审阅，不能代签、直接采纳或把普通测试口径分歧交用户；'
+                '新增需求或扩大权限仍须用户决定。',
+      };
+    }
+    final open = _openDiscussionIssue;
     if (open != null) {
+      if (memberId == state.coordinatorId && _formalPlanNeedsRevision(open)) {
+        return {
+          'stage': WorkDiscussionStage.prepareProposal.name,
+          'issueId': open['id'],
+          'formalPlanRevisionChecklist': _formalPlanRevisionChecklist(),
+          'objective': '提出者已核对当前正式方案，问题仍未解决。先修订完整方案，'
+              '按 formalPlanRevisionChecklist 中每个 id 核对其完整问题与复测条件，集中补齐全部未决正式方案缺口，不再把同一份方案交提出者重复核对。'
+              '保留用户范围、真实问题及已有验收；修改验收仍走关联提案与全员认可。'
+              '正式采纳后再由各提出者复核，不代为关闭问题或宣称运行测试通过。',
+        };
+      }
       if (open['kind'] == 'idea' &&
           (open['resolutionRef'] as String).startsWith('proposal:')) {
         return _approvalFocus('idea', open['id'] as String);
+      }
+      if (_canReviewFormalPlanIssue(open, memberId)) {
+        return {
+          'stage': WorkDiscussionStage.resolveIssue.name,
+          'issueId': open['id'],
+          'objective': '你是此问题的提出者。核对当前已采纳的完整正式方案是否解决原问题；'
+              '确已解决才引用 availableResolutionEvidence 的当前 formal-plan 关闭；'
+              '这只结束制作前方案口径审查，实际命令和游戏结果仍由冻结后的独立测试验证，不能记为验收通过。'
+              '仍有缺陷则保留并说明新证据，不用聊天预览或待审提案代替正式方案。',
+        };
       }
       return {
         'stage': WorkDiscussionStage.resolveIssue.name,
@@ -40,8 +91,30 @@ extension _V2DiscussionTurnFocus on _V2DiscussionSession {
         return {
           'stage': WorkDiscussionStage.reviewApproval.name,
           'objective':
-              '核对全体真实意见后定案。保留反对与理由，实质失败不能通过；用 decision.kind=ruling，options=[]。',
-          'rulingSubjectId': subject
+              '本轮仅核对当前版本意见并提交一条定案，不重新设计或复制整份方案。'
+              'rulingOpinions 是当前意见索引，完整依据仍在 collaboration。'
+              '保留反对与理由，实质失败不能通过；action=decide，'
+              'decision.kind=ruling，targetId 逐字复制 rulingSubjectId，options=[]。'
+              'reason/evidence/impact 各用一两句真实结论；proposal/approval/tool=null，'
+              'issues/resolutions=[]。若发现真实新缺陷则按原协议记录，不能虚报通过。',
+          'rulingSubjectId': subject,
+          'rulingOpinions': [
+            for (final id in state.participantIds)
+              state.currentApprovals
+                  .where((a) =>
+                      a['memberId'] == id &&
+                      a['source'] == 'memberModel' &&
+                      a['verificationRevision'] == state.verificationRevision &&
+                      a['kind'] == kind &&
+                      a['subjectId'] == subject &&
+                      a['iterationId'] ==
+                          (kind == 'delivery' ? subject : '') &&
+                      a['artifactDigest'] ==
+                          (kind == 'delivery'
+                              ? state.currentIteration!['artifactDigest']
+                              : ''))
+                  .lastOrNull,
+          ],
         };
       }
     }
@@ -82,7 +155,9 @@ extension _V2DiscussionTurnFocus on _V2DiscussionSession {
             '有缺陷则记录，有未知条件则调查，不重新生成已有方案。'
             'approvalIdentifiers 只用于 approval 字段，照抄进 approval 即可；'
             '发现的缺陷与补丁要求写进 issues。'
-            '是否认可必须由你审阅后决定，不能因为模板而自动通过。',
+            '是否认可必须由你审阅后决定，不能因为模板而自动通过。'
+            '本轮输出审阅结论及对应 action，不复制完整方案、工作项或历史台账。'
+            '已解决问题仅在有新证据时重开；旧版本记载不能取代当前正式方案。',
         'approvalIdentifiers': {
           'kind': kind,
           'subjectId': subject,

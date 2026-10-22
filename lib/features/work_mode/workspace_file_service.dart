@@ -120,11 +120,13 @@ class WorkspaceFileService {
     );
   }
 
+  /// [alignUtf8Range] 对齐分页两端，默认保留既有调用方的读取行为。
   Future<WorkspaceTextReadResult> readTextRange(
     String rawPath, {
     int startByte = 0,
     int? byteLength,
     WorkspaceReadCancellation? cancellation,
+    bool alignUtf8Range = false,
   }) =>
       _readText(
         rawPath,
@@ -132,6 +134,7 @@ class WorkspaceFileService {
         byteLength: byteLength,
         cancellation: cancellation,
         boundOutputCharacters: true,
+        alignUtf8Range: alignUtf8Range,
       );
 
   /// 变更路径专用的整文读取（追加/合并用）。
@@ -150,6 +153,7 @@ class WorkspaceFileService {
     int? byteLength,
     WorkspaceReadCancellation? cancellation,
     required bool boundOutputCharacters,
+    bool alignUtf8Range = false,
   }) async {
     if (startByte < 0 || (byteLength != null && byteLength < 0)) {
       throw const WorkspaceFileException(
@@ -234,7 +238,35 @@ class WorkspaceFileService {
         budget: budget,
         cancellation: cancellation,
       );
-      text = _decodeStrict(expanded.bytes);
+      var bytes = expanded.bytes;
+      if (alignUtf8Range) {
+        var first = 0;
+        while (expandedStart > 0 &&
+            first < bytes.length &&
+            first < 3 &&
+            bytes[first] & 0xc0 == 0x80) {
+          first++;
+        }
+        var last = bytes.length;
+        if (expandedEnd < totalBytes && last > first) {
+          var lead = last - 1;
+          while (lead > first && bytes[lead] & 0xc0 == 0x80) {
+            lead--;
+          }
+          final byte = bytes[lead];
+          final width = byte >= 0xc2 && byte <= 0xdf
+              ? 2
+              : byte >= 0xe0 && byte <= 0xef
+                  ? 3
+                  : byte >= 0xf0 && byte <= 0xf4
+                      ? 4
+                      : 1;
+          if (last - lead < width) last = lead;
+        }
+        // 只对齐范围两端；内部坏字节仍由严格解码拒绝。
+        bytes = bytes.sublist(first, last);
+      }
+      text = _decodeStrict(bytes);
     }
     final output = boundOutputCharacters
         ? _truncateCharacters(text, limits.maxOutputCharacters)

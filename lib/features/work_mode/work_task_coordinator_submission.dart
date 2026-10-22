@@ -115,6 +115,34 @@ extension _WorkTaskCoordinatorSubmission on WorkTaskCoordinator {
       final discussion = WorkDiscussionState.decodeExecutionState(
         task.executionStateJson,
       );
+      if (WorkTaskRequirementsConfirmation.hasMarker(task.executionStateJson)) {
+        // The user-facing card is a first gate, before discussion models,
+        // workspace checks, or production scheduling. An invalid marker stays
+        // blocked and must be recovered explicitly; it never becomes approval.
+        task
+          ..status = AgentTaskStatus.paused
+          ..resumeRequired = false
+          ..lastError = WorkTaskRequirementsConfirmation.isCurrent(task)
+              ? '待你确认当前需求版本。'
+              : '需求确认卡与当前检查点不匹配，任务已暂停等待重新确认。'
+          ..updatedAt = _clock();
+        _conversationReservations.add(task.groupId);
+        _refreshTaskContext(
+          task,
+          nextStep: task.lastError,
+          extraErrors: [task.lastError],
+        );
+        await _save(task);
+        await _record(
+          task,
+          WorkTaskEventKind.paused,
+          WorkTaskRequirementsConfirmation.isCurrent(task)
+              ? '待你确认'
+              : '需求确认检查点需要恢复',
+          detail: task.lastError,
+        );
+        return task;
+      }
       if (resourceLocks != null) {
         final normalizedLocks = _resourceLockManager.normalizeLockSet(
           resourceLocks,
@@ -190,6 +218,9 @@ extension _WorkTaskCoordinatorSubmission on WorkTaskCoordinator {
       }
       if (!_requiresDiscussionForTask(task)) {
         throw StateError('私聊任务不支持群讨论状态。');
+      }
+      if (WorkTaskRequirementsConfirmation.hasMarker(task.executionStateJson)) {
+        throw StateError('当前需求版本待确认，不能更新讨论状态。');
       }
       if (next.schemaVersion == WorkDiscussionState.currentSchemaVersion) {
         throw StateError('v2 协作状态必须通过带来源和 expectedRevision 的增量入口。');
@@ -328,6 +359,10 @@ extension _WorkTaskCoordinatorSubmission on WorkTaskCoordinator {
             _startingTaskIds.contains(task.id)) {
           throw StateError('任务不可接收此协作增量。');
         }
+        if (WorkTaskRequirementsConfirmation.hasMarker(
+            task.executionStateJson)) {
+          throw StateError('当前需求版本待确认，不能采纳讨论增量。');
+        }
         final decoded =
             WorkDiscussionState.decodeExecutionState(task.executionStateJson);
         final state = decoded.state;
@@ -337,6 +372,11 @@ extension _WorkTaskCoordinatorSubmission on WorkTaskCoordinator {
           throw StateError('任务没有可写的 v2 协作状态。');
         }
         final current = state.collaboration!;
+        final previousPhase = current.phase;
+        final previousIssueStatuses = <String, String>{
+          for (final issue in current.issues)
+            issue['id'] as String: issue['status'] as String,
+        };
         if (current.isAutonomous &&
             !fromDiscussionRunner &&
             update.sourceRole != 'user') {
@@ -397,11 +437,102 @@ extension _WorkTaskCoordinatorSubmission on WorkTaskCoordinator {
         task.plan = next.plan;
         // 这句会经面板与事件直接展示给用户：不要写内部阶段编号。
         task.lastError = next.planReady ? '方案已确认，等待后续调度。' : '';
+        task.updatedAt = _clock();
         _refreshTaskContext(task);
         await _save(task);
 
+        final newlyOpenedDefects = next.issues.where((issue) =>
+            issue['kind'] == 'defect' &&
+            issue['status'] == 'open' &&
+            previousIssueStatuses[issue['id']] != 'open');
+        if (newlyOpenedDefects.isNotEmpty) {
+          final summaries = newlyOpenedDefects
+              .take(4)
+              .map((issue) =>
+                  '${redactSensitiveText(issue['target'], maximum: 120)}：${redactSensitiveText(issue['problem'], maximum: 240)}')
+              .join('；');
+          await _record(
+            task,
+            WorkTaskEventKind.modelOutput,
+            '发现问题',
+            detail: summaries,
+            metadata: <String, Object?>{
+              'issueIds': newlyOpenedDefects
+                  .map((issue) => issue['id'] as String)
+                  .toList(growable: false),
+            },
+          );
+        } else {
+          await _record(
+            task,
+            next.phase == 'delivered' && previousPhase != next.phase
+                ? WorkTaskEventKind.completed
+                : WorkTaskEventKind.planning,
+            previousPhase != next.phase
+                ? _collaborationProgressLabel(next)
+                : _collaborationUpdateEventTitle(current, next),
+            detail: '已保存本轮有效协作状态；下一步按当前方案继续。',
+          );
+        }
+
         return task;
       });
+
+  String _collaborationUpdateEventTitle(
+    WorkCollaborationState previous,
+    WorkCollaborationState current,
+  ) {
+    if (previous.plan != current.plan) {
+      return current.plan.trim().isEmpty ? '方案需要重新收敛' : '正式方案已更新';
+    }
+    if (jsonEncode(previous.workItems) != jsonEncode(current.workItems)) {
+      return '工作项与分工已更新';
+    }
+    if (jsonEncode(previous.issues) != jsonEncode(current.issues)) {
+      return '问题状态已更新';
+    }
+    if (jsonEncode(previous.decisions) != jsonEncode(current.decisions)) {
+      return '待决事项已更新';
+    }
+    if (jsonEncode(previous.approvals) != jsonEncode(current.approvals)) {
+      return '成员认可已更新';
+    }
+    if (jsonEncode(previous.acceptances) != jsonEncode(current.acceptances)) {
+      return '验收状态已更新';
+    }
+    if (jsonEncode(previous.iterations) != jsonEncode(current.iterations)) {
+      return '候选版本已更新';
+    }
+    if (jsonEncode(previous.team) != jsonEncode(current.team)) {
+      return '参与成员状态已更新';
+    }
+    return '群内协作状态已更新';
+  }
+
+  String _collaborationProgressLabel(WorkCollaborationState state) {
+    switch (state.phase) {
+      case 'forming':
+      case 'clarifying':
+        return '讨论中';
+      case 'ready':
+        return '方案已确定';
+      case 'producing':
+        return state.issues.any((issue) =>
+                issue['kind'] == 'defect' && issue['status'] == 'open')
+            ? '修复中'
+            : '制作中';
+      case 'verifying':
+        return state.issues.any((issue) => issue['kind'] == 'defect')
+            ? '复测中'
+            : '测试中';
+      case 'reviewing':
+        return '交付验收中';
+      case 'delivered':
+        return '已交付';
+      default:
+        return '群内协作状态已更新';
+    }
+  }
 
   /// Read-only helper used by panels/tests to avoid parsing the untrusted JSON
   /// extension in more than one place.

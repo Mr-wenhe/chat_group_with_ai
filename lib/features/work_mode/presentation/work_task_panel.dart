@@ -1,3 +1,4 @@
+import '../work_task_completion_choice.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'package:chat_group/features/work_mode/work_public_update_stream.dart';
@@ -8,6 +9,7 @@ import 'package:chat_group/core/text/entity_labels.dart';
 import 'package:chat_group/features/ai_governance/ai_governance_models.dart';
 import 'package:chat_group/features/ai_governance/money_micros.dart';
 import 'package:chat_group/features/agentic/tool_request.dart';
+import 'package:chat_group/features/settings/token_count_format.dart';
 import 'package:chat_group/features/work_mode/presentation/work_change_approval_dialog.dart';
 import 'package:chat_group/features/work_mode/work_artifact_delivery_confirmation.dart';
 import 'package:chat_group/features/work_mode/work_domain_labels.dart';
@@ -21,10 +23,12 @@ import 'package:chat_group/features/work_mode/work_task_clarification.dart';
 import 'package:chat_group/features/work_mode/work_task_approval_plan.dart';
 import 'package:chat_group/features/work_mode/work_change_plan.dart';
 import 'package:chat_group/features/work_mode/work_discussion_state.dart';
+import 'package:chat_group/features/work_mode/work_discussion_runner.dart';
 import 'package:chat_group/features/work_mode/work_collaboration_state.dart';
 import 'package:chat_group/features/work_mode/work_task_execution_policy.dart';
 import 'package:chat_group/features/work_mode/work_follow_up_policy.dart';
 import 'package:chat_group/features/work_mode/work_failure.dart';
+import 'package:chat_group/features/work_mode/work_rejected_commands.dart';
 import 'package:chat_group/features/work_mode/work_task_user_action.dart';
 import 'package:chat_group/features/work_mode/work_task_decision.dart';
 import 'package:chat_group/features/chat_group/widgets/blinking_cursor.dart';
@@ -39,6 +43,8 @@ part 'work_task_history_view.dart';
 part 'work_task_panel_timeline.dart';
 
 typedef WorkTaskEventStream = Stream<WorkTaskEvent> Function(String taskId);
+typedef WorkTaskEventHistory = Future<List<WorkTaskEvent>> Function(
+    String taskId);
 typedef WorkTaskAction = FutureOr<void> Function(String taskId);
 typedef WorkTaskVersionedAction = FutureOr<void> Function(
   String taskId,
@@ -74,6 +80,7 @@ class WorkTaskPanel extends StatefulWidget {
   final int hiddenTaskCount;
   final String? selectedTaskId;
   final WorkTaskEventStream eventStreamFor;
+  final WorkTaskEventHistory? eventHistoryFor;
   final ValueChanged<String> onSelectTask;
   final WorkTaskAction onStop;
   final WorkTaskAction onContinue;
@@ -92,6 +99,9 @@ class WorkTaskPanel extends StatefulWidget {
   final WorkTaskAction? onSelectVisionModel;
   final WorkTaskAction? onRetry;
   final WorkTaskAction? onReauthorize;
+  final WorkTaskReply? onCommandReapproval;
+  final WorkTaskAction? onSupplement;
+  final WorkTaskAction? onCompletionChoice;
   final WorkTaskAction? onViewConflict;
   final WorkTaskAction? onUndo;
   final WorkTaskAction? onLater;
@@ -126,6 +136,7 @@ class WorkTaskPanel extends StatefulWidget {
   final VoidCallback onClose;
   final ValueChanged<bool>? onModalVisibilityChanged;
   final BuildContext? dialogContext;
+
   /// 反显期实体 id → 人话标签；null 表示不提供（面板文本原样显示 id）。
   ///
   /// 取代原先只解析成员名的 `characterNameFor`：同一层并存两个同义解析器迟早漂移。
@@ -147,6 +158,7 @@ class WorkTaskPanel extends StatefulWidget {
   final List<UsageLedgerEntry> usageEntries;
   final List<AiRequestDiagnostic> usageDiagnostics;
   final bool usageUnavailable;
+  final Set<UsageLedgerEntry> outOfBoundsUsageEntries;
 
   /// 已被用户从标签栏隐藏的任务 id；历史列表用它标注"已从标签栏隐藏"，
   /// 让用户知道记录还在、可以继续基于它追加要求。
@@ -167,6 +179,7 @@ class WorkTaskPanel extends StatefulWidget {
     this.hiddenTaskCount = 0,
     this.hiddenTaskIds = const <String>{},
     required this.eventStreamFor,
+    this.eventHistoryFor,
     required this.onSelectTask,
     required this.onStop,
     required this.onContinue,
@@ -192,6 +205,9 @@ class WorkTaskPanel extends StatefulWidget {
     this.onSelectVisionModel,
     this.onRetry,
     this.onReauthorize,
+    this.onCommandReapproval,
+    this.onSupplement,
+    this.onCompletionChoice,
     this.onViewConflict,
     this.onUndo,
     this.onLater,
@@ -209,6 +225,7 @@ class WorkTaskPanel extends StatefulWidget {
     this.usageEntries = const <UsageLedgerEntry>[],
     this.usageDiagnostics = const <AiRequestDiagnostic>[],
     this.usageUnavailable = false,
+    this.outOfBoundsUsageEntries = const <UsageLedgerEntry>{},
     DateTime Function()? clock,
   }) : clock = clock ?? DateTime.now;
 
@@ -231,6 +248,9 @@ class _WorkTaskPanelState extends State<WorkTaskPanel> {
       <String, WorkTaskEvent>{};
   final Map<String, WorkTaskEvent> _latestToolEvents =
       <String, WorkTaskEvent>{};
+  String? _progressHistorySignature;
+  String? _progressHistoryError;
+  int _progressHistoryGeneration = 0;
   Timer? _durationTicker;
   bool _actionInFlight = false;
   String? _actionError;
@@ -253,6 +273,7 @@ class _WorkTaskPanelState extends State<WorkTaskPanel> {
       _replyController.clear();
       _actionError = null;
     }
+    _loadSelectedProgressHistory();
   }
 
   @override
@@ -261,6 +282,7 @@ class _WorkTaskPanelState extends State<WorkTaskPanel> {
     _durationTicker = Timer.periodic(const Duration(seconds: 30), (_) {
       if (mounted) setState(() {});
     });
+    _loadSelectedProgressHistory();
   }
 
   @override
@@ -421,15 +443,19 @@ class _WorkTaskPanelState extends State<WorkTaskPanel> {
         Expanded(
           child: _TaskDetails(
             task: task,
+            latestEvent: latestEvent,
             latestAction: latestAction,
             toolName: toolName,
             actionError: _actionError,
+            progressHistoryError: _progressHistoryError,
             showSummarySection: widget.showTaskSummarySection,
             usageEntries: widget.usageEntries,
             usageDiagnostics: widget.usageDiagnostics,
             usageUnavailable: widget.usageUnavailable,
+            outOfBoundsUsageEntries: widget.outOfBoundsUsageEntries,
             entityLabels: widget.entityLabels,
             eventStreamFor: widget.eventStreamFor,
+            eventHistoryFor: widget.eventHistoryFor,
             onLatestEvent: _rememberLatestEvent,
             clock: widget.clock,
           ),
@@ -458,6 +484,9 @@ class _WorkTaskPanelState extends State<WorkTaskPanel> {
               onSelectVisionModel: widget.onSelectVisionModel,
               onRetry: widget.onRetry,
               onReauthorize: widget.onReauthorize,
+              onCommandReapproval: widget.onCommandReapproval,
+              onSupplement: widget.onSupplement,
+              onCompletionChoice: widget.onCompletionChoice,
               onViewConflict: widget.onViewConflict,
               onUndo: widget.onUndo,
               onLater: widget.onLater,
@@ -514,15 +543,19 @@ class _WorkTaskPanelState extends State<WorkTaskPanel> {
           Expanded(
             child: _TaskDetails(
               task: detailTask,
+              latestEvent: null,
               latestAction: null,
               toolName: null,
               actionError: null,
+              progressHistoryError: null,
               showSummarySection: widget.showTaskSummarySection,
               usageEntries: widget.usageEntries,
               usageDiagnostics: widget.usageDiagnostics,
               usageUnavailable: widget.usageUnavailable,
+              outOfBoundsUsageEntries: widget.outOfBoundsUsageEntries,
               entityLabels: widget.entityLabels,
               eventStreamFor: widget.eventStreamFor,
+              eventHistoryFor: widget.eventHistoryFor,
               onLatestEvent: (_) {},
               // 历史任务已经结束，用最后更新时间当基准，否则耗时会按
               // 当前时间算成几百上千小时。
@@ -697,8 +730,86 @@ class _WorkTaskPanelState extends State<WorkTaskPanel> {
     });
   }
 
+  /// The timeline can be hidden when a short window must preserve the task
+  /// controls. Seed the pinned progress card from durable history anyway.
+  void _loadSelectedProgressHistory() {
+    final task = _selectedTask;
+    final historyFor = widget.eventHistoryFor;
+    final collaboration = task == null
+        ? null
+        : WorkDiscussionState.decodeExecutionState(task.executionStateJson)
+            .state
+            ?.collaboration;
+    if (task == null ||
+        task.groupId.startsWith('dm:') ||
+        collaboration == null ||
+        historyFor == null) {
+      _progressHistorySignature = null;
+      _progressHistoryGeneration++;
+      _progressHistoryError = null;
+      return;
+    }
+    final signature = jsonEncode(<Object?>[
+      task.id,
+      collaboration.revision,
+      task.status.name,
+      task.resumeRequired,
+      task.lastError,
+    ]);
+    if (_progressHistorySignature == signature) return;
+    _progressHistorySignature = signature;
+    final generation = ++_progressHistoryGeneration;
+    unawaited(() async {
+      List<WorkTaskEvent> events;
+      try {
+        events = await historyFor(task.id);
+      } on Object catch (error) {
+        if (!mounted || generation != _progressHistoryGeneration) return;
+        setState(() => _progressHistoryError = sanitizeWorkTaskError(error));
+        return;
+      }
+      if (!mounted ||
+          generation != _progressHistoryGeneration ||
+          _selectedTaskId(widget) != task.id) {
+        return;
+      }
+      final matching = events
+          .where((event) => event.taskId == task.id)
+          .toList(growable: false);
+      if (matching.isEmpty) {
+        setState(() => _progressHistoryError = null);
+        return;
+      }
+      final latest = matching.last;
+      final latestAction = matching.where(_isActionEvent).lastOrNull;
+      final latestTool =
+          matching.where((event) => _toolName(event) != null).lastOrNull;
+      setState(() {
+        if ((_latestEvents[task.id]?.sequence ?? 0) < latest.sequence) {
+          _latestEvents[task.id] = latest;
+        }
+        if (latestAction != null &&
+            (_latestActionEvents[task.id]?.sequence ?? 0) <
+                latestAction.sequence) {
+          _latestActionEvents[task.id] = latestAction;
+        }
+        if (latestTool != null &&
+            (_latestToolEvents[task.id]?.sequence ?? 0) < latestTool.sequence) {
+          _latestToolEvents[task.id] = latestTool;
+        }
+        _progressHistoryError = null;
+      });
+    }());
+  }
+
   bool _isActionEvent(WorkTaskEvent event) {
-    return event.kind == WorkTaskEventKind.planning ||
+    if (_isDiscussionModelWait(event) ||
+        event.title == '群讨论已取得运行槽' ||
+        event.kind == WorkTaskEventKind.paused && event.title == '等待群讨论完成') {
+      return false;
+    }
+    return event.kind == WorkTaskEventKind.planning &&
+            event.title != '正在等待成员模型回应' ||
         event.kind == WorkTaskEventKind.stepStarted ||
         event.kind == WorkTaskEventKind.approvalRequired ||
         event.kind == WorkTaskEventKind.paused;

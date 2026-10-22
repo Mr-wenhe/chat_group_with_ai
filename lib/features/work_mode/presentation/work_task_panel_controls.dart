@@ -333,6 +333,7 @@ class _PublicDetail extends StatelessWidget {
 class _TaskEventTimeline extends StatefulWidget {
   final String taskId;
   final WorkTaskEventStream eventStreamFor;
+  final WorkTaskEventHistory? eventHistoryFor;
   final ValueChanged<WorkTaskEvent> onLatestEvent;
 
   /// 展开态渲染完整时间线与滚动条；折叠态只保留最近若干条且不渲染滚动条。
@@ -355,6 +356,7 @@ class _TaskEventTimeline extends StatefulWidget {
     super.key,
     required this.taskId,
     required this.eventStreamFor,
+    this.eventHistoryFor,
     required this.onLatestEvent,
     required this.clock,
     this.expanded = false,
@@ -376,9 +378,12 @@ class _TaskEventTimelineState extends State<_TaskEventTimeline> {
   static const double _followThreshold = 8.0;
 
   final List<WorkTaskEvent> _events = <WorkTaskEvent>[];
+  final List<WorkTaskEvent> _queuedStreamEvents = <WorkTaskEvent>[];
   final Set<int> _seenSequences = <int>{};
   final ScrollController _eventScrollController = ScrollController();
   StreamSubscription<WorkTaskEvent>? _subscription;
+  int _listenGeneration = 0;
+  bool _loadingHistory = false;
   String? _streamError;
   String? _livePublicDraft;
   WorkTaskEvent? _livePublicEvent;
@@ -425,6 +430,7 @@ class _TaskEventTimelineState extends State<_TaskEventTimeline> {
       return;
     }
     _events.clear();
+    _queuedStreamEvents.clear();
     _seenSequences.clear();
     _streamError = null;
     _livePublicDraft = null;
@@ -469,77 +475,12 @@ class _TaskEventTimelineState extends State<_TaskEventTimeline> {
   }
 
   void _listen() {
+    final generation = ++_listenGeneration;
+    final historyFor = widget.eventHistoryFor;
+    _loadingHistory = historyFor != null;
+    _queuedStreamEvents.clear();
     _subscription = widget.eventStreamFor(widget.taskId).listen(
-      (event) {
-        if (event.taskId != widget.taskId ||
-            _seenSequences.contains(event.sequence)) {
-          return;
-        }
-        if (!mounted) return;
-        final isModelOutput = event.kind == WorkTaskEventKind.modelOutput;
-        final isModelProgress = _isModelProgressEvent(event);
-        final liveDraft = _safePanelText(
-          _publicDraftFromEvent(event),
-          widget.entityLabels,
-        ).trim();
-        setState(() {
-          _seenSequences.add(event.sequence);
-          if (isModelOutput) {
-            _livePublicDraft = liveDraft.isEmpty ? null : liveDraft;
-            _livePublicEvent = liveDraft.isEmpty ? null : event;
-            _modelOutputPending = false;
-            _modelOutputPendingText = 'AI 正在整理公开进度…';
-          } else if (isModelProgress) {
-            // The transport event is only a liveness signal. It must not
-            // become a character-count-only card in the public timeline.
-            // A public_update event, when available, is rendered separately.
-            if (liveDraft.isNotEmpty) {
-              _livePublicDraft = liveDraft;
-              // Newer runners also attach the safe draft to the liveness
-              // event. Keep that value as the historical card if the model
-              // output event is unavailable or arrives later than it.
-              _livePublicEvent = WorkTaskEvent(
-                taskId: event.taskId,
-                sequence: event.sequence,
-                timestamp: event.timestamp,
-                kind: WorkTaskEventKind.modelOutput,
-                title: 'AI 正在输出公开进度',
-                detail: liveDraft,
-                safeMetadata: <String, Object?>{
-                  'stream': 'public_update',
-                  'publicDraft': liveDraft,
-                },
-              );
-              _modelOutputPendingText = 'AI 正在整理公开进度…';
-            } else if (_livePublicDraft == null) {
-              _modelOutputPending = true;
-              _modelOutputPendingSince = event.timestamp;
-              _modelOutputPendingText = _pendingTextFromEvent(event);
-            }
-          } else {
-            if (_eventRepeatsLiveDraft(event)) {
-              // Terminal/action events often repeat the latest public update
-              // as their title. Keep one copy instead of showing the live
-              // card, its historical card, and the terminal summary together.
-              _livePublicEvent = null;
-            } else {
-              _commitLivePublicEvent();
-            }
-            _livePublicDraft = null;
-            _modelOutputPending = false;
-            _modelOutputPendingText = 'AI 正在整理公开进度…';
-            _events.add(event);
-            _events.sort(
-              (left, right) => left.sequence.compareTo(right.sequence),
-            );
-          }
-        });
-        // 新动态落到列表尾部后贴底跟随，保证用户看到的始终是最新一条。
-        _scrollToLatest();
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (mounted) widget.onLatestEvent(event);
-        });
-      },
+      _receiveEvent,
       onError: (Object error, StackTrace stackTrace) {
         if (!mounted) return;
         setState(() {
@@ -547,6 +488,113 @@ class _TaskEventTimelineState extends State<_TaskEventTimeline> {
         });
       },
     );
+    if (historyFor != null) {
+      unawaited(_loadHistory(generation, historyFor, widget.taskId));
+    }
+  }
+
+  void _receiveEvent(WorkTaskEvent event) {
+    if (event.taskId != widget.taskId ||
+        _seenSequences.contains(event.sequence) ||
+        _queuedStreamEvents
+            .any((queued) => queued.sequence == event.sequence)) {
+      return;
+    }
+    if (_loadingHistory) {
+      _queuedStreamEvents.add(event);
+      return;
+    }
+    _acceptEvent(event);
+  }
+
+  Future<void> _loadHistory(
+    int generation,
+    WorkTaskEventHistory historyFor,
+    String taskId,
+  ) async {
+    List<WorkTaskEvent> history = const <WorkTaskEvent>[];
+    String? readError;
+    try {
+      history = await historyFor(taskId);
+    } on Object catch (error) {
+      readError = sanitizeWorkTaskError(error);
+    }
+    if (!mounted || generation != _listenGeneration) return;
+    _loadingHistory = false;
+    if (readError != null) {
+      setState(() => _streamError = readError);
+    }
+    final ordered = <WorkTaskEvent>[
+      ...history.where((event) => event.taskId == taskId),
+      ..._queuedStreamEvents,
+    ]..sort((left, right) => left.sequence.compareTo(right.sequence));
+    _queuedStreamEvents.clear();
+    for (final event in ordered) {
+      _acceptEvent(event);
+    }
+  }
+
+  void _acceptEvent(WorkTaskEvent event) {
+    if (event.taskId != widget.taskId ||
+        _seenSequences.contains(event.sequence) ||
+        !mounted) {
+      return;
+    }
+    final isModelOutput = event.kind == WorkTaskEventKind.modelOutput;
+    final isModelProgress = _isModelProgressEvent(event);
+    final liveDraft = _safePanelText(
+      _publicDraftFromEvent(event),
+      widget.entityLabels,
+    ).trim();
+    setState(() {
+      _seenSequences.add(event.sequence);
+      if (isModelOutput) {
+        _livePublicDraft = liveDraft.isEmpty ? null : liveDraft;
+        _livePublicEvent = liveDraft.isEmpty ? null : event;
+        _modelOutputPending = false;
+        _modelOutputPendingText = 'AI 正在整理公开进度…';
+      } else if (isModelProgress) {
+        // The transport event is only a liveness signal. It must not become
+        // a character-count-only card in the public timeline.
+        if (liveDraft.isNotEmpty) {
+          _livePublicDraft = liveDraft;
+          _livePublicEvent = WorkTaskEvent(
+            taskId: event.taskId,
+            sequence: event.sequence,
+            timestamp: event.timestamp,
+            kind: WorkTaskEventKind.modelOutput,
+            title: 'AI 正在输出公开进度',
+            detail: liveDraft,
+            safeMetadata: <String, Object?>{
+              'stream': 'public_update',
+              'publicDraft': liveDraft,
+            },
+          );
+          _modelOutputPendingText = 'AI 正在整理公开进度…';
+        } else if (_livePublicDraft == null) {
+          _modelOutputPending = true;
+          _modelOutputPendingSince = event.timestamp;
+          _modelOutputPendingText = _pendingTextFromEvent(event);
+        }
+      } else {
+        if (_eventRepeatsLiveDraft(event)) {
+          _livePublicEvent = null;
+        } else {
+          _commitLivePublicEvent();
+        }
+        _livePublicDraft = null;
+        _modelOutputPending = false;
+        _modelOutputPendingText = 'AI 正在整理公开进度…';
+        _events.add(event);
+        _events.sort(
+          (left, right) => left.sequence.compareTo(right.sequence),
+        );
+      }
+    });
+    _scrollToLatest();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) widget.onLatestEvent(event);
+    });
   }
 
   void _retry() {
@@ -554,6 +602,7 @@ class _TaskEventTimelineState extends State<_TaskEventTimeline> {
     if (!mounted) return;
     setState(() {
       _events.clear();
+      _queuedStreamEvents.clear();
       _seenSequences.clear();
       _streamError = null;
       _livePublicDraft = null;
@@ -731,7 +780,9 @@ class _TaskEventTimelineState extends State<_TaskEventTimeline> {
     final event = _currentRunEvents[remaining];
     return _TimelineItemPadding(
       child: _EventCard(
-          event: event, singleLine: singleLine, entityLabels: widget.entityLabels),
+          event: event,
+          singleLine: singleLine,
+          entityLabels: widget.entityLabels),
     );
   }
 

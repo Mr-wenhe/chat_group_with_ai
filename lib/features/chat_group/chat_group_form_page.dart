@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:chat_group/core/models/chat_group.dart';
 import 'package:chat_group/core/text/pinyin_search.dart';
 import 'package:chat_group/core/widgets/app_widgets.dart';
+import 'package:chat_group/core/widgets/required_fields_banner.dart';
 import 'package:chat_group/core/widgets/top_toast.dart';
 import 'package:chat_group/features/ai_character/providers/ai_character_providers.dart';
 import 'package:chat_group/features/chat_group/providers/chat_group_providers.dart';
@@ -27,6 +28,10 @@ class _ChatGroupFormPageState extends ConsumerState<ChatGroupFormPage> {
   Set<String> _selectedCharacterIds = {};
   bool _isEditing = false;
   bool _isSaving = false;
+
+  /// 点过「创建 / 更新」且当时没通过校验才置位，只控制顶栏汇总提示条是否出现。
+  /// 缺项清单每次 build 现算，因此补齐后提示自动消失。
+  bool _requiredFieldsRejected = false;
   String? _existingGroupId;
   double _replyIntervalSeconds = 12;
 
@@ -61,6 +66,10 @@ class _ChatGroupFormPageState extends ConsumerState<ChatGroupFormPage> {
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
+    // 只在用户点过「创建 / 更新」且当时没通过之后才出提示：一进页面就报"缺名字"
+    // 是把尚未开始的填写当成错误。之后每次 build 现算，补齐即消失。
+    final missingRequiredFields =
+        _requiredFieldsRejected ? _missingRequiredFields() : const <String>[];
     final allCharacters = ref.watch(userManagedAICharactersProvider);
     final query = _searchController.text.trim();
     final filtered = query.isEmpty
@@ -98,6 +107,11 @@ class _ChatGroupFormPageState extends ConsumerState<ChatGroupFormPage> {
                     TextStyle(color: cs.primary, fontWeight: FontWeight.w600)),
           ),
         ],
+        bottom: RequiredFieldsBanner.appBarBottom(
+          context: context,
+          missingFields: missingRequiredFields,
+          cs: cs,
+        ),
       ),
       body: Form(
         key: _formKey,
@@ -114,21 +128,22 @@ class _ChatGroupFormPageState extends ConsumerState<ChatGroupFormPage> {
                   controller: _nameController,
                   decoration: appInputDecoration('群聊名称 *', '给你的群聊起个名字',
                       Icons.chat_bubble_outline_rounded, cs),
-                  validator: (v) => v?.isEmpty ?? true ? '请输入群聊名称' : null,
+                  onChanged: (_) => _onRequiredFieldChanged(),
+                  validator: (v) => _isBlank(v) ? '请输入群聊名称' : null,
                 ),
                 const SizedBox(height: 14),
                 TextFormField(
                   controller: _themeController,
                   decoration: appInputDecoration(
                       '主题 *', '例如：职场吐槽大会', Icons.palette_outlined, cs),
-                  validator: (v) => v?.isEmpty ?? true ? '请输入群聊主题' : null,
+                  onChanged: (_) => _onRequiredFieldChanged(),
+                  validator: (v) => _isBlank(v) ? '请输入群聊主题' : null,
                 ),
                 const SizedBox(height: 14),
                 TextFormField(
                   controller: _descriptionController,
-                  decoration: appInputDecoration(
-                      '共同背景', '例如：我们都叫群主“老大”；小林是阿宽的姐姐',
-                      Icons.description_outlined, cs),
+                  decoration: appInputDecoration('共同背景',
+                      '例如：我们都叫群主“老大”；小林是阿宽的姐姐', Icons.description_outlined, cs),
                   maxLines: 3,
                 ),
                 _sharedSettingHint(
@@ -183,7 +198,7 @@ class _ChatGroupFormPageState extends ConsumerState<ChatGroupFormPage> {
             ),
             const SizedBox(height: 24),
             AppSectionHeader(
-                title: '选择角色', icon: Icons.person_add_rounded, cs: cs),
+                title: '选择角色 *', icon: Icons.person_add_rounded, cs: cs),
             const SizedBox(height: 12),
             AppCard(
               cs: cs,
@@ -276,16 +291,44 @@ class _ChatGroupFormPageState extends ConsumerState<ChatGroupFormPage> {
       padding: const EdgeInsets.fromLTRB(4, 6, 4, 0),
       child: Text(
         text,
-        style: TextStyle(
-            fontSize: 12, height: 1.4, color: cs.onSurfaceVariant),
+        style: TextStyle(fontSize: 12, height: 1.4, color: cs.onSurfaceVariant),
       ),
     );
   }
 
+  /// 名字 / 主题「填没填」的判据，字段级 `validator` 与顶栏缺项清单**共用**。
+  ///
+  /// 两边各写一份时边界会分叉：validator 判 `isEmpty`、清单判 `trim().isEmpty`
+  /// 的那一版，名称填成全空格就变成"顶栏报缺、字段却没红字"；而保存时统一
+  /// `trim()`，空格名称会被静默落库成空串。
+  static bool _isBlank(String? value) => (value ?? '').trim().isEmpty;
+
+  /// 点「创建 / 更新」时判定"还缺哪些必填项"的**唯一**判据。
+  ///
+  /// 「选择角色」不在 `Form` 里，它只有这一处判据。
+  List<String> _missingRequiredFields() => [
+        if (_isBlank(_nameController.text)) '群聊名称',
+        if (_isBlank(_themeController.text)) '主题',
+        if (_selectedCharacterIds.isEmpty) '选择角色',
+      ];
+
+  /// 顶栏提示条出现之后，输入变化才需要重算缺项清单。
+  ///
+  /// 无条件 `setState` 会让每次按键都整页 rebuild，连带重跑成员列表的拼音过滤
+  /// （`build` 里的 `PinyinSearch.matchesFields`）——CLAUDE.md 的「避免列表内不
+  /// 必要的 setState / rebuild」说的就是这种。
+  void _onRequiredFieldChanged() {
+    if (!_requiredFieldsRejected) return;
+    setState(() {});
+  }
+
   Future<void> _save() async {
-    if (!_formKey.currentState!.validate() || _isSaving) return;
-    if (_selectedCharacterIds.isEmpty) {
-      AppToast.show(context, '请至少选择一个角色', icon: Icons.info_outline_rounded);
+    if (_isSaving) return;
+    // `validate()` 让字段级红字亮起来，必填清单让顶栏把缺项一次说全。
+    final formValid = _formKey.currentState!.validate();
+    final missingFields = _missingRequiredFields();
+    if (!formValid || missingFields.isNotEmpty) {
+      setState(() => _requiredFieldsRejected = true);
       return;
     }
     _isSaving = true;

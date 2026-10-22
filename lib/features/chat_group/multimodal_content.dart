@@ -15,6 +15,14 @@ typedef AsyncFileBytesReader = Future<Uint8List> Function(String path);
 const int defaultMaxVisionImages = 4;
 const int defaultMaxInlineImageBytes = 5 * 1024 * 1024;
 
+const unsupportedVideoContentNotice = '当前聊天暂不支持视频内容理解，视频画面和音轨未发送给模型。'
+    '请提供关键截图或文字说明；无需开启系统权限。';
+
+/// 附件仅含视频时，普通聊天直接展示能力说明。
+bool isVideoOnlyMessage(Message message) =>
+    message.media?.isNotEmpty == true &&
+    message.media!.every((attachment) => attachment.type == 'video');
+
 /// 根据用户消息与 provider 的视觉能力，生成发送给 AI 的 content。
 ///
 /// 返回类型为 dynamic，原因：
@@ -57,7 +65,9 @@ dynamic buildUserMessageContent(
   final text = message.content;
 
   // 视频不送视觉模型，统一追加文字提示。
-  final videoHint = videos.isEmpty ? '' : '[用户发送了一段视频]';
+  final videoHint = videos.isEmpty
+      ? ''
+      : '[用户发送了一段视频]\n[应用能力说明：$unsupportedVideoContentNotice]';
   final fileHint = _fileHint(files);
 
   // 无图片：直接拼接文案与非视觉附件提示。

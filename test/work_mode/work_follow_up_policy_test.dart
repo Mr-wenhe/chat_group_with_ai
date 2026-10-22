@@ -124,6 +124,18 @@ void main() {
     expect(decision.artifactPath, '/workspace/需求文档.docx');
   });
 
+  test('Chinese punctuation after an explicit path does not hide the path', () {
+    const path = '/Users/fengye/Desktop/chat_group_out/飞行棋/飞行棋.html';
+    final decision = policy.resolve(
+      request: '补充确认：最终文件保存到 $path；交付为单文件 HTML，CSS 和 JavaScript 内嵌，'
+          '无需安装、构建或联网，双击即可打开。测试成员须真实运行当前候选并操作四人回合、掷骰、'
+          '起飞与移动、撞子回基地、终点胜负和重新开始；失败时由程序媛修复新候选，再由测试成员复测。',
+    );
+
+    expect(decision.kind, WorkFollowUpKind.reviseArtifact);
+    expect(decision.artifactPath, path);
+  });
+
   test('a depth-only request revises the single existing artifact', () {
     // 「再详细些」是对上一份产物的深度修订，不是一句新的闲聊。它必须和
     // "优化一下"一样落到唯一产物上，否则用户的补充只会被当成普通追问排队，
@@ -222,8 +234,7 @@ void main() {
     expect(decision.artifactPath, '/workspace/report.md');
   });
 
-  test('manner wording without a new-file verb still asks which artifact',
-      () {
+  test('manner wording without a new-file verb still asks which artifact', () {
     final decision = policy.resolve(
       request: '优化一下排版',
       lastArtifactPaths: const [
@@ -401,7 +412,10 @@ void main() {
     expect(decision.kind, WorkFollowUpKind.clarification);
     expect(
       decision.clarificationOptions.map((option) => option.path),
-      <String>['/workspace/first/create_ppt.py', '/workspace/second/create_ppt.py'],
+      <String>[
+        '/workspace/first/create_ppt.py',
+        '/workspace/second/create_ppt.py'
+      ],
     );
   });
 

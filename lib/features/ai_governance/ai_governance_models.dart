@@ -100,6 +100,19 @@ class ModelCapability {
     required this.version,
     required this.updatedAt,
   });
+
+  bool usageWithinBounds({
+    required int inputTokens,
+    required int outputTokens,
+    int? cachedInputTokens,
+  }) =>
+      inputTokens >= 0 &&
+      outputTokens >= 0 &&
+      inputTokens <= contextWindow &&
+      outputTokens <= maxOutput &&
+      outputTokens <= contextWindow - inputTokens &&
+      (cachedInputTokens == null ||
+          (cachedInputTokens >= 0 && cachedInputTokens <= inputTokens));
 }
 
 class CustomModelCapability {

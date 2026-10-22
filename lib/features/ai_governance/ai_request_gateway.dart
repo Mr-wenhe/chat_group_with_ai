@@ -178,6 +178,9 @@ class AiRequestGateway {
     CancelToken? cancelToken,
     bool requiresTools = false,
     bool userInitiated = false,
+    bool finishOnTerminalFrame = false,
+    String? reasoningEffort,
+    void Function()? onResponseActivity,
     void Function(ChatStreamEvent event)? onEvent,
   }) async {
     await store.ensureLedgerBox();
@@ -209,6 +212,9 @@ class AiRequestGateway {
             maxTokens: maxTokens,
             receiveTimeout: receiveTimeout,
             cancelToken: cancelToken,
+            finishOnTerminalFrame: finishOnTerminalFrame,
+            reasoningEffort: reasoningEffort,
+            onResponseActivity: onResponseActivity,
             onEvent: onEvent,
           );
         }
@@ -224,6 +230,9 @@ class AiRequestGateway {
           receiveTimeout: receiveTimeout,
           maxRetries: 0,
           cancelToken: cancelToken,
+          finishOnTerminalFrame: finishOnTerminalFrame,
+          reasoningEffort: reasoningEffort,
+          onResponseActivity: onResponseActivity,
           onEvent: onEvent,
         );
       },
@@ -241,6 +250,9 @@ class AiRequestGateway {
     required int maxTokens,
     required Duration receiveTimeout,
     required CancelToken? cancelToken,
+    bool finishOnTerminalFrame = false,
+    String? reasoningEffort,
+    void Function()? onResponseActivity,
     void Function(ChatStreamEvent event)? onEvent,
   }) async {
     // No step here carries a total-duration bound: the caller owns the overall
@@ -257,9 +269,13 @@ class AiRequestGateway {
       messages: messages,
       temperature: temperature,
       maxTokens: maxTokens,
-      receiveTimeout: _structuredStreamIdleTimeout,
+      receiveTimeout:
+          finishOnTerminalFrame ? receiveTimeout : _structuredStreamIdleTimeout,
       maxRetries: 0,
       cancelToken: cancelToken,
+      finishOnTerminalFrame: finishOnTerminalFrame,
+      reasoningEffort: reasoningEffort,
+      onResponseActivity: onResponseActivity,
       onEvent: onEvent,
     );
     if (!_needsCompletionFallback(streamed)) return streamed;
@@ -276,6 +292,7 @@ class AiRequestGateway {
       maxRetries: 0,
       cancelToken: cancelToken,
       structuredJson: true,
+      reasoningEffort: reasoningEffort,
       allowReasoningContentFallback: true,
       maxResponseBytes: ChatApiService.defaultMaxResponseBytes,
     );
@@ -293,6 +310,7 @@ class AiRequestGateway {
       maxRetries: 0,
       cancelToken: cancelToken,
       structuredJson: false,
+      reasoningEffort: reasoningEffort,
       allowReasoningContentFallback: true,
       maxResponseBytes: ChatApiService.defaultMaxResponseBytes,
     );
@@ -349,6 +367,9 @@ class AiRequestGateway {
     CancelToken? cancelToken,
     bool requiresTools = false,
     bool userInitiated = false,
+    bool finishOnTerminalFrame = false,
+    String? reasoningEffort,
+    void Function()? onResponseActivity,
   }) async* {
     await store.ensureLedgerBox();
     final rootRequestId = const Uuid().v4();
@@ -403,6 +424,9 @@ class AiRequestGateway {
         maxTokens: maxTokens,
         receiveTimeout: receiveTimeout,
         cancelToken: cancelToken,
+        finishOnTerminalFrame: finishOnTerminalFrame,
+        reasoningEffort: reasoningEffort,
+        onResponseActivity: onResponseActivity,
       )) {
         if (event.type == ChatStreamEventType.token) {
           outputCharacters += event.delta?.length ?? 0;

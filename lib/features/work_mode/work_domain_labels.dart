@@ -17,6 +17,7 @@ class WorkDomainLabels {
   String? _resolve(String id) {
     final current = state;
     if (current == null || id.trim().isEmpty) return null;
+    if (id == current.taskId) return '工作任务';
     return _indexed(current.iterations, id, '第 %s 轮候选') ??
         _indexed(current.issues, id, '问题 %s') ??
         _indexed(current.acceptances, id, '验收项 %s') ??

@@ -63,19 +63,34 @@ extension _TaskActionRecovery on _TaskActions {
             task.status != AgentTaskStatus.interrupted)) {
       return null;
     }
+    final decoded = WorkDiscussionState.decodeExecutionState(
+      task.executionStateJson,
+    );
+    final state = decoded.state;
+    if (!decoded.isValid || state == null) {
+      return null;
+    }
+    final decision =
+        WorkTaskDecision.forTask(task).where((item) => item.isOpen).firstOrNull;
+    if (decision != null) {
+      final options = decision.options
+          .map((option) => option['label']?.trim() ?? '')
+          .where((label) => label.isNotEmpty)
+          .join('；');
+      final reason = decision.reason.trim();
+      return [
+        if (reason.isNotEmpty) reason,
+        if (options.isNotEmpty) '可选方案：$options',
+      ].join('\n');
+    }
     final action = WorkTaskUserAction.forTask(task)
         .where(
           (item) => item.kind == WorkTaskUserActionKind.answerQuestion,
         )
         .firstOrNull;
-    if (action == null || action.blockerId == 'clarificationRequired') {
-      return null;
-    }
-    final decoded = WorkDiscussionState.decodeExecutionState(
-      task.executionStateJson,
-    );
-    final state = decoded.state;
-    if (!decoded.isValid || state == null || state.isExecutionReady) {
+    if (action == null ||
+        action.blockerId == 'clarificationRequired' ||
+        state.isExecutionReady) {
       return null;
     }
     final question = state.openQuestions
@@ -137,6 +152,8 @@ extension _TaskActionRecovery on _TaskActions {
       () => WorkChangeApprovalDialog.show(
         dialogContext ?? context,
         plan: approvalPlan,
+        continuesAfterRejection:
+            WorkTaskExecutionPolicy.isValidatedV2GroupTask(task),
       ),
     );
     if (decision == WorkChangeApprovalDecision.approved) {
@@ -182,6 +199,8 @@ extension _TaskActionRecovery on _TaskActions {
       () => WorkChangeApprovalDialog.show(
         dialogContext ?? context,
         plan: approvalPlan,
+        continuesAfterRejection:
+            WorkTaskExecutionPolicy.isValidatedV2GroupTask(task),
       ),
     );
     if (decision == WorkChangeApprovalDecision.approvedWithoutUndo) {

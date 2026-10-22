@@ -56,7 +56,7 @@ void main() {
     expect(find.textContaining('待解析'), findsNothing);
   });
 
-  testWidgets('用户文件附件仍显示体积与解析状态', (tester) async {
+  testWidgets('桌面用户附件显示预览入口，其余平台保留解析状态', (tester) async {
     await tester.pumpWidget(bubble([
       MediaAttachment(
         type: 'file',
@@ -66,7 +66,10 @@ void main() {
       )
     ]));
 
-    expect(find.textContaining('待解析'), findsOneWidget);
+    expect(
+        find.textContaining(
+            Platform.isMacOS || Platform.isWindows ? '点击预览' : '待解析'),
+        findsOneWidget);
     expect(find.textContaining('内部记录'), findsNothing);
   });
 

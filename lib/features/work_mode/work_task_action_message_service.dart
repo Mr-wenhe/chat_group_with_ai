@@ -12,6 +12,8 @@ import 'package:chat_group/features/direct_chat/direct_chat_session.dart';
 
 import 'work_task_user_action.dart';
 import 'work_task_decision.dart';
+import 'work_task_requirements_confirmation.dart';
+import 'work_discussion_state.dart';
 
 /// Persists one chat entry for each currently actionable task blocker.
 ///
@@ -253,6 +255,21 @@ class WorkTaskActionMessageService {
     final mention = '@${ownerName.trim().isEmpty ? '我' : ownerName.trim()}';
     final prefix = sender == null ? '系统任务提醒' : '工作任务提醒';
     final taskName = _conversationLabel(task, group);
+    if (action.kind == WorkTaskUserActionKind.confirmRequirements) {
+      final state = WorkDiscussionState.fromExecutionState(
+        task.executionStateJson,
+      );
+      final executorId = state?.executorId?.trim().isNotEmpty == true
+          ? state!.executorId!
+          : task.characterId.trim();
+      final executorName = database.aiCharacterBox.get(executorId)?.name ?? '';
+      final card = WorkTaskRequirementsConfirmation.cardFor(
+        task,
+        executorName: executorName,
+      );
+      return '$mention $prefix：$taskName\n$card\n'
+          '请核对本版内容；接受请点击“${action.label}”，需要修改时直接在群里补充。';
+    }
     if (action.blockerId.startsWith('decision_')) {
       final decisions = WorkTaskDecision.forTask(task);
       final decision = decisions
@@ -279,6 +296,7 @@ class WorkTaskActionMessageService {
       WorkTaskUserActionKind.approveCommand => '任务准备执行一项需要你确认的命令操作。',
       WorkTaskUserActionKind.confirmExecutorSwap =>
         '群推举的执行人与请求里钉定的人不一致，需要你确认由谁来执行。',
+      WorkTaskUserActionKind.confirmRequirements => '需求版本需要你确认。',
       WorkTaskUserActionKind.openTask => '任务在等待你的处理。',
     };
     return '$mention $prefix：$taskName $reason '

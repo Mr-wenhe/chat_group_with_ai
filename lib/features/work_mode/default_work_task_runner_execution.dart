@@ -75,7 +75,8 @@ extension _DefaultWorkTaskRunnerExecution on DefaultWorkTaskRunner {
     // 身份、可用性、群归属与职业资格已由上面那次判据逐条核过并各自报出成因，
     // 这里只补它不管的模型配置与凭据——把同一批判据抄第二遍，两边的文案迟早
     // 分叉（这里曾经整段重复 `_discussionExecutorIdentityError`）。
-    final character = database.aiCharacterBox.get(state.executorId?.trim() ?? '');
+    final character =
+        database.aiCharacterBox.get(state.executorId?.trim() ?? '');
     if (character == null) return '群讨论选定的执行角色已删除。';
     final config = _resolveApiConfig(character);
     if (config == null) {
@@ -302,6 +303,12 @@ extension _DefaultWorkTaskRunnerExecution on DefaultWorkTaskRunner {
         modelCapability: capability,
         candidate: usage?.candidate,
       );
+      final usageRegistry = usage == null
+          ? registry
+          : _usageRegistry(registry, usage, task, character);
+      final effectiveRegistry = review == null
+          ? usageRegistry
+          : _reviewRegistry(task, usageRegistry, review);
       final systemPrompt = AgentPromptBuilder.buildAgentDecisionPrompt(
         rolePlaySystemPrompt: character.rolePlaySystemPrompt,
         skills: skills,
@@ -309,16 +316,11 @@ extension _DefaultWorkTaskRunnerExecution on DefaultWorkTaskRunner {
         workModeContext: _workModeContext(
           task,
           character,
-          registry,
+          effectiveRegistry,
           workspaceRoot: workspace.workDirPath,
           candidate: usage?.candidate,
         ),
       );
-      final effectiveRegistry = usage != null
-          ? _usageRegistry(registry, usage)
-          : review == null
-              ? registry
-              : _reviewRegistry(task, registry, review);
       final loop = WorkAgentLoop(
         model: (request) => _completeModelTurn(
           request,
@@ -335,36 +337,36 @@ extension _DefaultWorkTaskRunnerExecution on DefaultWorkTaskRunner {
           usage: usage,
         ),
         registry: effectiveRegistry,
-        onToolResult: usage != null
-            ? (task, call, result) async {
-                if (!cancellation.isCancelled &&
-                    {WorkToolResultStatus.success, WorkToolResultStatus.failed}
-                        .contains(result.status) &&
-                    result.usageObservation != null) {
-                  await _recordUsageObservation(
-                      task, usage, result.usageObservation!);
-                }
-              }
-            : review == null
-                ? null
-                : (task, call, result) async {
-                    if (!cancellation.isCancelled) {
-                      await _recordProductionReviewReceipt(
-                          task, review, call, result);
-                    }
-                  },
+        onToolResult: (task, call, result) async {
+          if (cancellation.isCancelled) return;
+          if (usage != null && result.usageObservation != null) {
+            await _recordUsageObservation(
+                task, usage, result.usageObservation!);
+          }
+          if (review != null) {
+            await _recordProductionReviewReceipt(task, review, call, result);
+          }
+        },
         parser: AgentDecisionParser(
           defaultCommandWorkingDirectory: defaultCommandWorkingDirectory,
+          allowBrowserContext: usage != null &&
+              _canUseBrowserContext(
+                task,
+                character,
+                usage.state.usageAssignments
+                    .singleWhere((item) => item['memberId'] == usage.actorId),
+                usage.candidate,
+              ),
         ),
         eventStore: eventStore,
         clock: clock,
         onCheckpoint: _persistCheckpoint,
-        completionGuard: usage != null
+        completionGuard: review != null
             ? (task, completion) =>
-                _validateProductionUsage(task, usage, completion)
-            : review != null
+                _validateProductionReview(task, review, completion)
+            : usage != null
                 ? (task, completion) =>
-                    _validateProductionReview(task, review, completion)
+                    _validateProductionUsage(task, usage, completion)
                 : (_decodeMap(task.executionStateJson)['workItemExecution']
                             as Map?)?['stage'] ==
                         'material'
@@ -405,7 +407,7 @@ extension _DefaultWorkTaskRunnerExecution on DefaultWorkTaskRunner {
           workModeContext: _workModeContext(
             task,
             character,
-            registry,
+            effectiveRegistry,
             workspaceRoot: workspace.workDirPath,
             candidate: usage?.candidate,
           ),
@@ -435,10 +437,10 @@ extension _DefaultWorkTaskRunnerExecution on DefaultWorkTaskRunner {
           } on Object {
             // Local drafts remain unverified if their validation receipt cannot be saved.
           }
-          if (usage != null) {
-            await _finishProductionUsage(task, usage, character, cancellation);
-          } else if (review != null) {
+          if (review != null) {
             await _finishProductionReview(task, review, character);
+          } else if (usage != null) {
+            await _finishProductionUsage(task, usage, character, cancellation);
           } else {
             await _completeProductionItem(task, character);
           }
@@ -476,6 +478,8 @@ extension _DefaultWorkTaskRunnerExecution on DefaultWorkTaskRunner {
       } else if (result.status != WorkAgentLoopStatus.waitingForApproval) {
         _pendingRequests.remove(task.id);
         if (review != null &&
+            // Transport failure resumes this review; it changes no acceptance requirement.
+            task.workFailure?.type != WorkFailureType.retryableNetwork &&
             !cancellation.isCancelled &&
             task.status != AgentTaskStatus.cancelled &&
             !_candidateState(task).hasPendingDecision) {

@@ -25,6 +25,21 @@ void main() {
       producerId: 'a',
       sources: {'report.txt': working});
 
+  test('文件内容判据忽略候选编号和文件时间，识别相同内容及真实修改', () async {
+    final first = await publish('first');
+    final same = await publisher.publishFromCandidate(
+        publicationId: 'same',
+        state: candidateTestState(requestRevision: 2),
+        producerId: 'a',
+        source: first,
+        baseline: '明确复用已验收基线');
+    expect(first.digest, isNot(same.digest));
+    expect(first.hasSameFilesAs(same), isTrue);
+    await working.writeAsString('real change');
+    final changed = await publish('changed');
+    expect(first.hasSameFilesAs(changed), isFalse);
+  });
+
   test('r001 failure and repaired r002 open different frozen bytes and reports',
       () async {
     final first = await publish('first');
@@ -92,6 +107,28 @@ void main() {
     expect(raw, isNot(contains('server')));
     expect(jsonDecode(raw)['artifactDigest'], candidate.digest);
     expect(await publisher.evidenceValid(candidate, review.reference), isTrue);
+  });
+
+  test('相同发布标识恢复前核对当前源文件，不能把旧候选当作新写入结果', () async {
+    final first = await publish('first');
+    expect((await publish('first')).digest, first.digest);
+    await working.writeAsString('actually changed source');
+    await expectLater(publish('first'), throwsStateError);
+    expect((await publisher.recover()).single.digest, first.digest);
+    expect(await first.file('report.txt').readAsString(), 'broken r001');
+    expect((await publish('next')).iterationId, 'r002');
+  });
+
+  test('需求或团队版本变化不能把相同文件包装为新制作候选', () async {
+    final first = await publish('first');
+    await expectLater(
+        publisher.publish(
+            publicationId: 'new-request',
+            state: candidateTestState(requestRevision: 2),
+            producerId: 'a',
+            sources: {'report.txt': working}),
+        throwsStateError);
+    expect((await publisher.recover()).single.digest, first.digest);
   });
 
   test('unchanged candidate cannot allocate a new repair iteration', () async {

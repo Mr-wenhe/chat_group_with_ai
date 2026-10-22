@@ -146,11 +146,18 @@ extension _AiRequestGatewayRetrySupport on AiRequestGateway {
     required String? failureType,
     required String? failureDetail,
   }) async {
-    final effectiveInput = inputTokens ?? estimatedInputTokens;
-    final effectiveCached = cachedTokens ?? 0;
-    final effectiveOutput = outputTokens ?? estimatedOutputTokens;
-    final hasCompleteReportedUsage =
-        inputTokens != null && outputTokens != null;
+    final hasValidReportedUsage = inputTokens != null &&
+        outputTokens != null &&
+        capability.usageWithinBounds(
+          inputTokens: inputTokens,
+          outputTokens: outputTokens,
+          cachedInputTokens: cachedTokens,
+        );
+    final effectiveInput =
+        hasValidReportedUsage ? inputTokens : estimatedInputTokens;
+    final effectiveCached = hasValidReportedUsage ? cachedTokens ?? 0 : 0;
+    final effectiveOutput =
+        hasValidReportedUsage ? outputTokens : estimatedOutputTokens;
     int? cost;
     final price = capability.price;
     if (price != null) {
@@ -160,7 +167,7 @@ extension _AiRequestGatewayRetrySupport on AiRequestGateway {
         outputTokens: effectiveOutput,
       );
     }
-    if (status == 'success' || (inputTokens != null && outputTokens != null)) {
+    if (status == 'success' || hasValidReportedUsage) {
       await store.addLedgerEntry(UsageLedgerEntry(
         requestId: requestId,
         rootRequestId: rootRequestId,
@@ -179,7 +186,8 @@ extension _AiRequestGatewayRetrySupport on AiRequestGateway {
         estimatedCostMicros: cost,
         currency: price?.currency,
         priceVersion: price?.version,
-        exactUsage: status == 'success' ? exactUsage : true,
+        exactUsage:
+            status == 'success' ? exactUsage && hasValidReportedUsage : true,
         status: status,
       ));
     }
@@ -194,15 +202,28 @@ extension _AiRequestGatewayRetrySupport on AiRequestGateway {
       runBoundary: runBoundary,
       latencyMs: latencyMs,
       retryCount: retryCount,
-      inputTokens: status == 'success' ? effectiveInput : inputTokens,
-      cachedInputTokens: status == 'success' ? effectiveCached : cachedTokens,
-      outputTokens: status == 'success' ? effectiveOutput : outputTokens,
+      inputTokens: status == 'success'
+          ? effectiveInput
+          : hasValidReportedUsage
+              ? inputTokens
+              : null,
+      cachedInputTokens: status == 'success'
+          ? effectiveCached
+          : hasValidReportedUsage
+              ? cachedTokens
+              : null,
+      outputTokens: status == 'success'
+          ? effectiveOutput
+          : hasValidReportedUsage
+              ? outputTokens
+              : null,
       estimatedCostMicros:
-          status == 'success' || hasCompleteReportedUsage ? cost : null,
-      currency: status == 'success' || hasCompleteReportedUsage
-          ? price?.currency
-          : null,
-      exactUsage: status == 'success' ? exactUsage : hasCompleteReportedUsage,
+          status == 'success' || hasValidReportedUsage ? cost : null,
+      currency:
+          status == 'success' || hasValidReportedUsage ? price?.currency : null,
+      exactUsage: status == 'success'
+          ? exactUsage && hasValidReportedUsage
+          : hasValidReportedUsage,
       status: status,
       failureType: failureType,
       failureDetail: failureDetail,

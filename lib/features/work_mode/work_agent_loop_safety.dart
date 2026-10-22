@@ -35,6 +35,10 @@ const String _truncationSalvageStateKey = 'truncationSalvage';
 /// 否则一次暂停就能让护栏失忆。
 const String _stagedRewriteKey = 'stagedRewrite';
 
+/// The one full-document draft path for an active, single-HTML v2 group item.
+const String _singleHtmlDraftKey = 'singleHtmlDraft';
+const int _singleHtmlDraftConflictLimit = 2;
+
 /// 「本次运行写出的路径」在 `executionStateJson` 里的键。
 ///
 /// 与 `task.lastArtifactPaths` 分开：那一份是整条任务血缘的候选集合（产物契约与
@@ -206,6 +210,172 @@ extension _WorkAgentLoopSafety on WorkAgentLoop {
       };
     }
     task.executionStateJson = jsonEncode(execution);
+  }
+
+  String? _singleHtmlDraftBinding(AgentTask task) {
+    if (!WorkTaskExecutionPolicy.isValidatedV2GroupTask(task)) return null;
+    final root = _safeExistingMap(task.executionStateJson);
+    final binding = root['workItemExecution'];
+    final contract = WorkDiscussionState.fromExecutionState(
+      task.executionStateJson,
+    )?.collaboration?.artifactContract;
+    final files = contract?['files'];
+    if (binding is! Map ||
+        binding['stage'] != 'produce' ||
+        contract?['type'] != 'software' ||
+        files is! List ||
+        files.length != 1 ||
+        files.single is! String ||
+        !(files.single as String).trim().toLowerCase().endsWith('.html')) {
+      return null;
+    }
+    return sha256
+        .convert(utf8.encode(jsonEncode([
+          task.id,
+          for (final key in const [
+            'workItemId',
+            'iterationId',
+            'requestRevision',
+            'teamRevision',
+            'verificationRevision',
+            'actorId',
+          ])
+            binding[key],
+        ])))
+        .toString();
+  }
+
+  Map<String, dynamic>? _singleHtmlDraft(AgentTask task) {
+    final binding = _singleHtmlDraftBinding(task);
+    final raw = _safeExistingMap(task.executionStateJson)[_singleHtmlDraftKey];
+    if (binding == null || raw is! Map || raw['binding'] != binding) {
+      return null;
+    }
+    final path = raw['path'];
+    return path is String && path.trim().isNotEmpty && path.length <= 4096
+        ? Map<String, dynamic>.from(raw)
+        : null;
+  }
+
+  Map<String, dynamic>? _singleHtmlDraftContext(AgentTask task) {
+    final draft = _singleHtmlDraft(task);
+    if (draft == null) return null;
+    return {
+      'path': draft['path'],
+      'instruction': _isContractHtmlPath(task, draft['path'] as String)
+          ? '此路径是合同正式 HTML，不是待续写的中间草稿。'
+              '修改旧版时使用 expectedSha256/expectedFragment/replacement 精确替换，'
+              '或将完整分段用 workspace.patch 的 parts 合并到此路径；'
+              '确需完整覆盖时使用 append:false、overwrite:true 并包含完整内容。'
+              '继续遵守既有摘要校验、审批和快照；不要向完整 HTML 末尾追加另一份文档。'
+          : '单 HTML 交付物已固定唯一完整文档草稿路径。'
+              '沿此路径用 append:true 续写；局部修改用 expectedFragment/replacement，'
+              '完成后用 workspace.patch 的 parts 合并到合同文件。不要整份覆盖已有草稿。'
+              '不得在其他路径新建另一份完整 HTML 文档。',
+    };
+  }
+
+  String? _singleHtmlDraftConflictPath(AgentTask task, AgentToolCall call) {
+    if (!_isHtmlDraftWrite(call)) return null;
+    final path = call.arguments['path'];
+    final draftPath = _singleHtmlDraft(task)?['path'];
+    if (path is! String ||
+        draftPath is! String ||
+        _sameArtifactPath(path, draftPath) ||
+        _isContractHtmlPath(task, path)) {
+      return null;
+    }
+    return draftPath;
+  }
+
+  String? _singleHtmlDraftOverwritePath(AgentTask task, AgentToolCall call) {
+    if (call.name != AgentToolName.workspacePatch) return null;
+    final draftPath = _singleHtmlDraft(task)?['path'];
+    final path = call.arguments['path'];
+    if (draftPath is! String ||
+        path is! String ||
+        !_sameArtifactPath(path, draftPath) ||
+        _isContractHtmlPath(task, path) ||
+        call.arguments['content'] is! String ||
+        call.arguments['append'] == true ||
+        call.arguments['parts'] is List) {
+      return null;
+    }
+    return draftPath;
+  }
+
+  void _rememberSingleHtmlDraft(AgentTask task, AgentToolCall call) {
+    if (call.name != AgentToolName.workspacePatch) return;
+    final binding = _singleHtmlDraftBinding(task);
+    final path = call.arguments['path'];
+    if (binding == null || path is! String || path.trim().isEmpty) return;
+    final existing = _singleHtmlDraft(task);
+    if (existing == null &&
+        !_isHtmlDraftWrite(call) &&
+        call.arguments['parts'] is! List) {
+      return;
+    }
+    if (existing != null &&
+        call.arguments['parts'] is! List &&
+        !_sameArtifactPath(path, existing['path'] as String) &&
+        !_isContractHtmlPath(task, path)) {
+      return;
+    }
+    final execution = _decodeMap(task.executionStateJson)
+      ..[_singleHtmlDraftKey] = {
+        'binding': binding,
+        'path': path.trim(),
+        'conflicts': 0,
+      };
+    task.executionStateJson = jsonEncode(execution);
+  }
+
+  int _recordSingleHtmlDraftConflict(AgentTask task) {
+    final draft = _singleHtmlDraft(task);
+    if (draft == null) return _singleHtmlDraftConflictLimit;
+    final previous = draft['conflicts'];
+    final conflicts = (previous is num ? previous.toInt() : 0) + 1;
+    draft['conflicts'] = conflicts.clamp(0, _singleHtmlDraftConflictLimit);
+    final execution = _decodeMap(task.executionStateJson)
+      ..[_singleHtmlDraftKey] = draft;
+    task.executionStateJson = jsonEncode(execution);
+    return conflicts;
+  }
+
+  bool _isContractHtmlPath(AgentTask task, String path) {
+    final contract = WorkDiscussionState.fromExecutionState(
+      task.executionStateJson,
+    )?.collaboration?.artifactContract;
+    final files = contract?['files'];
+    if (files is! List || files.length != 1 || files.single is! String) {
+      return false;
+    }
+    final expected = (files.single as String).trim();
+    return expected.toLowerCase().endsWith('.html') &&
+        (_sameArtifactPath(path, expected) ||
+            _normalizedArtifactPath(path)
+                .endsWith('/${_normalizedArtifactPath(expected)}'));
+  }
+
+  bool _sameArtifactPath(String left, String right) =>
+      _normalizedArtifactPath(left) == _normalizedArtifactPath(right);
+
+  String _normalizedArtifactPath(String value) => workArtifactPathKey(value);
+
+  bool _isHtmlDocument(Object? value) {
+    if (value is! String) return false;
+    final source =
+        (value.startsWith('\uFEFF') ? value.substring(1) : value).trimLeft();
+    return RegExp(r'^(?:<!doctype\s+html\b|<html(?:\s|>))',
+            caseSensitive: false)
+        .hasMatch(source);
+  }
+
+  bool _isHtmlDraftWrite(AgentToolCall call) {
+    if (call.name != AgentToolName.workspacePatch) return false;
+    final path = call.arguments['path'];
+    return path is String && path.trim().toLowerCase().endsWith('.html') ||
+        _isHtmlDocument(call.arguments['content']);
   }
 
   /// 开始一次新运行：本次运行写出的路径清零。
@@ -570,7 +740,45 @@ extension _WorkAgentLoopSafety on WorkAgentLoop {
     final scope = binding is Map
         ? '${task!.id}:${binding['stage']}:${binding['workItemId']}:${binding['iterationId']}:${binding['requestRevision']}:${binding['verificationRevision']}:'
         : '';
-    final legacy = '$scope${call.name.wireName}:$normalized';
+    // Repeated browser clicks are distinct test steps; uncertain attempts still retain their intent marker.
+    final browserStep = task != null &&
+            call.name == AgentToolName.browserContext &&
+            WorkTaskExecutionPolicy.isValidatedV2GroupTask(task)
+        ? ':browser-step:${task.actionCount}'
+        : '';
+    var verificationInput = '';
+    if (task != null &&
+        call.name == AgentToolName.commandRun &&
+        WorkTaskExecutionPolicy.isValidatedV2GroupTask(task)) {
+      final root = _decodeMap(task.executionStateJson);
+      final changes = root['productionChanges'];
+      final checks =
+          WorkDiscussionState.fromExecutionState(task.executionStateJson)
+              ?.collaboration
+              ?.artifactContract['verificationCommands'];
+      if (binding is Map &&
+          binding['stage'] == 'produce' &&
+          changes is Map &&
+          changes['paths'] is Map &&
+          jsonEncode(changes['binding']) == jsonEncode(binding) &&
+          checks is List &&
+          checks.whereType<String>().any((raw) {
+            try {
+              final command = jsonDecode(raw);
+              return command is Map &&
+                  command['executable'] == call.arguments['executable'] &&
+                  jsonEncode(command['arguments']) ==
+                      jsonEncode(call.arguments['arguments']);
+            } on Object {
+              return false;
+            }
+          })) {
+        verificationInput =
+            ':verification-input:${sha256.convert(utf8.encode('${_canonical(changes['paths'])}'))}';
+      }
+    }
+    final legacy =
+        '$scope${call.name.wireName}:$normalized$browserStep$verificationInput';
     if (task != null && WorkTaskExecutionPolicy.isValidatedV2GroupTask(task)) {
       // Preserve old cached identities; new durable indexes contain hashes only.
       final cached = _decodeMap(task.executionStateJson)['committedActionKeys'];
@@ -814,11 +1022,19 @@ extension _WorkAgentLoopSafety on WorkAgentLoop {
   ) {
     final rawPath = result.data['path'] ?? call.arguments['path'];
     final committed = result.data['changed'] == true;
-    // A successful command reports the files it created. Recording them keeps
+    // Launched commands report files they changed, including partial failures.
+    // Recording them keeps
     // one definition of "changed by this run" for both mutation tools, so the
     // artifact auto-completion can recognize a script-produced deliverable.
     final commandArtifacts = call.name == AgentToolName.commandRun &&
-            result.data['runStatus'] == WorkCommandRunStatus.completed.name
+            const {
+              'completed',
+              'failed',
+              'timedOut',
+              'cancelled',
+              'outputLimitExceeded',
+              'pausedForUser',
+            }.contains(result.data['runStatus'])
         ? (result.data['artifactPaths'] as List?)?.whereType<String>() ??
             const <String>[]
         : const <String>[];
@@ -841,9 +1057,29 @@ extension _WorkAgentLoopSafety on WorkAgentLoop {
       changes[rawPath] = {'changed': true, ...hashes};
     }
     for (final path in commandArtifacts) {
-      if (path.trim().isNotEmpty) changes[path] = {'changed': true};
+      if (path.trim().isNotEmpty) {
+        // Commands lack per-file hashes; a fresh write must invalidate prior checks.
+        changes[path] = {'changed': true, 'actionCount': task.actionCount};
+      }
     }
     execution['artifactChanges'] = changes;
+    final binding = execution['workItemExecution'];
+    if (WorkTaskExecutionPolicy.isValidatedV2GroupTask(task) &&
+        binding is Map &&
+        binding['stage'] == 'produce') {
+      final previous = execution['productionChanges'];
+      execution['productionChanges'] = {
+        'binding': binding,
+        'paths': {
+          if (previous is Map &&
+              jsonEncode(previous['binding']) == jsonEncode(binding) &&
+              previous['paths'] is Map)
+            ...previous['paths'] as Map,
+          if (committed && rawPath is String) rawPath: changes[rawPath],
+          for (final path in commandArtifacts) path: changes[path],
+        },
+      };
+    }
     task.executionStateJson = jsonEncode(execution);
   }
 
@@ -1171,6 +1407,7 @@ class _LoopState {
   int toolRetryCount = 0;
   int protocolRepairAttempts = 0;
   int invalidCommandRepairCount = 0;
+  int browserAssertionBindingRepairs = 0;
   int toolRepairCount = 0;
   int completionRepairCount = 0;
   int unchangedMutationCount = 0;

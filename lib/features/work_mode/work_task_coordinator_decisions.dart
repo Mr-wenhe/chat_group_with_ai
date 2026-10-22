@@ -142,10 +142,15 @@ extension _WorkTaskCoordinatorDecisions on WorkTaskCoordinator {
       _persistAttachmentQueueMetadata(
           task, queuedAttachmentIds.skip(1).toList(),
           currentAttachmentId: attachmentId);
-      _conversationReservations.add(task.groupId);
+      // Every user supplement creates a new requirement version. Keep the
+      // revision and the user's answer together, then stop before discussion
+      // until the refreshed card is explicitly accepted.
+      WorkTaskRequirementsConfirmation.requireForCurrentRequest(task);
+      task.lastError = '补充要求已纳入新需求版本，待你确认更新后的需求卡。';
       _refreshTaskContext(task, nextStep: task.lastError);
+      _conversationReservations.add(task.groupId);
       await _save(task);
-      await _record(task, WorkTaskEventKind.paused, '已按顺序纳入补充要求',
+      await _record(task, WorkTaskEventKind.paused, '补充要求已纳入，待你确认',
           detail: inputId);
     }
   }
@@ -228,6 +233,10 @@ extension _WorkTaskCoordinatorDecisions on WorkTaskCoordinator {
         _ensureOpen();
         final task = _requireWorkTask(taskId);
         if (task.isTerminal) throw StateError('终态任务不能接收决策答复。');
+        if (WorkTaskRequirementsConfirmation.hasMarker(
+            task.executionStateJson)) {
+          throw StateError('当前需求版本待确认，旧决策卡不能继续修改检查点。');
+        }
         final state = _v2DecisionState(task);
         final current = state.collaboration!;
         if (responseMessageId?.trim().isNotEmpty == true &&
@@ -329,13 +338,16 @@ extension _WorkTaskCoordinatorDecisions on WorkTaskCoordinator {
           if (unresolved) 'promptedReminder': 'initial',
         };
         if (!unresolved) nextDecision.remove('promptedReminder');
+        final memberRetry =
+            isMemberRequestRetryDecision(original, nextDecision);
         final nextJson = current.toJson();
         final decisions =
             current.decisions.map((e) => Map<String, dynamic>.from(e)).toList();
         decisions[index] = nextDecision;
         nextJson['decisions'] = decisions;
         nextJson['revision'] = current.revision + 1;
-        nextJson['requestRevision'] = current.requestRevision + 1;
+        nextJson['requestRevision'] =
+            current.requestRevision + (memberRetry ? 0 : 1);
         if (disposition == 'waive' || disposition == 'manual') {
           nextJson['verificationRevision'] = current.verificationRevision + 1;
           if (acceptanceTarget) {
@@ -407,9 +419,30 @@ extension _WorkTaskCoordinatorDecisions on WorkTaskCoordinator {
           sourceId: 'user',
           next: next,
         ));
+        var executionCheckpoint =
+            _withoutApprovalCheckpoint(task.executionStateJson);
+        final execution = _decodeExecutionMap(executionCheckpoint);
+        final rawGuard = execution[WorkProgressGuard.jsonKey];
+        final stalledReason = rawGuard is Map ? rawGuard['reason'] : null;
+        if (disposition == 'answer' &&
+            !unresolved &&
+            original['kind'] == 'dispute' &&
+            original['targetId'] == '' &&
+            rawGuard is Map &&
+            rawGuard['stalled'] == true &&
+            stalledReason is String &&
+            stalledReason.startsWith('连续 ') &&
+            original['reason'] == '$stalledReason 请补充处理条件。') {
+          final guard = Map<String, dynamic>.from(rawGuard)
+            ..['noProgressCount'] = 0
+            ..['stalled'] = false;
+          guard.remove('reason');
+          execution[WorkProgressGuard.jsonKey] = guard;
+          executionCheckpoint = jsonEncode(execution);
+        }
         task
           ..executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
-            _withoutApprovalCheckpoint(task.executionStateJson),
+            executionCheckpoint,
             state.copyWith(
               requestRevision: next.requestRevision,
               phase: WorkDiscussionPhase.blocked,
@@ -422,7 +455,9 @@ extension _WorkTaskCoordinatorDecisions on WorkTaskCoordinator {
           ..pendingToolRequestJson = ''
           ..lastError = unresolved
               ? nextDecision['missingCondition'] as String
-              : '用户决策已纳入新需求版本，等待受影响部分重新讨论。'
+              : memberRetry
+                  ? '成员请求恢复已记录，按原需求继续讨论。'
+                  : '用户决策已纳入新需求版本，等待受影响部分重新讨论。'
           ..updatedAt = _clock();
         await _save(task);
         await _record(
@@ -430,9 +465,11 @@ extension _WorkTaskCoordinatorDecisions on WorkTaskCoordinator {
             WorkTaskEventKind.paused,
             unresolved
                 ? '已收到建议，仍需明确选择'
-                : deferred
-                    ? '已暂缓指定事项'
-                    : '已收到用户决策',
+                : memberRetry
+                    ? '成员请求恢复已记录，继续原需求'
+                    : deferred
+                        ? '已暂缓指定事项，等待受影响部分重新讨论'
+                        : '用户决策已纳入，等待受影响部分重新讨论',
             detail:
                 unresolved ? nextDecision['missingCondition'] as String : '');
         if (!unresolved) _maybeStartDiscussion(task);

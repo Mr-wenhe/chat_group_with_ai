@@ -66,6 +66,9 @@ class _StrictDecisionGateway extends AiRequestGateway {
     int? runBoundary,
     bool requiresTools = false,
     bool userInitiated = false,
+    bool finishOnTerminalFrame = false,
+    String? reasoningEffort,
+    void Function()? onResponseActivity,
     void Function(ChatStreamEvent event)? onEvent,
   }) async {
     calls++;

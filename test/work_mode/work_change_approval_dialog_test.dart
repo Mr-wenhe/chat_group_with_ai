@@ -50,6 +50,20 @@ WorkChangePlan _commandPlan() => WorkChangePlan(
     );
 
 void main() {
+  for (final continues in [false, true]) {
+    testWidgets('审批拒绝文案匹配调用方行为：$continues', (tester) async {
+      await tester.pumpWidget(MaterialApp(
+        home: WorkChangeApprovalDialog(
+          plan: _plan(),
+          continuesAfterRejection: continues,
+        ),
+      ));
+      expect(find.text(continues ? '拒绝本次操作' : '拒绝并暂停'), findsOneWidget);
+      expect(find.textContaining('任务会继续寻找安全替代方案'),
+          continues ? findsOneWidget : findsNothing);
+    });
+  }
+
   testWidgets('lists exact absolute paths and the approval reason',
       (tester) async {
     var executed = 0;

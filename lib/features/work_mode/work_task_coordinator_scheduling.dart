@@ -31,6 +31,39 @@ extension _WorkTaskCoordinatorScheduling on WorkTaskCoordinator {
         task.status != AgentTaskStatus.queued) {
       return;
     }
+    if (WorkTaskCompletionChoice.paused(task)) {
+      task.status = AgentTaskStatus.paused;
+      _removeQueuedTask(task);
+      await _save(task);
+      return;
+    }
+    if (WorkTaskRequirementsConfirmation.hasMarker(task.executionStateJson)) {
+      _removeQueuedTask(task);
+      task
+        ..status = AgentTaskStatus.paused
+        ..resumeRequired = false
+        ..lastError = WorkTaskRequirementsConfirmation.isCurrent(task)
+            ? '待你确认当前需求版本。'
+            : '需求确认检查点与当前请求不匹配，任务已暂停等待重新确认。'
+        ..updatedAt = _clock();
+      _conversationReservations.add(task.groupId);
+      _refreshTaskContext(
+        task,
+        nextStep: task.lastError,
+        extraErrors: [task.lastError],
+      );
+      await _save(task);
+      await _markSnapshotStatus(task);
+      await _record(
+        task,
+        WorkTaskEventKind.paused,
+        WorkTaskRequirementsConfirmation.isCurrent(task)
+            ? '待你确认'
+            : '需求确认检查点需要恢复',
+        detail: task.lastError,
+      );
+      return;
+    }
     if (workExecutionCheckpointRequiresReview(task.executionStateJson)) {
       await _pauseForCheckpointReview(task);
       await _schedule();
@@ -288,14 +321,15 @@ extension _WorkTaskCoordinatorScheduling on WorkTaskCoordinator {
   List<WorkResourceLockRequest> _resourceLocksFor(AgentTask task) {
     final explicit = _taskLockPlans[task.id];
     if (explicit != null) return List<WorkResourceLockRequest>.from(explicit);
-    final persisted = _persistedResourceLocks(task.executionStateJson);
-    if (persisted != null) {
-      _taskLockPlans[task.id] = persisted;
-      return List<WorkResourceLockRequest>.from(persisted);
-    }
+    // A live planner owns the current scope; saved plans may belong to an
+    // earlier request or the legacy policy that locked every authorized root.
     final callback = _resourceLockPlan;
     if (callback != null) {
       return _normalizeAndPersistResourceLocks(task, callback(task));
+    }
+    final persisted = _persistedResourceLocks(task.executionStateJson);
+    if (persisted != null) {
+      return List<WorkResourceLockRequest>.from(persisted);
     }
     if (_runner case final WorkTaskResourceLockPlanner planner) {
       return _normalizeAndPersistResourceLocks(
@@ -311,8 +345,6 @@ extension _WorkTaskCoordinatorScheduling on WorkTaskCoordinator {
     Iterable<WorkResourceLockRequest> planned,
   ) {
     final normalized = _resourceLockManager.normalizeLockSet(planned);
-    if (normalized.isEmpty) return const <WorkResourceLockRequest>[];
-    _taskLockPlans[task.id] = normalized;
     // The runner may be created after a process restart, so the first plan
     // computed from the current grant must be persisted before execution can
     // cross the file boundary. _startRunning saves this same task object.
@@ -344,7 +376,7 @@ extension _WorkTaskCoordinatorScheduling on WorkTaskCoordinator {
       task,
       WorkTaskEventKind.queued,
       '等待另一个任务释放 $safePath',
-      detail: '资源锁等待不会增加 Agent 动作数。',
+      detail: '另一个任务正在使用该路径，释放后将自动继续，你无需操作。资源锁等待不会增加 Agent 动作数。',
     );
     unawaited(_awaitResourceLease(waiting, locks));
   }

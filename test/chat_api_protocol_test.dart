@@ -1,3 +1,7 @@
+import 'package:chat_group/features/ai_governance/ai_governance_models.dart';
+import 'package:chat_group/features/ai_governance/ai_request_gateway.dart';
+import 'helpers/memory_governance_store.dart';
+import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
@@ -5,9 +9,296 @@ import 'package:chat_group/core/models/api_provider.dart';
 import 'package:chat_group/core/models/api_protocol.dart';
 import 'package:chat_group/services/chat_api_service.dart';
 import 'package:dio/dio.dart';
+import 'package:chat_group/core/streaming/chat_stream_event.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  for (final streaming in [false, true]) {
+    test('Anthropic cached usage stays exact streaming=$streaming', () async {
+      final store = MemoryGovernanceStore();
+      await store.saveCustomCapability(
+          'custom',
+          'cached-test',
+          const CustomModelCapability(
+              supportsStreaming: true, contextWindow: 200000, maxOutput: 8192));
+      final usage = {
+        'input_tokens': 50,
+        'cache_creation_input_tokens': 2000,
+        'cache_read_input_tokens': 10000,
+        'output_tokens': 200
+      };
+      final dio = Dio()
+        ..interceptors.add(InterceptorsWrapper(onRequest: (options, handler) {
+          final body = streaming
+              ? ResponseBody.fromString(
+                  'data: ${jsonEncode({
+                        'type': 'message_start',
+                        'message': {
+                          'usage': {...usage, 'output_tokens': 0}
+                        }
+                      })}\n\n'
+                  'data: {"type":"content_block_delta","delta":{"text":"OK"}}\n\n'
+                  'data: {"type":"message_delta","usage":{"input_tokens":50,"output_tokens":200}}\n\n'
+                  'data: {"type":"message_stop"}\n\n',
+                  200)
+              : {
+                  'model': 'cached-test',
+                  'content': [
+                    {'type': 'text', 'text': 'OK'}
+                  ],
+                  'usage': usage
+                };
+          handler.resolve(streaming
+              ? Response<ResponseBody>(
+                  requestOptions: options,
+                  statusCode: 200,
+                  data: body as ResponseBody)
+              : Response(requestOptions: options, statusCode: 200, data: body));
+        }));
+      addTearDown(dio.close);
+      final gateway =
+          AiRequestGateway(store: store, client: ChatApiService(dio: dio));
+      final send =
+          streaming ? gateway.sendChatMessageStreamed : gateway.sendChatMessage;
+      final result = await send(
+          apiKey: 'test-key',
+          provider: ApiProvider.custom,
+          apiProtocol: ApiProtocol.anthropicMessages,
+          customBaseUrl: 'https://example.test',
+          model: 'cached-test',
+          messages: [
+            {'role': 'user', 'content': 'hello'}
+          ],
+          purpose: AiRequestPurpose.reply,
+          conversationId: 'cached-usage',
+          characterId: 'worker',
+          maxRetries: 0);
+      expect(result['success'], isTrue);
+      final entry = store.ledgerEntries.single;
+      expect(entry.exactUsage, isTrue);
+      expect(entry.inputTokens, 12050);
+      expect(entry.cachedInputTokens, 10000);
+      expect(entry.outputTokens, 200);
+    });
+  }
+
+  for (final protocol in ApiProtocol.values) {
+    test('群请求按协议结束帧完成，无需连接关闭：${protocol.name}', () async {
+      for (final truncated in [false, true]) {
+        if (truncated &&
+            protocol != ApiProtocol.openAiChatCompletions &&
+            protocol != ApiProtocol.geminiGenerateContent) {
+          continue;
+        }
+        final payload = switch (protocol) {
+          ApiProtocol.openAiChatCompletions => 'data: ${jsonEncode({
+                  'choices': [
+                    {
+                      'delta': {'content': 'OK'},
+                      'finish_reason': truncated ? 'length' : 'stop'
+                    }
+                  ]
+                })}\n\n',
+          ApiProtocol.anthropicMessages =>
+            'data: {"type":"content_block_delta","delta":{"thinking":"PRIVATE"}}\n\n'
+                'data: {"type":"content_block_delta","delta":{"text":"OK"}}\n\ndata: {"type":"message_stop"}\n\n',
+          ApiProtocol.openAiResponses =>
+            'data: {"type":"response.reasoning_text.delta","delta":"PRIVATE"}\n\n'
+                'data: {"type":"response.completed","response":{"output_text":"OK"}}\n\n',
+          ApiProtocol.geminiGenerateContent => 'data: ${jsonEncode({
+                  'candidates': [
+                    {
+                      'content': {
+                        'parts': [
+                          {'text': 'PRIVATE', 'thought': true},
+                          {'text': 'OK'}
+                        ]
+                      },
+                      'finishReason': truncated ? 'MAX_TOKENS' : 'STOP'
+                    }
+                  ]
+                })}\n\n',
+        };
+        var activity = 0;
+        final wire = StreamController<Uint8List>();
+        wire.add(Uint8List.fromList(utf8.encode(payload)));
+        wire.onCancel = () {
+          unawaited(wire.close());
+        };
+        final dio = Dio()
+          ..interceptors.add(InterceptorsWrapper(onRequest: (options, handler) {
+            handler.resolve(Response<ResponseBody>(
+                requestOptions: options,
+                statusCode: 200,
+                data: ResponseBody(wire.stream, 200)));
+          }));
+        try {
+          final events = await ChatApiService(dio: dio)
+              .streamChatMessage(
+                apiKey: 'test-key',
+                provider: ApiProvider.custom,
+                apiProtocol: protocol,
+                customBaseUrl: 'https://example.test/v1',
+                model: 'arbitrary-model',
+                messages: const [],
+                finishOnTerminalFrame: true,
+                onResponseActivity: () => activity++,
+              )
+              .toList()
+              .timeout(const Duration(seconds: 2));
+          expect(events.last.type, ChatStreamEventType.done);
+          expect(events.last.content, 'OK');
+          expect(events.last.truncated, truncated);
+          expect(activity, greaterThan(0));
+          expect(events.any((event) => (event.delta ?? '').contains('PRIVATE')),
+              isFalse);
+        } finally {
+          await wire.close();
+          dio.close();
+        }
+      }
+    }, timeout: const Timeout(Duration(seconds: 30)));
+  }
+
+  for (final protocol in ApiProtocol.values) {
+    test('群执行汇总按协议结束帧完成，无需连接关闭：${protocol.name}', () async {
+      for (final truncated in [false, true]) {
+        if (truncated &&
+            protocol != ApiProtocol.openAiChatCompletions &&
+            protocol != ApiProtocol.geminiGenerateContent) {
+          continue;
+        }
+        final payload = switch (protocol) {
+          ApiProtocol.openAiChatCompletions => 'data: ${jsonEncode({
+                  'choices': [
+                    {
+                      'delta': {'content': 'OK'},
+                      'finish_reason': truncated ? 'length' : 'stop'
+                    }
+                  ]
+                })}\n\n',
+          ApiProtocol.anthropicMessages =>
+            'data: {"type":"content_block_delta","delta":{"thinking":"PRIVATE"}}\n\n'
+                'data: {"type":"content_block_delta","delta":{"text":"OK"}}\n\ndata: {"type":"message_stop"}\n\n',
+          ApiProtocol.openAiResponses =>
+            'data: {"type":"response.reasoning_text.delta","delta":"PRIVATE"}\n\n'
+                'data: {"type":"response.completed","response":{"output_text":"OK"}}\n\n',
+          ApiProtocol.geminiGenerateContent => 'data: ${jsonEncode({
+                  'candidates': [
+                    {
+                      'content': {
+                        'parts': [
+                          {'text': 'PRIVATE', 'thought': true},
+                          {'text': 'OK'}
+                        ]
+                      },
+                      'finishReason': truncated ? 'MAX_TOKENS' : 'STOP'
+                    }
+                  ]
+                })}\n\n',
+        };
+        var activity = 0;
+        final wire = StreamController<Uint8List>();
+        wire.add(Uint8List.fromList(utf8.encode(payload)));
+        wire.onCancel = () {
+          unawaited(wire.close());
+        };
+        final dio = Dio()
+          ..interceptors.add(InterceptorsWrapper(onRequest: (options, handler) {
+            handler.resolve(Response<ResponseBody>(
+                requestOptions: options,
+                statusCode: 200,
+                data: ResponseBody(wire.stream, 200)));
+          }));
+        try {
+          final result = await ChatApiService(dio: dio)
+              .sendStructuredChatMessageStreamed(
+                apiKey: 'test-key',
+                provider: ApiProvider.custom,
+                apiProtocol: protocol,
+                customBaseUrl: 'https://example.test/v1',
+                model: 'arbitrary-model',
+                messages: const [],
+                maxRetries: 0,
+                finishOnTerminalFrame: true,
+                onResponseActivity: () => activity++,
+              )
+              .timeout(const Duration(seconds: 2));
+          expect(result['success'], isTrue);
+          expect(result['message'], 'OK');
+          expect(result['truncated'] == true, truncated);
+          expect(activity, greaterThan(0));
+          expect((result['message'] as String).contains('PRIVATE'), isFalse);
+        } finally {
+          await wire.close();
+          dio.close();
+        }
+      }
+    }, timeout: const Timeout(Duration(seconds: 30)));
+  }
+
+  test('默认流仍接收结束帧之后的用量，不提前结束私聊调用', () async {
+    final dio = Dio()
+      ..interceptors.add(InterceptorsWrapper(onRequest: (options, handler) {
+        handler.resolve(Response<ResponseBody>(
+            requestOptions: options,
+            statusCode: 200,
+            data: ResponseBody.fromString(
+                'data: {"choices":[{"delta":{"content":"OK"},"finish_reason":"stop"}]}\n\n'
+                'data: {"choices":[],"usage":{"prompt_tokens":12,"completion_tokens":3}}\n\n'
+                'data: [DONE]\n\n',
+                200)));
+      }));
+    final events = await ChatApiService(dio: dio).streamChatMessage(
+      apiKey: 'test-key',
+      provider: ApiProvider.custom,
+      customBaseUrl: 'https://example.test/v1',
+      model: 'arbitrary-model',
+      messages: const [],
+    ).toList();
+    expect(events.last.content, 'OK');
+    expect(events.last.promptTokens, 12);
+    expect(events.last.completionTokens, 3);
+    dio.close();
+  });
+
+  test('Step 5 群讨论显式选择低推理档，默认调用和其它模型不改变', () async {
+    for (final model in ['step-5-preview', 'other-model']) {
+      for (final effort in <String?>[null, 'low']) {
+        late Map body;
+        var activity = 0;
+        final dio = Dio()
+          ..interceptors.add(InterceptorsWrapper(onRequest: (options, handler) {
+            body = options.data as Map;
+            handler.resolve(Response<ResponseBody>(
+                requestOptions: options,
+                statusCode: 200,
+                data: ResponseBody.fromString(
+                    'data: {"choices":[{"delta":{"reasoning":"PRIVATE"}}]}\n\ndata: {"choices":[{"delta":{"content":"OK"}}]}\n\ndata: [DONE]\n\n',
+                    200)));
+          }));
+        final events = await ChatApiService(dio: dio)
+            .streamChatMessage(
+                apiKey: 'test-key',
+                provider: ApiProvider.custom,
+                customBaseUrl: 'https://example.com/v1',
+                model: model,
+                messages: const [],
+                maxTokens: 0,
+                reasoningEffort: effort,
+                onResponseActivity: () => activity++)
+            .toList();
+        expect(activity, 2);
+        expect(events.last.content, 'OK');
+        expect(events.any((e) => (e.delta ?? '').contains('PRIVATE')), isFalse);
+        expect(body['reasoning_effort'],
+            model == 'step-5-preview' ? effort : null);
+        expect(body.containsKey('max_tokens'), isFalse);
+        dio.close();
+      }
+    }
+  });
+
   test('工作模式可省略可选协议的输出 token 上限', () async {
     for (final protocol in [
       ApiProtocol.openAiChatCompletions,

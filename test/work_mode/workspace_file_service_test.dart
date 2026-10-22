@@ -73,6 +73,26 @@ void main() {
     expect(result.truncated, isTrue);
   });
 
+  test(
+      'group range reads align both UTF-8 boundaries without masking corruption',
+      () async {
+    final file = File('${root.path}/unicode.txt');
+    await file.writeAsString('中文甲乙丙丁🙂结尾');
+    final length = await file.length();
+    for (var start = 0; start < length; start++) {
+      for (var size = 1; size <= 5; size++) {
+        final result = await service().readTextRange(file.path,
+            startByte: start, byteLength: size, alignUtf8Range: true);
+        expect(result.text, isNot(contains('�')));
+      }
+    }
+    await file.writeAsBytes([65, 0xff, 66, 67, 68, 69, 70]);
+    await expectLater(
+        service().readTextRange(file.path,
+            startByte: 0, byteLength: 3, alignUtf8Range: true),
+        throwsA(isA<WorkspaceFileException>()));
+  });
+
   test('bounds oversized text and rejects invalid UTF-8 as non-text', () async {
     final bounded = await service(
       limits: const WorkspaceReadLimits(maxReadBytes: 32),
@@ -179,8 +199,7 @@ void main() {
     // 变更路径要的是整文（追加/合并必须拿到完整旧内容），模型路径要的才是有界
     // 视图。readTextRange 的 truncated 里混了面向模型的 12000 字符上限，用它
     // 判断"文件读完没有"会把所有长文件误判成读取被截断。
-    final long =
-        await File('${root.path}/long.txt').writeAsString('a' * 13000);
+    final long = await File('${root.path}/long.txt').writeAsString('a' * 13000);
     final reader = service();
 
     final forMutation = await reader.readTextForMutation(long.path);

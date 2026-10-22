@@ -1,6 +1,97 @@
 part of 'work_collaboration_state_test.dart';
 
 void _registerCollaborationHistoryRegressions() {
+  test('仅路由可在不改变需求版本时追加成员请求恢复问题', () {
+    final before = _state(_fixture());
+    final decision = {
+      'id': 'retry',
+      'revision': 1,
+      'kind': 'member',
+      'targetId': 'a',
+      'status': 'pending',
+      'reason': '请求超时',
+      'answer': '',
+      'impact': '等待恢复',
+      'responseRef': '',
+      'options': [
+        {'id': 'retry-same-member', 'label': '重试', 'impact': '原需求继续'},
+        {'id': 'member-config-updated', 'label': '配置已更新', 'impact': '原需求继续'}
+      ]
+    };
+    WorkCollaborationState apply(String role, {bool changeScope = false}) =>
+        before.apply(WorkCollaborationUpdate(
+          taskId: before.taskId,
+          conversationId: before.conversationId,
+          expectedRevision: before.revision,
+          eventId: 'recovery',
+          sourceRole: role,
+          sourceId: role,
+          next: _state(before.toJson()
+            ..['revision'] = before.revision + 1
+            ..['scope'] = changeScope ? '新增需求' : before.scope
+            ..['appliedEventIds'] = ['recovery']
+            ..['decisions'] = [...before.decisions, decision]),
+        ));
+    expect(apply('router').requestRevision, before.requestRevision);
+    expect(() => apply('user'), throwsStateError);
+    expect(() => apply('router', changeScope: true), throwsStateError);
+  });
+
+  test('成员请求重试保留需求基线，系统和夹带变更不能借此越过版本校验', () {
+    final before = _state(_fixture()
+      ..['decisions'] = [
+        {
+          'id': 'retry',
+          'revision': 1,
+          'kind': 'member',
+          'targetId': 'a',
+          'status': 'pending',
+          'reason': '请求超时',
+          'answer': '',
+          'impact': '等待恢复',
+          'responseRef': '',
+          'options': [
+            {'id': 'retry-same-member', 'label': '保留成员重试', 'impact': '原需求继续'}
+          ]
+        }
+      ]);
+    WorkCollaborationState next({String? changedScope, String? target}) =>
+        _state(before.toJson()
+          ..['revision'] = before.revision + 1
+          ..['scope'] = changedScope ?? before.scope
+          ..['appliedEventIds'] = ['retry-answer']
+          ..['decisions'] = [
+            {
+              ...before.decisions.single,
+              'revision': 2,
+              'status': 'answered',
+              'answerKind': 'choice',
+              'answer': '保留成员重试',
+              'responseRef': 'user-answer',
+              'missingCondition': '',
+              if (target != null) 'targetId': target,
+            }
+          ]);
+    WorkCollaborationState apply(WorkCollaborationState after, String role) =>
+        before.apply(WorkCollaborationUpdate(
+          taskId: before.taskId,
+          conversationId: before.conversationId,
+          expectedRevision: before.revision,
+          eventId: 'retry-answer',
+          sourceRole: role,
+          sourceId: role,
+          next: after,
+        ));
+    final after = apply(next(), 'user');
+    expect(after.requestRevision, before.requestRevision);
+    expect(after.approvals, before.approvals);
+    expect(after.acceptances, before.acceptances);
+    expect(after.iterations, before.iterations);
+    expect(() => apply(next(), 'system'), throwsStateError);
+    expect(() => apply(next(target: 'b'), 'user'), throwsStateError);
+    expect(() => apply(next(changedScope: '新增需求'), 'user'), throwsStateError);
+  });
+
   test('历史回归：obsolete idea revision signatures are not live approvals', () {
     final raw = _fixture()
       ..['requestRevision'] = 32

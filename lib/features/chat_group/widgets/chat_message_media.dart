@@ -15,6 +15,8 @@ class ChatMessageMedia extends StatelessWidget {
     required this.message,
     required this.isUser,
     required this.cs,
+    this.isDirectChat = false,
+    this.entityLabels,
   });
 
   final Message message;
@@ -23,14 +25,16 @@ class ChatMessageMedia extends StatelessWidget {
   final bool isUser;
 
   final ColorScheme cs;
+  final bool isDirectChat;
+  final EntityLabels? entityLabels;
 
   @override
   Widget build(BuildContext context) =>
-      _buildMediaContent(context, message, cs, isUser);
+      _buildMediaContent(context, message, cs, isUser, isDirectChat);
 
   /// Media rendering inside the bubble: image grid + video player, stacked above text.
-  Widget _buildMediaContent(
-      BuildContext context, Message message, ColorScheme cs, bool isUser) {
+  Widget _buildMediaContent(BuildContext context, Message message,
+      ColorScheme cs, bool isUser, bool isDirectChat) {
     final media = message.media ?? [];
     if (media.isEmpty) return const SizedBox.shrink();
     return Padding(
@@ -43,10 +47,10 @@ class ChatMessageMedia extends StatelessWidget {
           if (att.type == 'image') {
             return _buildImageThumb(context, att, cs);
           }
-          if (att.type == 'video') {
+          if (att.type == 'video' && !Platform.isMacOS && !Platform.isWindows) {
             return VideoBubble(localPath: att.localPath, isUser: isUser);
           }
-          return _buildFileAttachment(context, att, cs, isUser);
+          return _buildFileAttachment(context, att, cs, isUser, isDirectChat);
         }).toList(),
       ),
     );
@@ -57,7 +61,9 @@ class ChatMessageMedia extends StatelessWidget {
       BuildContext context, MediaAttachment att, ColorScheme cs) {
     final data = uiAttachmentDataUriCache.decode(att.localPath);
     return GestureDetector(
-      onTap: () => unawaited(_openImageFullscreen(context, att.localPath)),
+      onTap: () => unawaited(Platform.isMacOS || Platform.isWindows
+          ? _openAttachment(context, att)
+          : _openImageFullscreen(context, att.localPath)),
       onLongPress: () => _showAttachmentActions(context, att),
       onSecondaryTap: () => _showAttachmentActions(context, att),
       child: ClipRRect(
@@ -131,6 +137,7 @@ class ChatMessageMedia extends StatelessWidget {
     MediaAttachment att,
     ColorScheme cs,
     bool isUser,
+    bool isDirectChat,
   ) {
     final textColor = WeComChatTokens.text(context);
     final subtleColor = textColor.withValues(alpha: 0.62);
@@ -139,13 +146,22 @@ class ChatMessageMedia extends StatelessWidget {
         : WeComChatTokens.chatBackground(context).withValues(alpha: 0.7);
     final isDetail = isWorkModeDetailAttachment(att);
     return InkWell(
-      onTap: () => isDetail
-          ? unawaited(showReadableJsonDialog(
-              context,
-              title: att.fileName ?? fileNameFromPath(att.localPath),
-              path: att.localPath,
-            ))
-          : _openAttachment(context, att),
+      onTap: () {
+        Future<void> preview() => isDetail
+            ? showReadableJsonDialog(
+                context,
+                title: att.fileName ?? fileNameFromPath(att.localPath),
+                path: att.localPath,
+                structuredWorkPlan: !isDirectChat,
+                showRawSource: !isDirectChat,
+                entityLabels: !isDirectChat ? entityLabels : null,
+              )
+            : _openAttachment(context, att);
+        unawaited(isDirectChat ||
+                (!isDetail && (Platform.isMacOS || Platform.isWindows))
+            ? preview()
+            : WorkTaskOverlayHost.withPanelHiddenForPreview(context, preview));
+      },
       onLongPress: () => _showAttachmentActions(context, att),
       onSecondaryTap: () => _showAttachmentActions(context, att),
       borderRadius: BorderRadius.circular(8),
@@ -186,7 +202,7 @@ class ChatMessageMedia extends StatelessWidget {
                     isDetail
                         ? '内部记录 · ${formatAttachmentSize(att.fileSize)}'
                         : '${formatAttachmentSize(att.fileSize)} · '
-                            '${DocumentUnderstandingService.statusLabel(att)}',
+                            '${(Platform.isMacOS || Platform.isWindows) && attachmentPreviewFormat(att.fileName ?? att.localPath) != AttachmentPreviewFormat.unsupported ? '点击预览' : DocumentUnderstandingService.statusLabel(att)}',
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(fontSize: 11, color: subtleColor),
@@ -209,6 +225,11 @@ class ChatMessageMedia extends StatelessWidget {
 
   Future<void> _openAttachment(
       BuildContext context, MediaAttachment att) async {
+    if (Platform.isMacOS || Platform.isWindows) {
+      await WorkTaskOverlayHost.withPanelHiddenForPreview(
+          context, () => showAttachmentPreview(context, att));
+      return;
+    }
     try {
       if (isAttachmentDataUri(att.localPath)) {
         final opened = await openDataAttachment(
@@ -229,16 +250,22 @@ class ChatMessageMedia extends StatelessWidget {
         }
         return;
       }
+      final extension = extensionOfPath(att.fileName ?? att.localPath);
+      final isGroupHtmlSource =
+          !isDirectChat && const {'html', 'htm'}.contains(extension);
       // 纯文本（md / txt / json 等）改用应用内只读视图：交给系统默认程序会
       // 依赖文件关联，关联缺失时 `cmd /c start` 仍返回成功，用户看到的是
       // "点击没反应"。应用内视图既可靠，也让正文立刻可见。
-      if (isPlainTextAttachment(att)) {
+      if (isPlainTextAttachment(att) || isGroupHtmlSource) {
         if (!context.mounted) return;
         await showReadableJsonDialog(
           context,
           title: att.fileName ?? fileNameFromPath(att.localPath),
           path: inspected.absolutePath ?? att.localPath,
-          prettifyJson: false,
+          prettifyJson: !isDirectChat && extension == 'json',
+          renderMarkdown:
+              !isDirectChat && const {'md', 'markdown'}.contains(extension),
+          showRawSource: !isDirectChat && extension == 'json',
         );
         return;
       }
@@ -247,9 +274,10 @@ class ChatMessageMedia extends StatelessWidget {
         AppToast.show(context, '打开失败：${result.message}',
             icon: Icons.error_outline_rounded);
       }
-    } catch (e) {
+    } on Object {
       if (context.mounted) {
-        AppToast.show(context, '打开失败：$e', icon: Icons.error_outline_rounded);
+        AppToast.show(context, '打开失败，请检查文件权限及默认应用。',
+            icon: Icons.error_outline_rounded);
       }
     }
   }

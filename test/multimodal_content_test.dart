@@ -8,6 +8,22 @@ import 'package:chat_group/core/models/message.dart';
 import 'package:chat_group/features/chat_group/multimodal_content.dart';
 
 void main() {
+  test(
+      'video-only notice does not suppress mixed attachments or text-only input',
+      () {
+    Message message(List<MediaAttachment> media) => Message(
+        groupId: 'dm:1',
+        senderId: 'user',
+        senderType: 'user',
+        content: '看看附件',
+        media: media);
+    final video = MediaAttachment(type: 'video', localPath: '/tmp/clip.mov');
+    final image = MediaAttachment(type: 'image', localPath: '/tmp/frame.png');
+    expect(isVideoOnlyMessage(message([video])), isTrue);
+    expect(isVideoOnlyMessage(message([video, image])), isFalse);
+    expect(isVideoOnlyMessage(message([])), isFalse);
+  });
+
   group('buildUserMessageContent', () {
     test('async preparation reads image bytes without synchronous IO',
         () async {
@@ -191,6 +207,7 @@ void main() {
       );
 
       expect(result, contains('[用户发送了一段视频]'));
+      expect(result, contains(unsupportedVideoContentNotice));
     });
 
     test('普通文件 → 含文件名和大小提示', () {

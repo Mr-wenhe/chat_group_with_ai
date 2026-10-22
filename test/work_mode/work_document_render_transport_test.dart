@@ -22,6 +22,24 @@ void main() {
     expect(parts!.first['text'], 'plan.docx 第 2 页');
     expect((parts.last['image_url'] as Map)['url'], pageTwo);
   });
+
+  test('browser screenshots reach the tester as native images only on success',
+      () {
+    const screenshot = 'data:image/png;base64,c2NyZWVuc2hvdA==';
+    final parts = workDocumentImageParts(
+      {
+        'recentToolResults': [
+          _browserPage(screenshot, status: 'failed'),
+          _browserPage(screenshot),
+        ],
+      },
+      sanitizeText: (value) => value,
+    );
+
+    expect(parts, hasLength(2));
+    expect(parts!.first['text'], '当前冻结 HTML 页面');
+    expect((parts.last['image_url'] as Map)['url'], screenshot);
+  });
 }
 
 Map<String, dynamic> _renderedPage(int page, String url) => {
@@ -30,6 +48,20 @@ Map<String, dynamic> _renderedPage(int page, String url) => {
       'data': {
         'content': [
           {'type': 'text', 'text': 'plan.docx 第 $page 页'},
+          {
+            'type': 'image_url',
+            'image_url': {'url': url}
+          },
+        ],
+      },
+    };
+
+Map<String, dynamic> _browserPage(String url, {String status = 'success'}) => {
+      'tool': AgentToolName.browserContext.wireName,
+      'status': status,
+      'data': {
+        'content': [
+          {'type': 'text', 'text': '当前冻结 HTML 页面'},
           {
             'type': 'image_url',
             'image_url': {'url': url}

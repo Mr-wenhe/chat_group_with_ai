@@ -27,7 +27,8 @@ void _registerSearchStage06TestPart1() {
       expect(decision.reasonCode, 'price_or_market');
     });
 
-    test('routes recency, news, and search keywords into Web Search intent', () {
+    test('routes recency, news, and search keywords into Web Search intent',
+        () {
       for (final query in ['最近有什么新闻', '搜索最新版本', '最近的市场消息']) {
         final decision = detector.detect(query);
 
@@ -254,6 +255,7 @@ secret-material
 
     test('shares one end-to-end deadline between Planner and Provider',
         () async {
+      final clock = _FakeClock();
       final store = MemoryGovernanceStore(
         globalSearchPolicy: WebSearchPolicy.auto,
       );
@@ -265,22 +267,22 @@ secret-material
       final coordinator = SearchCoordinator(
         store: store,
         routes: [SearchProviderRoute(provider: provider)],
-        queryPlanner: _planner(store, client),
+        queryPlanner: _planner(store, client, clock: clock.call),
+        clock: clock.call,
         endToEndBudget: const Duration(milliseconds: 40),
       );
-      final stopwatch = Stopwatch()..start();
 
       final result = await coordinator.searchIfAllowed(
         text: 'search latest Flutter',
         conversationId: 'deadline-test',
         requestConsent: (_) async => true,
       );
-      stopwatch.stop();
 
       expect(result?.hasFailure, isTrue);
       expect(client.sendCount, 1);
       expect(provider.searchCount, 1);
-      expect(stopwatch.elapsed, lessThan(const Duration(milliseconds: 500)));
+      expect(client.receivedReceiveTimeout,
+          lessThanOrEqualTo(const Duration(milliseconds: 40)));
     });
 
     test('direct search uses the coordinator budget when no deadline is given',

@@ -1,5 +1,8 @@
 part of 'default_work_task_runner.dart';
 
+const MethodChannel _browserTestChannel =
+    MethodChannel('com.chatgroup/browser_test');
+
 class _ProductionUsage {
   final WorkCandidatePublisher publisher;
   final WorkCandidate candidate;
@@ -7,8 +10,35 @@ class _ProductionUsage {
   final String actorId;
   final List<WorkUsageObservation> observations = [];
   int documentRequestSequence = 0;
+  int browserOperationSequence = 0;
   Map<String, dynamic>? feedback;
   _ProductionUsage(this.publisher, this.candidate, this.state, this.actorId);
+}
+
+class _MacWebKitTestSession {
+  final String actorId;
+  final String scenarioId;
+  final String iterationId;
+  final String artifactDigest;
+  final String planDigest;
+  final Map<String, String> queryParameters;
+  final String sessionRef;
+  int successfulClicks = 0;
+  int clicksAtLastAssertion = 0;
+  int successfulResizes = 0;
+  int resizesAtLastAssertion = 0;
+  String? lastObservationRef;
+  bool uncertain = false;
+
+  _MacWebKitTestSession({
+    required this.actorId,
+    required this.scenarioId,
+    required this.iterationId,
+    required this.artifactDigest,
+    required this.planDigest,
+    required Map<String, String> queryParameters,
+    required this.sessionRef,
+  }) : queryParameters = Map.unmodifiable(queryParameters);
 }
 
 extension _DefaultWorkTaskRunnerUsage on DefaultWorkTaskRunner {
@@ -53,8 +83,18 @@ extension _DefaultWorkTaskRunnerUsage on DefaultWorkTaskRunner {
   Future<_ProductionUsage?> _prepareProductionUsage(AgentTask task) async {
     final binding =
         _decodeMap(task.executionStateJson)['workItemExecution'] as Map?;
-    if (binding?['stage'] != 'usage') return null;
+    if (!const {'usage', 'verify'}.contains(binding?['stage'])) return null;
+    final isReview = binding?['stage'] == 'verify';
     final state = _candidateState(task);
+    if (isReview &&
+        (state.artifactContract['type'] != 'software' ||
+            !state.usagePlanReady ||
+            !state.usageAssignments.any((a) =>
+                a['memberId'] == task.characterId &&
+                (a['requiredCapabilities'] as List)
+                    .contains('browser.context')))) {
+      return null;
+    }
     if (!state.isAutonomous ||
         !state.usagePlanReady ||
         !state.planReady ||
@@ -332,7 +372,11 @@ extension _DefaultWorkTaskRunnerUsage on DefaultWorkTaskRunner {
   }
 
   WorkToolRegistry _usageRegistry(
-          WorkToolRegistry registry, _ProductionUsage usage) =>
+    WorkToolRegistry registry,
+    _ProductionUsage usage,
+    AgentTask task,
+    AICharacter character,
+  ) =>
       WorkToolRegistry(
         mutationPipeline: registry.mutationPipeline,
         definitions: [
@@ -345,7 +389,8 @@ extension _DefaultWorkTaskRunnerUsage on DefaultWorkTaskRunner {
               handler: (invocation) async {
                 if (definition.isMutation &&
                     definition.name != AgentToolName.commandRun &&
-                    definition.name != AgentToolName.nativeApp) {
+                    definition.name != AgentToolName.nativeApp &&
+                    definition.name != AgentToolName.browserContext) {
                   return const WorkToolResult.permissionDenied(
                       message: '试用阶段不能修改冻结候选、断言或角色技能。');
                 }
@@ -399,18 +444,35 @@ extension _DefaultWorkTaskRunnerUsage on DefaultWorkTaskRunner {
                     context: invocation.context,
                   );
                 }
-                await usage.publisher.verify(usage.candidate,
-                    expectedDigest: usage.candidate.digest);
+                final closesStoredBrowserSession =
+                    definition.name == AgentToolName.browserContext &&
+                        invocation.arguments['operation'] == 'close' &&
+                        _browserTestSessions[task.id]?.sessionRef ==
+                            invocation.arguments['sessionRef'];
+                if (!closesStoredBrowserSession) {
+                  await usage.publisher.verify(usage.candidate,
+                      expectedDigest: usage.candidate.digest);
+                }
                 if (invocation.context.isCancelled) {
                   return const WorkToolResult.paused(
                       message: '试用已暂停或停止，未继续操作。');
                 }
                 final result = await definition.handler(effectiveInvocation);
-                await usage.publisher.verify(usage.candidate,
-                    expectedDigest: usage.candidate.digest);
+                if (!closesStoredBrowserSession) {
+                  await usage.publisher.verify(usage.candidate,
+                      expectedDigest: usage.candidate.digest);
+                }
                 return result;
               },
             ),
+          if (_canUseBrowserContext(
+            task,
+            character,
+            usage.state.usageAssignments
+                .singleWhere((item) => item['memberId'] == usage.actorId),
+            usage.candidate,
+          ))
+            _browserTestDefinition(usage),
           if (nativeAppAutomation != null &&
               Platform.isMacOS &&
               usage.state.artifactContract['nativeBundle'] is Map)
@@ -502,6 +564,559 @@ extension _DefaultWorkTaskRunnerUsage on DefaultWorkTaskRunner {
         ],
       );
 
+  bool _canUseBrowserContext(
+    AgentTask task,
+    AICharacter character,
+    Map<String, dynamic> assignment,
+    WorkCandidate candidate,
+  ) {
+    final collaboration = WorkDiscussionState.fromExecutionState(
+      task.executionStateJson,
+    )?.collaboration;
+    return Platform.isMacOS &&
+        WorkTaskExecutionPolicy.isValidatedV2GroupTask(task) &&
+        collaboration?.artifactContract['type'] == 'software' &&
+        collaboration?.currentIteration?['id'] == candidate.iterationId &&
+        collaboration?.currentIteration?['artifactDigest'] ==
+            candidate.digest &&
+        _browserCandidateEntry(candidate) != null &&
+        (assignment['requiredCapabilities'] as List)
+            .contains('browser.context') &&
+        _permissionsForTask(task, character)
+            .contains(ToolPermission.browserContext);
+  }
+
+  Map<String, dynamic>? _browserCandidateEntry(WorkCandidate candidate) {
+    final html = candidate.files
+        .where((file) =>
+            p.extension(file['path'] as String).toLowerCase() == '.html')
+        .toList(growable: false);
+    return html.length == 1 ? html.single : null;
+  }
+
+  WorkToolDefinition _browserTestDefinition(_ProductionUsage usage) =>
+      WorkToolDefinition(
+        name: AgentToolName.browserContext,
+        access: WorkToolAccess.mutation,
+        schema: const WorkToolSchema(
+          fields: {
+            'operation': WorkToolValueType.string,
+            'sessionRef': WorkToolValueType.string,
+            'label': WorkToolValueType.string,
+            'acceptanceId': WorkToolValueType.string,
+            'expectedText': WorkToolValueType.string,
+            'queryParameters': WorkToolValueType.object,
+            'width': WorkToolValueType.integer,
+            'height': WorkToolValueType.integer,
+          },
+          required: {'operation'},
+        ),
+        mutationPipeline: WorkToolMutationPipeline(
+          policy: (invocation) async {
+            final actor = database.aiCharacterBox.get(usage.actorId);
+            final assignment = usage.state.usageAssignments
+                .singleWhere((item) => item['memberId'] == usage.actorId);
+            final current = _candidateState(invocation.task);
+            final cleanupOnly = invocation.arguments['operation'] == 'close' &&
+                _browserTestSessions[invocation.task.id]?.sessionRef ==
+                    invocation.arguments['sessionRef'];
+            if (actor == null ||
+                !_permissionsForTask(invocation.task, actor)
+                    .contains(ToolPermission.browserContext) ||
+                !(assignment['requiredCapabilities'] as List)
+                    .contains('browser.context') ||
+                (!cleanupOnly &&
+                    (invocation.task.characterId != usage.actorId ||
+                        !WorkTaskExecutionPolicy.isValidatedV2GroupTask(
+                            invocation.task) ||
+                        current.artifactContract['type'] != 'software' ||
+                        current.usagePlanDigest !=
+                            usage.state.usagePlanDigest ||
+                        current.currentIteration?['id'] !=
+                            usage.candidate.iterationId ||
+                        current.currentIteration?['artifactDigest'] !=
+                            usage.candidate.digest)) ||
+                WorkApprovalFingerprint.mutation(call: invocation.call)
+                    .isEmpty) {
+              return const WorkToolResult.permissionDenied(
+                  message: '当前成员未获浏览器测试权限，或候选/场景已变化。',
+                  failureCode: 'discussionPhaseDenied');
+            }
+            return null;
+          },
+          approval: (_) => null,
+          snapshot: (invocation) async {
+            final closesStoredBrowserSession =
+                invocation.arguments['operation'] == 'close' &&
+                    _browserTestSessions[invocation.task.id]?.sessionRef ==
+                        invocation.arguments['sessionRef'];
+            if (!closesStoredBrowserSession) {
+              await usage.publisher.verify(usage.candidate,
+                  expectedDigest: usage.candidate.digest);
+            }
+            return null;
+          },
+          lock: (_) => null,
+        ),
+        handler: (invocation) => _runBrowserTestTool(usage, invocation),
+      );
+
+  Future<Map<String, dynamic>?> _invokeBrowserTestMap(
+    Map<String, Object?> arguments, {
+    Duration timeout = const Duration(seconds: 12),
+  }) =>
+      _browserTestChannel
+          .invokeMapMethod<String, dynamic>('run', arguments)
+          .timeout(timeout);
+
+  Future<WorkToolResult> _runBrowserTestTool(
+      _ProductionUsage usage, WorkToolInvocation invocation) async {
+    final task = invocation.task;
+    final assignment = usage.state.usageAssignments
+        .singleWhere((item) => item['memberId'] == usage.actorId);
+    final operation = invocation.arguments['operation'] as String;
+    if (operation == 'open') {
+      final rawQueryParameters = invocation.arguments['queryParameters'];
+      if (rawQueryParameters is Map &&
+          rawQueryParameters.entries
+              .any((entry) => entry.key is! String || entry.value is! String)) {
+        return const WorkToolResult.permissionDenied(message: '测试参数必须是字符串键值。');
+      }
+      final queryParameters = rawQueryParameters is Map
+          ? Map<String, String>.from(rawQueryParameters)
+          : const <String, String>{};
+      final existing = _browserTestSessions[task.id];
+      if (existing != null) {
+        if (existing.actorId == usage.actorId &&
+            existing.scenarioId == assignment['scenarioId'] &&
+            existing.iterationId == usage.candidate.iterationId &&
+            existing.artifactDigest == usage.candidate.digest &&
+            existing.planDigest == usage.state.usagePlanDigest &&
+            existing.queryParameters.length == queryParameters.length &&
+            existing.queryParameters.entries
+                .every((entry) => queryParameters[entry.key] == entry.value)) {
+          if (existing.uncertain || existing.lastObservationRef == null) {
+            return WorkToolResult.failed(
+                message: '上次打开未确认成功；请先 close 核实清理，再重新 open，不能把空会话当作已打开。',
+                failureCode: 'browserSessionUncertain',
+                data: {'sessionRef': existing.sessionRef});
+          }
+          return WorkToolResult.alreadyCommitted(
+              message: '当前成员的候选浏览器会话已打开；未重复创建。',
+              data: {'sessionRef': existing.sessionRef});
+        }
+        return WorkToolResult.failed(
+            message:
+                '上一个隔离浏览器会话仍占用本任务；请先用返回的 sessionRef 调用 close，收到关闭成功后再 open。',
+            failureCode: 'browserSessionOccupied',
+            data: {'sessionRef': existing.sessionRef});
+      }
+      final entry = _browserCandidateEntry(usage.candidate);
+      if (entry == null) {
+        return const WorkToolResult.permissionDenied(
+            message: '当前冻结候选必须且只能包含一个 HTML 文件。');
+      }
+      final sessionRef = 'browser:${sha256.convert(utf8.encode(
+            '${task.id}:${usage.actorId}:${usage.candidate.iterationId}:${++usage.browserOperationSequence}',
+          )).toString().substring(0, 24)}';
+      final session = _MacWebKitTestSession(
+        actorId: usage.actorId,
+        scenarioId: assignment['scenarioId'] as String,
+        iterationId: usage.candidate.iterationId,
+        artifactDigest: usage.candidate.digest,
+        planDigest: usage.state.usagePlanDigest,
+        queryParameters: queryParameters,
+        sessionRef: sessionRef,
+      );
+      _browserTestSessions[task.id] = session;
+      try {
+        final response = await _invokeBrowserTestMap(
+          {
+            'operation': 'open',
+            'sessionRef': sessionRef,
+            'filePath':
+                usage.candidate.file(entry['path'] as String).absolute.path,
+            'rootPath': usage.candidate.directory.absolute.path,
+            'queryParameters': queryParameters,
+          },
+          timeout: const Duration(seconds: 25),
+        );
+        final snapshot = response?['snapshot'];
+        if (snapshot is! Map) throw StateError('浏览器未返回当前候选页面。');
+        final snapshotData = Map<String, dynamic>.from(snapshot);
+        final evidence = await _storeBrowserStep(
+          task,
+          usage,
+          session,
+          operation: 'open',
+          snapshot: snapshotData,
+        );
+        await usage.publisher
+            .verify(usage.candidate, expectedDigest: usage.candidate.digest);
+        session.lastObservationRef = evidence['afterRef'] as String;
+        final cancellation = invocation.context.cancellation;
+        if (cancellation != null) {
+          unawaited(cancellation.whenCancelled.then<void>((_) async {
+            try {
+              await _browserTestChannel.invokeMethod<void>('run', {
+                'operation': 'close',
+                'sessionRef': sessionRef,
+              }).timeout(const Duration(seconds: 10));
+              if (_browserTestSessions[task.id]?.sessionRef == sessionRef) {
+                _browserTestSessions.remove(task.id);
+              }
+            } on Object {
+              if (_browserTestSessions[task.id]?.sessionRef == sessionRef) {
+                _browserTestSessions[task.id]?.uncertain = true;
+              }
+            }
+          }));
+        }
+        return WorkToolResult.success(
+          message: '已在隔离 WebKit 中打开当前冻结 HTML 候选，未允许网络请求。',
+          data: {
+            'operation': 'open',
+            'browserEngine': 'WKWebView',
+            'candidateDigest': usage.candidate.digest,
+            'iterationId': usage.candidate.iterationId,
+            'queryParameters': session.queryParameters,
+            'sessionRef': sessionRef,
+            'evidenceRefs': evidence['outputRefs'],
+            ..._browserModelSnapshot(task, snapshotData, usage.actorId),
+          },
+        );
+      } on Object catch (error) {
+        session.uncertain = true;
+        try {
+          await _browserTestChannel.invokeMethod<void>('run', {
+            'operation': 'close',
+            'sessionRef': sessionRef,
+          }).timeout(const Duration(seconds: 10));
+          if (_browserTestSessions[task.id]?.sessionRef == sessionRef) {
+            _browserTestSessions.remove(task.id);
+          }
+        } on Object {
+          // Keep the uncertain session until close can confirm cleanup.
+        }
+        return WorkToolResult.failed(
+          message: '隔离浏览器未能打开当前候选：${sanitizeWorkTaskError(error)}',
+          failureCode: 'browserOpenFailed',
+          data: {'sessionRef': sessionRef},
+        );
+      }
+    }
+
+    final session = _browserTestSessions[task.id];
+    final closing = operation == 'close';
+    if (session == null ||
+        invocation.arguments['sessionRef'] != session.sessionRef ||
+        (!closing &&
+            (session.actorId != usage.actorId ||
+                session.scenarioId != assignment['scenarioId'] ||
+                session.iterationId != usage.candidate.iterationId ||
+                session.artifactDigest != usage.candidate.digest ||
+                session.planDigest != usage.state.usagePlanDigest))) {
+      return const WorkToolResult.permissionDenied(
+          message: '浏览器会话不属于当前成员、场景或冻结候选。',
+          failureCode: 'discussionPhaseDenied');
+    }
+    if (operation == 'close') {
+      if (!session.uncertain &&
+          session.actorId == usage.actorId &&
+          (session.successfulClicks > session.clicksAtLastAssertion ||
+              session.successfulResizes > session.resizesAtLastAssertion)) {
+        return WorkToolResult.failed(
+          message: '仍有浏览器操作尚未断言；会话保持打开，请先用当前场景的验收项断言页面结果。',
+          failureCode: 'browserCloseBeforeAssertion',
+          data: {
+            'sessionRef': session.sessionRef,
+            'unassertedClicks':
+                session.successfulClicks - session.clicksAtLastAssertion,
+            'unassertedResizes':
+                session.successfulResizes - session.resizesAtLastAssertion,
+          },
+        );
+      }
+      try {
+        await _browserTestChannel.invokeMethod<void>('run', {
+          'operation': 'close',
+          'sessionRef': session.sessionRef,
+        }).timeout(const Duration(seconds: 10));
+        _browserTestSessions.remove(task.id);
+        return const WorkToolResult.success(message: '隔离浏览器会话已关闭。');
+      } on Object catch (error) {
+        return WorkToolResult.paused(
+            message: '浏览器会话关闭未能核实：${sanitizeWorkTaskError(error)}；当前场景仍被占用。');
+      }
+    }
+    if (session.uncertain && !const {'observe', 'close'}.contains(operation)) {
+      return const WorkToolResult.paused(
+          message: '上一次浏览器动作结果不确定；请先 observe 核对，未自动重放。',
+          failureCode: 'browserActionUncertain');
+    }
+
+    String? acceptanceId;
+    String? expectedText;
+    Map<String, dynamic>? acceptance;
+    var hasFreshInteraction = false;
+    if (operation == 'assert') {
+      acceptanceId = invocation.arguments['acceptanceId'] as String;
+      expectedText = invocation.arguments['expectedText'] as String;
+      final assignedIds = (assignment['acceptanceIds'] as List).cast<String>();
+      acceptance = usage.state.acceptances
+          .where((item) => item['id'] == acceptanceId)
+          .firstOrNull;
+      final agreedText = acceptance == null
+          ? ''
+          : '${assignment['expectedResult']} ${acceptance['method']}';
+      if (acceptance == null ||
+          !assignedIds.contains(acceptanceId) ||
+          !agreedText.contains(expectedText)) {
+        return const WorkToolResult.failed(
+            message: '断言必须绑定本人场景中的验收项，且预期文字须来自已确认的 expectedResult。',
+            failureCode: 'browserAssertionBinding');
+      }
+    }
+
+    Map<String, dynamic> actionResult = const {};
+    Map<String, dynamic> snapshot = const {};
+    try {
+      if (operation == 'click') {
+        final clicked = await _invokeBrowserTestMap(
+          {
+            'operation': 'click',
+            'sessionRef': session.sessionRef,
+            'label': invocation.arguments['label'],
+          },
+        );
+        actionResult = _decodeBrowserResult(clicked);
+        if (actionResult['ok'] == true) session.successfulClicks++;
+        final observed = await _invokeBrowserTestMap(
+          {'operation': 'observe', 'sessionRef': session.sessionRef},
+        );
+        snapshot = _snapshotFromBrowserResponse(observed);
+      } else if (operation == 'assert') {
+        hasFreshInteraction =
+            session.successfulClicks > session.clicksAtLastAssertion ||
+                session.successfulResizes > session.resizesAtLastAssertion;
+        final asserted = await _invokeBrowserTestMap(
+          {
+            'operation': 'assert',
+            'sessionRef': session.sessionRef,
+            'expectedText': expectedText,
+          },
+        );
+        actionResult = _decodeBrowserResult(asserted);
+        session.clicksAtLastAssertion = session.successfulClicks;
+        session.resizesAtLastAssertion = session.successfulResizes;
+        final observed = await _invokeBrowserTestMap(
+          {'operation': 'observe', 'sessionRef': session.sessionRef},
+        );
+        snapshot = _snapshotFromBrowserResponse(observed);
+      } else if (operation == 'resize') {
+        final resized = await _invokeBrowserTestMap(
+          {
+            'operation': 'resize',
+            'sessionRef': session.sessionRef,
+            'width': invocation.arguments['width'],
+            'height': invocation.arguments['height'],
+          },
+        );
+        snapshot = _snapshotFromBrowserResponse(resized);
+        if (snapshot.isNotEmpty) session.successfulResizes++;
+      } else if (operation == 'observe') {
+        final observed = await _invokeBrowserTestMap(
+          {'operation': 'observe', 'sessionRef': session.sessionRef},
+        );
+        snapshot = _snapshotFromBrowserResponse(observed);
+      }
+    } on Object catch (error) {
+      session.uncertain = operation == 'click' || operation == 'resize';
+      return WorkToolResult.failed(
+        message: session.uncertain
+            ? '浏览器动作响应中断，结果不确定；先 observe 核对后再继续。'
+            : '浏览器观察失败：${sanitizeWorkTaskError(error)}',
+        failureCode: session.uncertain
+            ? 'browserActionUncertain'
+            : 'browserObservationFailed',
+        data: {'sessionRef': session.sessionRef},
+      );
+    }
+    if (operation == 'observe') session.uncertain = false;
+    if (operation != 'close') {
+      try {
+        await usage.publisher
+            .verify(usage.candidate, expectedDigest: usage.candidate.digest);
+      } on Object catch (error) {
+        session.uncertain = true;
+        usage.observations
+            .removeWhere((item) => item.runtime == 'macos-webkit');
+        return WorkToolResult.permissionDenied(
+          message:
+              '浏览器操作后当前候选摘要已变化或无法核实：${sanitizeWorkTaskError(error)}；先关闭会话。',
+          failureCode: 'browserCandidateChanged',
+          data: {'sessionRef': session.sessionRef},
+        );
+      }
+    }
+    final evidence = await _storeBrowserStep(
+      task,
+      usage,
+      session,
+      operation: operation,
+      snapshot: snapshot,
+      actionResult: actionResult,
+      acceptanceId: acceptanceId,
+      expectedText: expectedText,
+    );
+    final afterRef = evidence['afterRef'] as String;
+    final beforeRef = session.lastObservationRef ?? usage.candidate.digest;
+    session.lastObservationRef = afterRef;
+    WorkUsageObservation? observation;
+    if (const {'click', 'resize', 'assert'}.contains(operation)) {
+      final visualAcceptance = operation == 'assert' &&
+          ('${acceptance?['method'] ?? ''} ${acceptance?['requiredCapability'] ?? ''}')
+              .contains(RegExp(r'布局|重叠|不遮挡|可读|视觉|尺寸'));
+      final canSeeScreenshot = supportsVisionModelForTask(task, usage.actorId);
+      final matched = actionResult['matched'] == true;
+      final verified = operation == 'assert' &&
+          matched &&
+          actionResult['textTruncated'] != true &&
+          hasFreshInteraction &&
+          (!visualAcceptance || canSeeScreenshot);
+      observation = WorkUsageObservation(
+        taskId: task.id,
+        conversationId: usage.state.conversationId,
+        actorId: usage.actorId,
+        scenarioId: assignment['scenarioId'] as String,
+        iterationId: usage.candidate.iterationId,
+        artifactDigest: usage.candidate.digest,
+        planDigest: usage.state.usagePlanDigest,
+        verificationRevision: usage.state.verificationRevision,
+        runtime: 'macos-webkit',
+        sessionRef: session.sessionRef,
+        operation: operation,
+        beforeRef: beforeRef,
+        afterRef: afterRef,
+        outputRefs: (evidence['outputRefs'] as List).cast<String>(),
+        verifiedAcceptanceIds:
+            verified && acceptanceId != null ? [acceptanceId] : const [],
+        businessResultVerified: verified && acceptanceId != null,
+      );
+      await _recordUsageObservation(task, usage, observation);
+    }
+    return WorkToolResult.success(
+      usageObservation: observation,
+      message: operation == 'assert' && actionResult['matched'] != true
+          ? '浏览器断言未通过；实际状态和截图已留证，继续检查其他验收项。'
+          : '浏览器操作已执行；当前页面、候选摘要及截图已留证。',
+      data: {
+        'operation': operation,
+        'candidateDigest': usage.candidate.digest,
+        'iterationId': usage.candidate.iterationId,
+        'sessionRef': session.sessionRef,
+        'actionResult': actionResult,
+        'evidenceRefs': evidence['outputRefs'],
+        ..._browserModelSnapshot(task, snapshot, usage.actorId),
+      },
+    );
+  }
+
+  Map<String, dynamic> _snapshotFromBrowserResponse(
+      Map<String, dynamic>? response) {
+    final snapshot = response?['snapshot'];
+    return snapshot is Map
+        ? Map<String, dynamic>.from(snapshot)
+        : Map<String, dynamic>.from(response ?? const {});
+  }
+
+  Map<String, dynamic> _decodeBrowserResult(Map<String, dynamic>? response) {
+    final text = response?['result'];
+    if (text is! String) return const {};
+    try {
+      final value = jsonDecode(text);
+      return value is Map ? Map<String, dynamic>.from(value) : const {};
+    } on FormatException {
+      return const {};
+    }
+  }
+
+  Future<Map<String, Object>> _storeBrowserStep(
+    AgentTask task,
+    _ProductionUsage usage,
+    _MacWebKitTestSession session, {
+    required String operation,
+    required Map<String, dynamic> snapshot,
+    Map<String, dynamic> actionResult = const {},
+    String? acceptanceId,
+    String? expectedText,
+  }) async {
+    final page = _decodeBrowserResult(snapshot);
+    final content = snapshot['content'];
+    final imageUrl = content is List
+        ? content
+            .whereType<Map>()
+            .where((part) => part['type'] == 'image_url')
+            .map((part) => part['image_url'])
+            .whereType<Map>()
+            .map((image) => image['url'])
+            .whereType<String>()
+            .where((url) => url.startsWith('data:image/png;base64,'))
+            .firstOrNull
+        : null;
+    if (imageUrl is! String) throw StateError('浏览器没有返回当前页面截图。');
+    final png =
+        base64Decode(imageUrl.substring('data:image/png;base64,'.length));
+    if (png.isEmpty ||
+        png.length > WorkTaskEventStore.maxNativeScreenshotBytes) {
+      throw StateError('浏览器截图为空或超过证据上限。');
+    }
+    final screenshotRef =
+        await eventStore.writeNativeEvidence(task.id, 'png', png);
+    final record = {
+      'schemaVersion': 1,
+      'taskId': task.id,
+      'conversationId': task.groupId,
+      'actorId': usage.actorId,
+      'scenarioId': session.scenarioId,
+      'iterationId': usage.candidate.iterationId,
+      'artifactDigest': usage.candidate.digest,
+      'planDigest': usage.state.usagePlanDigest,
+      'verificationRevision': usage.state.verificationRevision,
+      'browserEngine': 'WKWebView',
+      'sessionRef': session.sessionRef,
+      'sequence': ++usage.browserOperationSequence,
+      'operation': operation,
+      'queryParameters': session.queryParameters,
+      'successfulClicks': session.successfulClicks,
+      'successfulResizes': session.successfulResizes,
+      if (acceptanceId != null) 'acceptanceId': acceptanceId,
+      if (expectedText != null) 'expected': expectedText,
+      'actual': actionResult['visibleText'] ?? page['visibleText'] ?? '',
+      'actionResult': actionResult,
+      'page': page,
+      'screenshotRef': screenshotRef,
+    };
+    final text = jsonEncode(record);
+    final digest = sha256.convert(utf8.encode(text)).toString();
+    await eventStore.writeDiscussionDetail(
+        task.id, digest.substring(0, 24), text);
+    return {
+      'afterRef': digest,
+      'outputRefs': ['detail:${digest.substring(0, 24)}', screenshotRef],
+    };
+  }
+
+  Map<String, Object?> _browserModelSnapshot(
+          AgentTask task, Map<String, dynamic> snapshot, String actorId) =>
+      {
+        if (snapshot['result'] is String)
+          'page': _decodeBrowserResult(snapshot),
+        if (supportsVisionModelForTask(task, actorId) &&
+            snapshot['content'] is List)
+          'content': snapshot['content'],
+      };
+
   Future<String?> _validateProductionUsage(AgentTask task,
       _ProductionUsage usage, AgentFinishCompletion completion) async {
     final current = _candidateState(task);
@@ -516,6 +1131,9 @@ extension _DefaultWorkTaskRunnerUsage on DefaultWorkTaskRunner {
     if (nativeAppAutomation?.hasOpenSession(task.id) == true ||
         nativeAppAutomation?.hasUnverifiedCleanup == true) {
       return 'macOS App 会话尚未核实关闭，不能提交本人反馈或切换试用成员。';
+    }
+    if (_browserTestSessions.containsKey(task.id)) {
+      return '隔离浏览器会话尚未核实关闭，不能提交本人反馈或切换试用成员。';
     }
     final assignment = current.usageAssignments
         .singleWhere((a) => a['memberId'] == usage.actorId);

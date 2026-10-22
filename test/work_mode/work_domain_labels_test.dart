@@ -74,8 +74,15 @@ void main() {
   const first = '11111111-1111-4111-8111-111111111111';
   const second = '22222222-2222-4222-8222-222222222222';
 
+  test('方案问题的任务目标显示为工作任务且不改写权威 id', () {
+    final state = _state(iterations: const []);
+    expect(WorkDomainLabels(state).resolver(state.taskId), '工作任务');
+    expect(state.toJson()['taskId'], 'task-1');
+  });
+
   test('迭代 id 映射为第 N 轮候选', () {
-    final labels = WorkDomainLabels(_state(iterations: <String>[first, second]));
+    final labels =
+        WorkDomainLabels(_state(iterations: <String>[first, second]));
     expect(labels.resolver(first), '第 1 轮候选');
     expect(labels.resolver(second), '第 2 轮候选');
   });
@@ -111,8 +118,10 @@ void main() {
     tearDownAll(() => closeLifecycleHive(directory, db));
 
     test('多任务会话按 id 归属解析，而不是只认第一条任务', () async {
-      await db.agentTaskBox.put('task-newer', _task('task-newer', iterations: <String>[second]));
-      await db.agentTaskBox.put('task-older', _task('task-older', iterations: <String>[first]));
+      await db.agentTaskBox
+          .put('task-newer', _task('task-newer', iterations: <String>[second]));
+      await db.agentTaskBox
+          .put('task-older', _task('task-older', iterations: <String>[first]));
 
       final resolve = WorkDomainLabels.forConversation(db, 'group-1');
       expect(resolve(first), '第 1 轮候选');
@@ -125,7 +134,8 @@ void main() {
 
       await db.agentTaskBox.put(
         'task-late',
-        _task('task-late', iterations: <String>[first], conversationId: 'group-2'),
+        _task('task-late',
+            iterations: <String>[first], conversationId: 'group-2'),
       );
       expect(resolve(first), '第 1 轮候选');
     });

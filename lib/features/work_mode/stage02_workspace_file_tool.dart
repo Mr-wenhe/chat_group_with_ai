@@ -153,6 +153,7 @@ class Stage02WorkspaceFileTool {
     int startByte = 0,
     int? byteLength,
     bool allowSensitive = false,
+    bool alignUtf8Range = false,
   }) async {
     try {
       final absolutePath = _absolutePath(path);
@@ -188,14 +189,22 @@ class Stage02WorkspaceFileTool {
           'bytesRead': 0,
         };
       }
-      final result = await _withReadLock(
-        resolved.path,
-        () => files.readTextRange(
+      String? readSha256;
+      final result = await _withReadLock(resolved.path, () async {
+        final read = await files.readTextRange(
           resolved.path,
           startByte: startByte,
           byteLength: byteLength,
-        ),
-      );
+          alignUtf8Range: alignUtf8Range,
+        );
+        // 群聊精确补丁需要同一读锁内取得的真实摘要，不能让模型猜摘要。
+        if (alignUtf8Range &&
+            !read.cancelled &&
+            await File(resolved.path).length() <= files.limits.maxReadBytes) {
+          readSha256 = await _hashFile(File(resolved.path));
+        }
+        return read;
+      });
       final sensitive = result.sensitive || sensitivePath;
       if (sensitive && !sensitiveReadAllowed) {
         onSensitiveRead?.call(result.path, 'readTextRange');
@@ -214,6 +223,7 @@ class Stage02WorkspaceFileTool {
         'ok': true,
         'path': result.path,
         'content': result.text,
+        if (readSha256 != null) 'sha256': readSha256,
         'bytesRead': result.bytesRead,
         'truncated': result.truncated,
         'sensitive': sensitive,
@@ -947,13 +957,9 @@ class Stage02WorkspaceFileTool {
   ) {
     final manager = resourceLockManager;
     if (manager == null) return operation();
-    final paths = <String>{
-      ...plan.knownAffectedDirectories,
-      ...plan.exactPaths,
-    };
     return manager.withLocks(
       task.id,
-      paths.map(WorkResourceLockRequest.treeWrite),
+      plan.resourceLockPaths.map(WorkResourceLockRequest.treeWrite),
       operation,
     );
   }

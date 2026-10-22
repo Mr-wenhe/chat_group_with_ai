@@ -260,6 +260,13 @@ extension _WorkDiscussionRunnerModelIo on WorkDiscussionRunner {
     final runBoundary = eventStore == null
         ? null
         : await WorkTaskRunBoundary.currentRunBoundaryId(eventStore!, task.id);
+    if (WorkTaskExecutionPolicy.isValidatedV2GroupTask(task) &&
+        gateway
+            .capability(member.provider!, member.config!.modelName)
+            .supportsStreaming) {
+      return _boundedGroupStream(
+          task, member, messages, timeout, cancelToken, runBoundary);
+    }
     return _complete(
       character: member.character,
       config: member.config!,
@@ -459,7 +466,9 @@ extension _WorkDiscussionRunnerModelIo on WorkDiscussionRunner {
       conversationHistory: messages,
       observerCharacterId: character.id,
       actor: character,
-      participantCharacterIds: group.aiCharacterIds,
+      participantCharacterIds: group.aiCharacterIds
+          .where((id) => id != roundtableNewsRoleId)
+          .toList(growable: false),
       userMessage: WorkDiscussionState.currentRequestScope(task),
       projectScopeId:
           database.workModeWorkspaceBox.get(task.groupId)?.projectScopeId,
@@ -620,7 +629,10 @@ extension _WorkDiscussionRunnerModelIo on WorkDiscussionRunner {
     required WorkTaskCancellation cancellation,
   }) async {
     if (cancellation.isCancelled || content.trim().isEmpty) return;
-    final ids = group.aiCharacterIds.toSet().toList(growable: false);
+    final ids = group.aiCharacterIds
+        .where((id) => id != roundtableNewsRoleId)
+        .toSet()
+        .toList(growable: false);
     await database.persistMessage(Message(
       groupId: task.groupId,
       senderId: senderId ?? 'system',

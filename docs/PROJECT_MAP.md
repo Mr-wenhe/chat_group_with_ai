@@ -13,6 +13,7 @@
 | API configs and settings | `lib/features/settings/` | Chat API configuration keeps legacy compatibility; web-search Provider credentials use an independent secure-storage namespace. Dev builds read repository `data/`, release builds create brand-new user-local Hive files from an empty template manifest. |
 | Characters | `lib/features/ai_character/`, `lib/core/models/character_presets.dart` | Character CRUD plus preset templates. |
 | Groups and chat room | `lib/features/chat_group/` | Group list/form, chat room UI, AI selection, streaming, quote reply, regenerate, TTS, memory. |
+| Group work mode | `lib/features/work_mode/`, `lib/features/chat_group/chat_room_agentic_input_support.dart` | Persistent v2 group discussion, execution, review and delivery; see the [technical guide](work_mode_group_technical_guide.md) and [user guide](work_mode_user_guide.md). |
 | LLM calls and streaming | `lib/services/chat_api_service.dart`, `lib/core/streaming/` | Non-streaming and SSE streaming chat completions. |
 | Web search | `lib/features/web_search/`, `gateway/` | Pluggable Tavily/Brave/Gateway providers, query planning, per-turn snapshots, citations, audit, failure diagnostics and security guards. See the [technical design](production_web_search_technical_design.md) and [implementation retrospective](production_web_search_implementation_retrospective.md). |
 | Export | `lib/services/conversation_export_service.dart`, `lib/features/settings/export_page.dart` | Markdown/JSON exports intentionally omit key/config fields. |

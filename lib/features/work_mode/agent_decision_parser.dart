@@ -121,9 +121,7 @@ class AgentDecisionParser {
   static const Set<String> _clarifyFields = {'question', 'options'};
   static const Set<String> _handoffFields = {'target', 'summary'};
   static const Set<String> _finishFields = {'summary', 'evidence'};
-  // Keep the protocol parser in lockstep with the production registry. The
-  // legacy browser bridge still has its own parser, but browser.context is not
-  // a Stage 03 WorkAgentLoop capability and must not look executable here.
+  // Keep the protocol parser in lockstep with the production registry.
   static const Set<AgentToolName> _stage03Tools = {
     AgentToolName.workspaceList,
     AgentToolName.workspaceRead,
@@ -134,6 +132,7 @@ class AgentDecisionParser {
     AgentToolName.workspaceRename,
     AgentToolName.workspaceDelete,
     AgentToolName.commandRun,
+    AgentToolName.browserContext,
     AgentToolName.skillCreate,
     AgentToolName.skillDownload,
     AgentToolName.nativeApp,
@@ -145,8 +144,12 @@ class AgentDecisionParser {
   /// Optional injection keeps parser tests deterministic. Production work
   /// mode passes the resolved processing directory for the current task.
   final String? defaultCommandWorkingDirectory;
+  final bool allowBrowserContext;
 
-  const AgentDecisionParser({this.defaultCommandWorkingDirectory});
+  const AgentDecisionParser({
+    this.defaultCommandWorkingDirectory,
+    this.allowBrowserContext = false,
+  });
 
   /// Parses the response body using `content` first. `reasoningContent` is
   /// considered only when [content] is null/blank, matching ChatApiService's
@@ -390,7 +393,8 @@ class AgentDecisionParser {
     if (name == null) {
       return _protocolFailure('tool.name 不是已注册工具。');
     }
-    if (!_stage03Tools.contains(name)) {
+    if (!_stage03Tools.contains(name) ||
+        (name == AgentToolName.browserContext && !allowBrowserContext)) {
       return _protocolFailure('tool.name 尚未接入 Stage 03 WorkAgentLoop。');
     }
     final rawArguments = _stringMap(toolObject['arguments']);
@@ -587,7 +591,7 @@ class AgentDecisionParser {
       case AgentToolName.commandRun:
         return _validateCommandArguments(args);
       case AgentToolName.browserContext:
-        return args.isEmpty ? null : 'browser.context 不接受参数。';
+        return _validateBrowserContextArguments(args);
       case AgentToolName.skillCreate:
         return _validateSkillCreateArguments(args);
       case AgentToolName.skillDownload:
@@ -624,6 +628,108 @@ class AgentDecisionParser {
       case AgentToolName.nativeApp:
         return _validateNativeAppArguments(args);
     }
+  }
+
+  String? _validateBrowserContextArguments(Map<String, dynamic> args) {
+    final operation = args['operation'];
+    if (operation == 'open') {
+      final error = _validateRequiredFields(
+        args,
+        const {
+          'operation': _ArgumentType.string,
+          'queryParameters': _ArgumentType.stringMap,
+        },
+        const {'operation'},
+      );
+      if (error != null) return error;
+      final parameters = args['queryParameters'];
+      if (parameters is! Map) return null;
+      if (parameters.length > 8) {
+        return 'browser.context.queryParameters 最多包含 8 项。';
+      }
+      var encodedLength = 0;
+      for (final entry in parameters.entries) {
+        final key = entry.key as String;
+        final value = entry.value as String;
+        if (!RegExp(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$').hasMatch(key) ||
+            RegExp(
+              r'(?:api[-_]?key|token|secret|pass(?:word)?|auth(?:orization)?|credential|cookie)',
+              caseSensitive: false,
+            ).hasMatch(key)) {
+          return 'browser.context.queryParameters 包含无效或敏感字段名。';
+        }
+        if (value.length > 256 ||
+            value.runes.any((rune) => rune < 0x20 || rune == 0x7f)) {
+          return 'browser.context.queryParameters 值无效或超过 256 个字符。';
+        }
+        encodedLength +=
+            utf8.encode(key).length + utf8.encode(value).length + 2;
+      }
+      if (encodedLength > 1024) {
+        return 'browser.context.queryParameters 总长度不能超过 1024 字节。';
+      }
+      return null;
+    }
+    final fields = switch (operation) {
+      'observe' || 'close' => const {
+          'operation': _ArgumentType.string,
+          'sessionRef': _ArgumentType.string,
+        },
+      'click' => const {
+          'operation': _ArgumentType.string,
+          'sessionRef': _ArgumentType.string,
+          'label': _ArgumentType.string,
+        },
+      'assert' => const {
+          'operation': _ArgumentType.string,
+          'sessionRef': _ArgumentType.string,
+          'acceptanceId': _ArgumentType.string,
+          'expectedText': _ArgumentType.string,
+        },
+      'resize' => const {
+          'operation': _ArgumentType.string,
+          'sessionRef': _ArgumentType.string,
+          'width': _ArgumentType.integer,
+          'height': _ArgumentType.integer,
+        },
+      _ => null,
+    };
+    if (fields == null) return 'browser.context.operation 无效。';
+    final required = fields.keys.toSet();
+    final error = _validateFields(args, fields);
+    if (error != null) return error;
+    for (final key in required) {
+      final value = args[key];
+      if (!args.containsKey(key) ||
+          value == null ||
+          (value is String && value.trim().isEmpty)) {
+        return 'tool.arguments.$key 不能为空。';
+      }
+    }
+    final ref = args['sessionRef'] as String;
+    if (!RegExp(r'^browser:[a-f0-9]{24}$').hasMatch(ref)) {
+      return 'browser.context.sessionRef 无效。';
+    }
+    if (args['label'] case final String label when label.length > 256) {
+      return 'browser.context.label 不能超过 256 个字符。';
+    }
+    if (args['expectedText'] case final String text when text.length > 512) {
+      return 'browser.context.expectedText 不能超过 512 个字符。';
+    }
+    if (args['acceptanceId'] case final String id
+        when id.trim().isEmpty ||
+            id.length > 128 ||
+            id.contains(RegExp(r'[\u0000-\u001f\u007f]'))) {
+      return 'browser.context.acceptanceId 无效。';
+    }
+    if (args['width'] case final int width when width < 320 || width > 1440) {
+      return 'browser.context.width 必须在 320 到 1440 之间。';
+    }
+    if (args['height'] case final int height
+        when height < 480 || height > 1200) {
+      return 'browser.context.height 必须在 480 到 1200 之间。';
+    }
+    return null;
   }
 
   String? _validateNativeAppArguments(Map<String, dynamic> args) {
@@ -953,6 +1059,9 @@ class AgentDecisionParser {
       _ArgumentType.boolean => value is bool,
       _ArgumentType.stringList =>
         value is List && value.every((item) => item is String),
+      _ArgumentType.stringMap => value is Map &&
+          value.keys.every((key) => key is String) &&
+          value.values.every((item) => item is String),
     };
   }
 
@@ -1016,7 +1125,7 @@ const Set<String> _exactPatchArgumentKeys = {
   'replacement',
 };
 
-enum _ArgumentType { string, integer, boolean, stringList }
+enum _ArgumentType { string, integer, boolean, stringList, stringMap }
 
 class _ResponseContent {
   final String? content;

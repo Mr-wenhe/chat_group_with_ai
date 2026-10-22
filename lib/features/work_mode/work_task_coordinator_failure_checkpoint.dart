@@ -21,6 +21,7 @@ extension _WorkTaskCoordinatorFailureCheckpoint on WorkTaskCoordinator {
         task.status = AgentTaskStatus.paused;
       }
       await _save(task);
+      if (WorkTaskCompletionChoice.paused(task)) running.cancellation.cancel();
     });
   }
 

@@ -2,8 +2,8 @@ part of 'default_work_task_runner_stage02_test.dart';
 
 void _registerP8RunnerTests(Directory Function() hive,
     Directory Function() root, WorkTaskEventStore Function() events) {
-  Future<DefaultWorkTaskRunner> recoveryRunner(
-      _HangingModelGateway gateway) async {
+  Future<DefaultWorkTaskRunner> recoveryRunner(AiRequestGateway gateway,
+      {bool browserContext = false}) async {
     final db = CandidateTestDatabase(hive());
     final grants = WorkFolderGrantService(
         box: db.appSettingsBox,
@@ -37,7 +37,8 @@ void _registerP8RunnerTests(Directory Function() hive,
               toolPermissions: [
                 ToolPermission.workspaceRead,
                 ToolPermission.workspacePatch,
-                ToolPermission.commandRun
+                ToolPermission.commandRun,
+                if (browserContext) ToolPermission.browserContext,
               ]));
     }
     await db.chatGroupBox.put(
@@ -83,6 +84,259 @@ void _registerP8RunnerTests(Directory Function() hive,
     addTearDown(instance.dispose);
     return instance;
   }
+
+  for (final resize in [false, true]) {
+    test('P8 浏览器会话可由新责任成员先核实关闭再打开候选 resize=$resize', () async {
+      if (!Platform.isMacOS) return;
+      final browserCalls = <Map<String, dynamic>>[];
+      final openedRefs = <String>[];
+      final closedRefs = <String>[];
+      final gateway =
+          _BrowserSessionRecoveryGateway(openedRefs, resize: resize);
+      final runner = await recoveryRunner(gateway, browserContext: true);
+      const channel = MethodChannel('com.chatgroup/browser_test');
+      TestWidgetsFlutterBinding.ensureInitialized();
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, (call) async {
+        final arguments = Map<String, dynamic>.from(call.arguments as Map);
+        browserCalls.add(arguments);
+        final operation = arguments['operation'];
+        final sessionRef = arguments['sessionRef'] as String;
+        Map<String, dynamic> snapshot() => {
+              'result': jsonEncode({
+                'title': '飞行棋',
+                'readyState': 'complete',
+                'viewport': {'width': 800, 'height': 600},
+                'visibleText': '飞行棋 测试页面',
+                'textTruncated': false,
+                'controls': [],
+                'controlsTruncated': false,
+              }),
+              'content': [
+                {'type': 'text', 'text': '受控浏览器截图'},
+                {
+                  'type': 'image_url',
+                  'image_url': {'url': 'data:image/png;base64,iVBORw0KGgo='}
+                }
+              ]
+            };
+        if (operation == 'open') {
+          openedRefs.add(sessionRef);
+          return {'snapshot': snapshot()};
+        }
+        if (operation == 'click') {
+          return {
+            'result': jsonEncode({'ok': true})
+          };
+        }
+        if (operation == 'assert') {
+          return {
+            'result': jsonEncode({'matched': true, 'textTruncated': false})
+          };
+        }
+        if (operation == 'resize') return {'snapshot': snapshot()};
+        if (operation == 'observe') {
+          return {'snapshot': snapshot()};
+        }
+        if (operation == 'close') {
+          closedRefs.add(sessionRef);
+          return {'closed': true};
+        }
+        throw StateError('意外的浏览器操作：$operation');
+      });
+      addTearDown(() => TestDefaultBinaryMessengerBinding
+          .instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, null));
+
+      final raw = candidateTestState(type: 'software', format: 'html').toJson()
+        ..['plan'] = '保留冻结候选；由独立成员在离线浏览器实测。'
+        ..['artifactContract'] = {
+          ...candidateTestState(type: 'software', format: 'html')
+              .artifactContract,
+          'files': ['game.html'],
+        }
+        ..['workItems'] = [
+          {
+            'id': 'make-game',
+            'ownerId': 'a',
+            'kind': 'produce',
+            'dependencies': [],
+            'status': 'done',
+            'requestRevision': 1,
+            'resultRef': 'proposal:producer-result',
+          }
+        ]
+        ..['autonomyPolicy'] = WorkCollaborationAutonomy.policyFor(['a', 'b'])
+        ..['usageEvidenceRefs'] = []
+        ..['coordinatorDecisions'] = [
+          {
+            'eventId': 'plan-ruling',
+            'coordinatorId': 'a',
+            'kind': 'plan',
+            'subjectId': 'task-a',
+            'requestRevision': 1,
+            'teamRevision': 1,
+            'verificationRevision': 1,
+            'iterationId': '',
+            'artifactDigest': '',
+            'opinionEventIds': ['plan-a-1', 'plan-b-1'],
+            'reason': '已收齐两名成员的方案认可。',
+            'responseRef': 'plan-ruling-message',
+          }
+        ]
+        ..['usageAssignments'] = [
+          for (final member in ['a', 'b'])
+            {
+              'memberId': member,
+              'scenarioId': 'scene-$member',
+              'goal': '$member 在离线浏览器核对当前候选',
+              'preconditions': '打开冻结候选并观察页面',
+              'stepGoals': ['打开后关闭隔离浏览器会话'],
+              'expectedResult': '只允许操作与关闭本成员场景的会话',
+              'acceptanceIds': ['qa'],
+              'requiredCapabilities': ['browser.context'],
+              'resetMethod': '关闭当前隔离会话',
+              'requestRevision': 1,
+            }
+        ]
+        ..['acceptances'] = [
+          for (final acceptance
+              in candidateTestState(type: 'software', format: 'html')
+                  .acceptances)
+            {
+              ...acceptance,
+              'method': '在隔离浏览器打开并关闭当前候选',
+              'requiredCapability': 'browser.context',
+            }
+        ];
+      final initial = WorkCollaborationState.tryParse(raw);
+      expect(initial, isNotNull);
+      expect(initial!.teamQualified, isTrue);
+      expect(initial.usagePlanReady, isTrue);
+      expect(initial.singleMakerReady, isTrue);
+      expect(initial.issuesResolved, isTrue);
+      expect(initial.opinionsSettled('plan', 'task-a'), isTrue);
+      expect(initial.planReady, isTrue);
+      final task = candidateTestTask(initial)
+        ..userRequest = '制作并测试离线 HTML 飞行棋'
+        ..status = AgentTaskStatus.queued;
+      final html = await File('${root().path}/game.html').writeAsString(
+          '<!doctype html><html><head><title>飞行棋</title></head><body>游戏</body></html>');
+      task.lastArtifactPaths = [html.path];
+      await runner.database.workModeWorkspaceBox.put(
+          task.groupId,
+          WorkModeWorkspace(
+              conversationId: task.groupId,
+              conversationType: 'group',
+              workDirPath: root().path,
+              projectScopeId: 'scope-a'));
+      await runner.database.agentTaskBox.put(task.id, task);
+      final candidate = await runner.publishCandidate(task,
+          publicationId: 'browser-session-recovery',
+          requiredPaths: [html.path]);
+
+      void bind(String member) {
+        final state =
+            WorkDiscussionState.fromExecutionState(task.executionStateJson)!
+                .collaboration!;
+        final execution = Map<String, dynamic>.from(
+            jsonDecode(task.executionStateJson) as Map);
+        final previousBinding = execution['workItemExecution'] as Map?;
+        if (previousBinding?['actorId'] != member) {
+          execution.remove('v2UsageObservationRef');
+        }
+        execution['workItemExecution'] = {
+          'stage': 'usage',
+          'workItemId': 'scene-$member',
+          'iterationId': candidate.iterationId,
+          'requestRevision': state.requestRevision,
+          'teamRevision': state.teamRevision,
+          'verificationRevision': state.verificationRevision,
+          'actorId': member,
+        };
+        task.executionStateJson = jsonEncode(execution);
+        task.characterId = member;
+      }
+
+      bind('a');
+      await runner.run(task, WorkTaskCancellation());
+      expect(task.status, AgentTaskStatus.paused);
+      expect(openedRefs, hasLength(1));
+      expect(closedRefs, isEmpty);
+      expect(
+          browserCalls.map((call) => call['operation']).toList(),
+          resize
+              ? ['open', 'resize', 'assert', 'observe']
+              : ['open', 'click', 'observe', 'assert', 'observe']);
+      final execution = jsonDecode(task.executionStateJson) as Map;
+      final observation = jsonDecode(await events().readDiscussionDetail(
+          task.id, execution['v2UsageObservationRef'] as String)) as Map;
+      expect(
+          (observation['observations'] as List).cast<Map>().firstWhere(
+              (o) => o['operation'] == 'assert')['businessResultVerified'],
+          isTrue);
+      if (resize) {
+        final modelEvents = (await events().read(task.id))
+            .events
+            .where((event) => event.safeMetadata['firstTokenMs'] is int);
+        expect(modelEvents, isNotEmpty,
+            reason: 'generation activity must retain first-token timing');
+      }
+
+      browserCalls.clear();
+      bind('b');
+      task
+        ..status = AgentTaskStatus.queued
+        ..resumeRequired = false
+        ..lastError = ''
+        ..pendingToolRequestJson = '';
+      await runner.run(task, WorkTaskCancellation());
+
+      expect(gateway.staleSessionRefReachedModel, isTrue);
+      expect(openedRefs, hasLength(2));
+      expect(closedRefs, openedRefs);
+      expect(browserCalls.map((call) => call['operation']).toList(),
+          ['close', 'open', 'close']);
+      expect(task.status, AgentTaskStatus.paused);
+      expect(
+          WorkDiscussionState.fromExecutionState(task.executionStateJson)!
+              .collaboration!
+              .currentIteration!['artifactDigest'],
+          candidate.digest);
+    }, timeout: const Timeout(Duration(seconds: 30)));
+  }
+  test('浏览器不确定操作仅在原生确认无会话后恢复，不放行其他副作用', () async {
+    final runner = await recoveryRunner(_HangingModelGateway());
+    TestWidgetsFlutterBinding.ensureInitialized();
+    const channel = MethodChannel('com.chatgroup/browser_test');
+    var active = 1;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (call) async {
+      expect((call.arguments as Map)['operation'], 'session-status');
+      return {'activeSessionCount': active};
+    });
+    addTearDown(() => TestDefaultBinaryMessengerBinding
+        .instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, null));
+    final task = candidateTestTask(candidateTestState());
+    await runner.database.agentTaskBox.put(task.id, task);
+    void intent(String tool) {
+      final root = jsonDecode(task.executionStateJson) as Map<String, dynamic>;
+      root['uncertainAction'] = {'tool': tool, 'operationKey': 'uncommitted'};
+      task.executionStateJson = jsonEncode(root);
+    }
+
+    intent('browser.context');
+    expect(await runner.validateRecovery(task), contains('仍未确认关闭'));
+    active = 0;
+    expect(await runner.validateRecovery(task), isNull);
+    expect(
+        (jsonDecode(task.executionStateJson) as Map)
+            .containsKey('uncertainAction'),
+        isFalse);
+    intent('command.run');
+    expect(await runner.validateRecovery(task), contains('无法证明结果'));
+  }, timeout: const Timeout(Duration(seconds: 30)));
 
   test('P1 逐成员串行试用切换 actor，不改用户钉定 executor 或借前人上下文', () async {
     final runner = await recoveryRunner(_HangingModelGateway());
@@ -482,4 +736,114 @@ void _registerP8RunnerTests(Directory Function() hive,
             .hasBlockingDecision,
         isTrue);
   });
+}
+
+class _BrowserSessionRecoveryGateway extends AiRequestGateway {
+  final List<String> openedRefs;
+  final Map<String, int> calls = {};
+  bool staleSessionRefReachedModel = false;
+
+  final bool resize;
+  _BrowserSessionRecoveryGateway(this.openedRefs, {this.resize = false})
+      : super(store: MemoryGovernanceStore(), client: _UnusedClient());
+
+  @override
+  Future<Map<String, dynamic>> sendChatMessageStreamed(
+      {required String apiKey,
+      required ApiProvider provider,
+      ApiProtocol apiProtocol = ApiProtocol.defaultValue,
+      String? customBaseUrl,
+      required String model,
+      required List<Map<String, dynamic>> messages,
+      required AiRequestPurpose purpose,
+      required String conversationId,
+      required String characterId,
+      double temperature = 0.85,
+      int maxTokens = 1024,
+      Duration receiveTimeout = const Duration(seconds: 120),
+      int maxRetries = 5,
+      CancelToken? cancelToken,
+      String? taskId,
+      int? runBoundary,
+      bool requiresTools = false,
+      bool userInitiated = false,
+      bool finishOnTerminalFrame = false,
+      String? reasoningEffort,
+      void Function()? onResponseActivity,
+      void Function(ChatStreamEvent event)? onEvent}) async {
+    if (resize) {
+      onResponseActivity?.call();
+      onEvent?.call(ChatStreamEvent.token('{"public_update":"正在检查浏览器布局。"}'));
+    }
+    final call =
+        calls.update(characterId, (count) => count + 1, ifAbsent: () => 1);
+    final encodedMessages = jsonEncode(messages);
+    Map<String, dynamic> response(String action,
+            {Map<String, dynamic>? tool, String? question}) =>
+        {
+          'success': true,
+          'message': jsonEncode({
+            'action': action,
+            'public_update': action == 'tool' ? '处理当前浏览器步骤。' : '暂停当前试用。',
+            'tool': tool == null
+                ? null
+                : {'name': 'browser.context', 'arguments': tool},
+            'completion': action == 'clarify' ? {'question': question} : null,
+          })
+        };
+    Map<String, dynamic> open() =>
+        response('tool', tool: {'operation': 'open'});
+    Map<String, dynamic> click(String ref) => response('tool',
+        tool: {'operation': 'click', 'sessionRef': ref, 'label': '飞行棋 测试页面'});
+    Map<String, dynamic> close(String ref) =>
+        response('tool', tool: {'operation': 'close', 'sessionRef': ref});
+    Map<String, dynamic> assertPage(String ref,
+            {String expectedText = '只允许操作'}) =>
+        response('tool', tool: {
+          'operation': 'assert',
+          'sessionRef': ref,
+          'acceptanceId': 'qa',
+          'expectedText': expectedText,
+        });
+    Map<String, dynamic> pause() => response('clarify', question: '继续前暂停测试夹具。');
+
+    if (characterId == 'a') {
+      switch (call) {
+        case 1:
+          return open();
+        case 2:
+          return resize
+              ? response('tool', tool: {
+                  'operation': 'resize',
+                  'sessionRef': openedRefs.last,
+                  'width': 375,
+                  'height': 667
+                })
+              : click(openedRefs.last);
+        case 3:
+          return close(openedRefs.last);
+        case 4:
+          return assertPage(openedRefs.last, expectedText: '越权的预期文本');
+        case 5:
+          return assertPage(openedRefs.last);
+        default:
+          return pause();
+      }
+    }
+    switch (call) {
+      case 1:
+        return open();
+      case 2:
+        final staleRef = openedRefs.first;
+        staleSessionRefReachedModel = encodedMessages.contains(staleRef) &&
+            encodedMessages.contains('browserSessionOccupied');
+        return close(staleRef);
+      case 3:
+        return open();
+      case 4:
+        return close(openedRefs.last);
+      default:
+        return pause();
+    }
+  }
 }

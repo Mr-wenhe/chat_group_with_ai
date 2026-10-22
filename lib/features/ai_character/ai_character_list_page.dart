@@ -13,6 +13,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'ai_character_form_page.dart';
+import 'batch_replace_model_config.dart';
 import 'providers/ai_character_providers.dart';
 import 'package:chat_group/core/theme/app_theme.dart';
 import 'package:chat_group/core/theme/provider_style.dart';
@@ -609,170 +610,15 @@ class _AICharacterListPageState extends ConsumerState<AICharacterListPage> {
 
   /// 批量替换配置：选择「源配置」与「目标配置」，
   /// 将所有当前使用源配置的角色对齐到目标配置。
-  /// API Key 仅由共享配置的凭据仓库持有，故角色侧 apiKey 清空。
   Future<void> _batchReplaceConfig(BuildContext context, WidgetRef ref) async {
-    final cs = Theme.of(context).colorScheme;
-    final apiConfigs = ref.read(apiConfigsProvider);
-    final characters = ref.read(userManagedAICharactersProvider);
-    if (apiConfigs.length < 2) {
-      AppToast.show(context, '至少需要两个配置才能批量替换',
-          icon: Icons.info_outline_rounded);
-      return;
-    }
-
-    // 每个配置当前被多少角色使用
-    final usageCount = <String, int>{
-      for (final c in apiConfigs) c.id: 0,
-    };
-    for (final ch in characters) {
-      usageCount[ch.apiConfigId] = (usageCount[ch.apiConfigId] ?? 0) + 1;
-    }
-
-    // 默认源：第一个有角色使用的配置；没有则提示无角色可替换
-    String sourceId = apiConfigs
-        .firstWhere(
-          (c) => (usageCount[c.id] ?? 0) > 0,
-          orElse: () => apiConfigs.first,
-        )
-        .id;
-    if ((usageCount[sourceId] ?? 0) == 0) {
-      AppToast.show(context, '当前没有角色关联任何配置，无需替换',
-          icon: Icons.info_outline_rounded);
-      return;
-    }
-    // 默认目标：第一个不等于源的配置
-    String targetId = apiConfigs.firstWhere((c) => c.id != sourceId).id;
-
-    final result = await showDialog<({String sourceId, String targetId})>(
+    final matched = await batchReplaceCharacterModelConfig(
       context: context,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setDialogState) {
-          // 源只列有角色正在使用的配置（0 使用的配置无需替换，不作为可选源）
-          final sourceCandidates = apiConfigs
-              .where((c) => (usageCount[c.id] ?? 0) > 0)
-              .toList(growable: false);
-          // 目标下拉排除当前源，源变化时若目标==源则重置
-          final targetCandidates =
-              apiConfigs.where((c) => c.id != sourceId).toList();
-          if (!targetCandidates.any((c) => c.id == targetId)) {
-            targetId = targetCandidates.first.id;
-          }
-          final affected = usageCount[sourceId] ?? 0;
-          final sourceConfig = apiConfigs.firstWhere((c) => c.id == sourceId);
-          final targetConfig = apiConfigs.firstWhere((c) => c.id == targetId);
-
-          return AlertDialog(
-            title: const Text('批量替换模型配置'),
-            content: SizedBox(
-              width: 420,
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text('源配置（当前正在使用的）',
-                      style:
-                          TextStyle(fontSize: 13, color: cs.onSurfaceVariant)),
-                  const SizedBox(height: 6),
-                  DropdownButtonFormField<String>(
-                    value: sourceId,
-                    isExpanded: true,
-                    decoration: const InputDecoration(
-                      border: OutlineInputBorder(),
-                      isDense: true,
-                    ),
-                    items: sourceCandidates
-                        .map((c) => DropdownMenuItem(
-                              value: c.id,
-                              child: Text(
-                                '${c.name} (${c.provider}) · ${usageCount[c.id] ?? 0} 个角色',
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ))
-                        .toList(),
-                    onChanged: (v) {
-                      if (v == null) return;
-                      setDialogState(() => sourceId = v);
-                    },
-                  ),
-                  const SizedBox(height: 14),
-                  Text('目标配置（替换为）',
-                      style:
-                          TextStyle(fontSize: 13, color: cs.onSurfaceVariant)),
-                  const SizedBox(height: 6),
-                  DropdownButtonFormField<String>(
-                    value: targetId,
-                    isExpanded: true,
-                    decoration: const InputDecoration(
-                      border: OutlineInputBorder(),
-                      isDense: true,
-                    ),
-                    items: targetCandidates
-                        .map((c) => DropdownMenuItem(
-                              value: c.id,
-                              child: Text('${c.name} (${c.provider})',
-                                  overflow: TextOverflow.ellipsis),
-                            ))
-                        .toList(),
-                    onChanged: (v) {
-                      if (v == null) return;
-                      setDialogState(() => targetId = v);
-                    },
-                  ),
-                  const SizedBox(height: 14),
-                  Container(
-                    padding: const EdgeInsets.all(10),
-                    decoration: BoxDecoration(
-                      color: cs.primaryContainer.withValues(alpha: 0.4),
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    child: Text(
-                      '将把 $affected 个使用「${sourceConfig.name}」的角色'
-                      '替换为「${targetConfig.name}」（模型 ${targetConfig.modelName}）',
-                      style:
-                          TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            actions: [
-              TextButton(
-                  onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
-              FilledButton(
-                onPressed: affected == 0
-                    ? null
-                    : () => Navigator.pop(
-                        ctx, (sourceId: sourceId, targetId: targetId)),
-                child: Text('替换 $affected 个角色'),
-              ),
-            ],
-          );
-        },
-      ),
+      characters: ref.read(userManagedAICharactersProvider),
+      apiConfigs: ref.read(apiConfigsProvider),
+      subjectLabel: '角色',
     );
-
-    if (result == null || !context.mounted) return;
-    final target = apiConfigs.firstWhere((c) => c.id == result.targetId);
-    final source = apiConfigs.firstWhere((c) => c.id == result.sourceId);
-    final matched = characters
-        .where((c) => c.apiConfigId == result.sourceId)
-        .toList(growable: false);
-    for (final c in matched) {
-      c.apiConfigId = target.id;
-      c.apiKey = '';
-      c.apiProvider = target.provider;
-      c.modelName = target.modelName;
-      c.customBaseUrl = target.customBaseUrl;
-      c.save();
-    }
+    if (matched == 0 || !context.mounted) return;
     ref.invalidate(aiCharactersProvider);
-    if (context.mounted) {
-      AppToast.show(
-        context,
-        '已将 ${matched.length} 个角色从「${source.name}」替换为「${target.name}」',
-        icon: Icons.sync_alt_rounded,
-      );
-    }
   }
 
   /// 单独修改某个角色关联的 API 配置：弹窗下拉选择目标配置，

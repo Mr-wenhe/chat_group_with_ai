@@ -86,7 +86,7 @@ void _registerP6RunnerTests(Directory Function() hiveRoot,
     final candidate =
         await delivery.publishCandidate(work, publicationId: 'first');
     final message = delivery.database.messageBox.values.single;
-    expect(message.content, contains('候选送测 r001'));
+    expect(message.content, contains('本轮成果 r001 已冻结'));
     expect(message.media, isNotEmpty);
     expect(
         message.media!.single.localPath, startsWith(candidate.directory.path));
@@ -100,6 +100,51 @@ void _registerP6RunnerTests(Directory Function() hiveRoot,
             .collaboration!
             .currentIteration!['artifactDigest'],
         candidate.digest);
+  });
+
+  test('P6 单文件最终交付原路径HTML，送测ZIP及旧交付重发保持正确', () async {
+    final delivery = await runner();
+    final work = await task(delivery, type: 'software', format: 'html');
+    final output = File('${workRoot().path}/飞行棋/飞行棋.html');
+    await output.parent.create();
+    await output.writeAsString('<html><body>游戏成果</body></html>');
+    work.lastArtifactPaths = [output.path];
+    final candidate = await delivery.publishCandidate(work,
+        publicationId: 'first', requiredPaths: [output.path]);
+    final testingMessage = delivery.database.messageBox.values.single;
+    expect(testingMessage.media!.single.fileName, endsWith('.zip'));
+    WorkTaskCompletionChoice.setChoice(work, 'deliver');
+    expect(await delivery.deliverUserConfirmedCandidate(work), isTrue);
+    final message = delivery.database.messageBox.values
+        .singleWhere((m) => m.workDelivery?['kind'] == 'final');
+    expect(message.media, hasLength(1));
+    expect(message.media!.single.fileName, '飞行棋.html');
+    expect(message.media!.single.localPath, output.path);
+    expect(message.media!.single.cachePath, isNotNull);
+    expect(await File(message.media!.single.managedPath).readAsBytes(),
+        await candidate.file('飞行棋/飞行棋.html').readAsBytes());
+    // Re-send must also repair an already-persisted old ZIP attachment.
+    message.media = List.of(testingMessage.media!);
+    await delivery.database.updateMessage(message);
+    expect(await delivery.resendCandidateMessage(work, message.id), isTrue);
+    expect(message.media, hasLength(1));
+    expect(message.media!.single.fileName, '飞行棋.html');
+    expect(message.media!.single.localPath, output.path);
+  });
+
+  test('P6 最终交付不把已变化的原路径冒充冻结成果', () async {
+    final delivery = await runner();
+    final work = await task(delivery, type: 'software', format: 'html');
+    final original = File(work.lastArtifactPaths.single);
+    await delivery.publishCandidate(work,
+        publicationId: 'first', requiredPaths: [original.path]);
+    WorkTaskCompletionChoice.setChoice(work, 'deliver');
+    await original.writeAsString('<html><body>其他版本</body></html>');
+    expect(await delivery.deliverUserConfirmedCandidate(work), isFalse);
+    final message = delivery.database.messageBox.values
+        .singleWhere((m) => m.workDelivery?['kind'] == 'final');
+    expect(message.media ?? [], isEmpty);
+    expect(await original.readAsString(), contains('其他版本'));
   });
 
   test('P6 baseline publication reuses frozen candidate bytes', () async {
@@ -189,6 +234,9 @@ void _registerP6RunnerTests(Directory Function() hiveRoot,
     final script = File('${workRoot().path}/scripts/game.js');
     await script.parent.create();
     await script.writeAsString('console.log("game");');
+    final intermediate = File('${workRoot().path}/intermediate.html');
+    await intermediate.writeAsString('<html><body>intermediate</body></html>');
+    work.lastArtifactPaths = [...work.lastArtifactPaths, intermediate.path];
     final candidate = await delivery.publishCandidate(work,
         publicationId: 'first', requiredPaths: [html.path, script.path]);
     final attachment = delivery.database.messageBox.values.single.media!.single;
@@ -197,6 +245,8 @@ void _registerP6RunnerTests(Directory Function() hiveRoot,
     expect(zip.files.map((f) => f.name),
         containsAll(['report.html', 'scripts/game.js']));
     expect(candidate.files.length, 2);
+    expect(candidate.files.map((f) => f['path']),
+        isNot(contains('intermediate.html')));
   });
 
   test(

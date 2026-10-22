@@ -45,6 +45,7 @@ class _ScriptedChatApi extends ChatApiService {
     Duration? receiveTimeout,
     int maxRetries = 5,
     CancelToken? cancelToken,
+    String? reasoningEffort,
     bool structuredJson = false,
     // 替身只回一个固定的合法正文，没有需要 `reasoning_content` 兜底的空内容场景。
     bool allowReasoningContentFallback = false,
@@ -67,6 +68,9 @@ class _ScriptedChatApi extends ChatApiService {
     int maxTokens = 1024,
     Duration receiveTimeout = const Duration(seconds: 120),
     CancelToken? cancelToken,
+    bool finishOnTerminalFrame = false,
+    String? reasoningEffort,
+    void Function()? onResponseActivity,
   }) async* {
     replyCalls.add(messages);
     yield ChatStreamEvent.done('测试回复');

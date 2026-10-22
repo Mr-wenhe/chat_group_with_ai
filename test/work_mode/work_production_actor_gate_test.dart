@@ -1,3 +1,6 @@
+import 'package:chat_group/core/models/work_delivery_metadata.dart';
+import 'dart:convert';
+import 'package:chat_group/features/work_mode/work_task_completion_choice.dart';
 import 'dart:io';
 
 import 'package:chat_group/core/database/database_service.dart';
@@ -19,6 +22,7 @@ import 'package:chat_group/features/work_mode/workspace_path_policy.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import '../helpers/lifecycle_hive.dart';
+import 'work_candidate_test_support.dart';
 
 class _Credentials implements ApiCredentialResolver {
   @override
@@ -35,7 +39,7 @@ void main() {
 
   setUp(() async {
     dir = await openLifecycleHive();
-    db = DatabaseService();
+    db = CandidateTestDatabase(dir);
     events = WorkTaskEventStore(
         appSupportDirectory: Directory('${dir.path}/support'));
     project = await Directory('${dir.path}/project').create();
@@ -203,6 +207,96 @@ void main() {
           .map(Map<String, dynamic>.from)
           .toList();
 
+  Future<void> freezeCandidate() async {
+    await seedProductionReadyTask();
+    final shell =
+        WorkDiscussionState.fromExecutionState(task.executionStateJson)!;
+    final raw = shell.collaboration!.toJson()
+      ..['revision'] = shell.collaboration!.revision + 1;
+    raw['workItems'] = [
+      for (final item in shell.collaboration!.workItems)
+        {...item, 'status': 'done', 'resultRef': 'file:report.txt'}
+    ];
+    task.executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
+        task.executionStateJson,
+        shell.copyWith(collaboration: WorkCollaborationState.tryParse(raw)!),
+        expectedCollaborationRevision: shell.collaboration!.revision);
+    final file =
+        await File('${project.path}/report.txt').writeAsString('已冻结的报告正文');
+    task.lastArtifactPaths = [file.path];
+    await runner.publishCandidate(task,
+        publicationId: 'completion-choice', requiredPaths: [file.path]);
+    task.status = AgentTaskStatus.paused;
+  }
+
+  test('冻结后先等用户选择，继续测试只授权当前候选', () async {
+    await freezeCandidate();
+    expect(WorkTaskCompletionChoice.pending(task), isTrue);
+    expect(await runner.prepareCollaborationWork(task), isFalse);
+    expect(task.lastError, contains('本轮成果已冻结'));
+    WorkTaskCompletionChoice.setChoice(task, 'test');
+    expect(WorkTaskCompletionChoice.pending(task), isFalse);
+    expect(await runner.prepareCollaborationWork(task), isTrue);
+    final shell =
+        WorkDiscussionState.fromExecutionState(task.executionStateJson)!;
+    final next = WorkCollaborationState.tryParse(shell.collaboration!.toJson()
+      ..['requestRevision'] = shell.requestRevision + 1
+      ..['revision'] = shell.collaboration!.revision + 1)!;
+    task.executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
+        task.executionStateJson,
+        shell.copyWith(
+            collaboration: next, requestRevision: next.requestRevision),
+        expectedCollaborationRevision: shell.collaboration!.revision);
+    expect(WorkTaskCompletionChoice.choice(task), isNull);
+  });
+
+  test('用户确认不能交付已被篡改的冻结文件', () async {
+    await freezeCandidate();
+    WorkTaskCompletionChoice.setChoice(task, 'deliver');
+    final publisher = await runner.candidatePublisher(task);
+    final candidate = (await publisher.recover()).single;
+    await candidate
+        .file(candidate.files.first['path'] as String)
+        .writeAsString('篡改的内容');
+    await expectLater(
+        runner.deliverUserConfirmedCandidate(task), throwsStateError);
+    expect(
+        db.messageBox.values.where((m) => m.workDelivery?['kind'] == 'final'),
+        isEmpty);
+  });
+
+  test('用户确认直接交付保留未测试记录，不伪造验收或成员签字', () async {
+    await freezeCandidate();
+    final before =
+        WorkDiscussionState.fromExecutionState(task.executionStateJson)!
+            .collaboration!;
+    await expectLater(
+        runner.deliverUserConfirmedCandidate(task), throwsStateError);
+    WorkTaskCompletionChoice.setChoice(task, 'deliver');
+    expect(await runner.deliverUserConfirmedCandidate(task), isTrue);
+    final finalMessage = db.messageBox.values
+        .singleWhere((m) => m.workDelivery?['kind'] == 'final');
+    expect(finalMessage.content, contains('未经过本轮测试'));
+    expect(finalMessage.workDelivery?['acceptedByUserWithoutTesting'], isTrue);
+    final portable =
+        WorkDeliveryMetadata.portable(finalMessage.workDelivery, files: []);
+    expect(portable?['acceptedByUserWithoutTesting'], isTrue);
+    expect(portable?['verified'], isFalse);
+    final after =
+        WorkDiscussionState.fromExecutionState(task.executionStateJson)!
+            .collaboration!;
+    expect(after.acceptances, before.acceptances);
+    expect(after.approvals, before.approvals);
+    expect(after.deliveryReady, isFalse);
+    final publisher = await runner.candidatePublisher(task);
+    final candidate = (await publisher.recover()).single;
+    final outcome = jsonDecode(
+        await File('${candidate.directory.path}/outcome.json')
+            .readAsString()) as Map;
+    expect(outcome['tested'], isFalse);
+    expect(outcome['acceptedByUser'], isTrue);
+  });
+
   test('执行期成员没绑定模型时如实报出成因，不并进笼统文案', () async {
     await seedProductionReadyTask();
     // 现场那种形态：责任成员没有绑定任何模型配置。
@@ -250,8 +344,8 @@ void main() {
     task.executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
         '',
         decoded.copyWith(
-            collaboration: WorkCollaborationState.tryParse(
-                decoded.collaboration!.toJson()
+            collaboration:
+                WorkCollaborationState.tryParse(decoded.collaboration!.toJson()
                   ..['team'] = [
                     {
                       'memberId': 'tester',

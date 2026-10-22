@@ -8,6 +8,7 @@ import 'package:chat_group/features/work_mode/work_follow_up_policy.dart';
 import 'package:chat_group/features/work_mode/work_task_clarification.dart';
 import 'package:chat_group/features/work_mode/work_task_coordinator.dart';
 import 'package:chat_group/features/work_mode/work_task_event_store.dart';
+import 'package:chat_group/features/work_mode/work_task_requirements_confirmation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hive/hive.dart';
 
@@ -269,6 +270,23 @@ Future<void> _closeStorage(
   }
 }
 
+Future<AgentTask> _waitForRequirements(
+  WorkTaskCoordinator coordinator,
+  String taskId,
+) =>
+    coordinator.watchTask(taskId).firstWhere((task) =>
+        WorkTaskRequirementsConfirmation.hasMarker(task.executionStateJson) &&
+        WorkTaskRequirementsConfirmation.isCurrent(task));
+
+Future<void> _confirmRequirements(
+  WorkTaskCoordinator coordinator,
+  AgentTask task,
+) =>
+    coordinator.confirmRequirements(
+      task.id,
+      version: WorkTaskRequirementsConfirmation.versionFor(task),
+    );
+
 void main() {
   test('A10 merges an in-flight discussion supplement and rejects stale finish',
       () async {
@@ -315,7 +333,11 @@ void main() {
     expect(renewed.executionStateJson, contains('attachment-a10'));
     expect(renewed.executionStateJson, contains('attachment-initial'));
     expect(renewedState.isExecutionReady, isFalse);
+    expect(WorkTaskRequirementsConfirmation.isCurrent(renewed), isTrue);
+    expect(discussion.secondStarted.isCompleted, isFalse,
+        reason: '新增需求版本必须先确认，旧讨论结束不能自动放行。');
 
+    await _confirmRequirements(coordinator, renewed);
     discussion.releaseFirst.complete();
     await discussion.secondStarted.future;
     expect(discussion.revisions, [1, 2]);
@@ -375,6 +397,15 @@ void main() {
     final runsBefore = discussion.runCount;
     runner.completeAt(0);
 
+    final firstRenewed = await _waitForRequirements(coordinator, task.id)
+        .timeout(const Duration(seconds: 5));
+    final firstRenewedState = WorkDiscussionState.fromExecutionState(
+      firstRenewed.executionStateJson,
+    )!;
+    expect(firstRenewedState.requestRevision, 2);
+    expect(discussion.runCount, runsBefore, reason: '新版需求确认前不得重新运行群讨论。');
+    await _confirmRequirements(coordinator, firstRenewed);
+
     // 第一轮结束后必须重新走讨论门禁：请求版本 +1、讨论真正再跑一次，
     // 然后才按新请求启动 runner。只断言"进了队列"不足以证明版本续期。
     await discussion.waitForRun(runsBefore);
@@ -406,6 +437,20 @@ void main() {
     );
 
     runner.completeAt(1);
+
+    final secondRenewed = await _waitForRequirements(coordinator, task.id)
+        .timeout(const Duration(seconds: 5));
+    expect(
+      WorkDiscussionState.fromExecutionState(
+        secondRenewed.executionStateJson,
+      )!
+          .requestRevision,
+      3,
+    );
+    final secondRunsBefore = discussion.runCount;
+    await _confirmRequirements(coordinator, secondRenewed);
+    await discussion.waitForRun(secondRunsBefore);
+    expect(discussion.requestRevisions, contains(3));
     await runner.startedAt(2);
     expect(runner.artifactPaths[2], ['/workspace/report.docx']);
     expect(runner.requests[2], contains('English title'));
@@ -527,6 +572,8 @@ void main() {
     expect(state.requestRevision, 1);
     expect(state.deliverableContract?['format'], 'html');
     expect(coordinator.taskForConversation(source.groupId)?.id, fresh.id);
+    expect(WorkTaskRequirementsConfirmation.isCurrent(fresh), isTrue);
+    await _confirmRequirements(coordinator, fresh);
     expect(await discussion.started.future, fresh.id);
   });
 
@@ -723,6 +770,10 @@ void main() {
       task.id,
       '请修改 /workspace/old.docx 的标题',
     );
+    final renewed = storage.box.get(task.id)!;
+    expect(WorkTaskRequirementsConfirmation.isCurrent(renewed), isTrue);
+    expect(discussion.started.isCompleted, isFalse);
+    await _confirmRequirements(coordinator, renewed);
     await discussion.started.future;
 
     final stored = storage.box.get(task.id)!;

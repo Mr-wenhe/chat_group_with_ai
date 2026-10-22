@@ -928,6 +928,7 @@ extension _DefaultWorkTaskRunnerDelivery on DefaultWorkTaskRunner {
       workspaceRoot: _workspaceRootForTask(task),
       now: clock(),
     );
-    return validation.valid ? null : validation.message;
+    if (!validation.valid) return validation.message;
+    return _validateProductionChanges(task);
   }
 }

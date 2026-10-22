@@ -2,7 +2,7 @@ name: chat_group
 description: "伴伴 - 创建AI角色群聊，观察AI自动互动"
 publish_to: 'none'
 
-version: 2.3.5+14
+version: 2.6.0+14
 
 environment:
   # 兼容本地与 CI 使用的 Flutter 3.27.1 stable（Dart 3.6.0）。
@@ -74,6 +74,17 @@ dependencies:
   package_info_plus: ">=8.0.0 <9.0.0"
   record: ^6.2.1
   audioplayers: ^6.6.0
+  webview_flutter_wkwebview: 3.22.1
+  webview_flutter_platform_interface: 2.13.1
+  webview_windows: 0.4.0
+  flutter_markdown: 0.7.6
+  flutter_highlight: 0.7.0
+  pdfx: 2.8.0
+  # HTML 附件预览改由 Flutter 渲染：内嵌 WebView 作为 desktop 平台视图时收不到
+  # 鼠标指针事件（滚轮/拖选/点击全部失效），同一份文档在原生 WKWebView 里正常。
+  # 必须与上面锁定的 html 0.15.6 搭配：flutter_html 3.0.0 调用了 html 0.15.7
+  # 已移除的内部 API（package:html/src/query_selector.dart 的 matches）。
+  flutter_html: ^3.0.0
 
 # ===== 依赖覆盖：强制降级使用 android.flutter 属性（3.27+ API）的传递依赖 =====
 # 这些包在 9.x+ 版本更新了 Android build.gradle 使用 android.flutter.compileSdkVersion，

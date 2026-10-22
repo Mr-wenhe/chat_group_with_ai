@@ -18,6 +18,9 @@ class FakeCompletionClient extends ChatApiService {
   int? lastBoundedMaxTokens;
   int? lastStructuredStreamedMaxTokens;
   bool structuredStreamedFailure = false;
+  bool terminalFrameRequested = false;
+  String? streamedReasoningEffort;
+  String? fallbackReasoningEffort;
   Duration? structuredStreamedReceiveTimeout;
   final boundedReceiveTimeouts = <Duration>[];
 
@@ -72,10 +75,12 @@ class FakeCompletionClient extends ChatApiService {
     Duration? receiveTimeout,
     int maxRetries = 5,
     CancelToken? cancelToken,
+    String? reasoningEffort,
     bool structuredJson = false,
     bool allowReasoningContentFallback = false,
     required int maxResponseBytes,
   }) async {
+    fallbackReasoningEffort = reasoningEffort;
     boundedCount++;
     lastBoundedMaxTokens = maxTokens;
     boundedReceiveTimeouts.add(receiveTimeout ?? Duration.zero);
@@ -95,6 +100,9 @@ class FakeCompletionClient extends ChatApiService {
     Duration receiveTimeout = const Duration(seconds: 120),
     int maxRetries = 5,
     CancelToken? cancelToken,
+    bool finishOnTerminalFrame = false,
+    String? reasoningEffort,
+    void Function()? onResponseActivity,
     void Function(ChatStreamEvent event)? onEvent,
   }) async {
     streamedCount++;
@@ -114,8 +122,14 @@ class FakeCompletionClient extends ChatApiService {
     Duration receiveTimeout = const Duration(seconds: 120),
     int maxRetries = 5,
     CancelToken? cancelToken,
+    bool finishOnTerminalFrame = false,
+    String? reasoningEffort,
+    void Function()? onResponseActivity,
     void Function(ChatStreamEvent event)? onEvent,
   }) async {
+    terminalFrameRequested = finishOnTerminalFrame;
+    streamedReasoningEffort = reasoningEffort;
+    onResponseActivity?.call();
     structuredStreamedCount++;
     lastStructuredStreamedMaxTokens = maxTokens;
     structuredStreamedReceiveTimeout = receiveTimeout;
@@ -144,6 +158,9 @@ class FakeStreamingErrorClient extends ChatApiService {
     int maxTokens = 1024,
     Duration receiveTimeout = const Duration(seconds: 120),
     CancelToken? cancelToken,
+    bool finishOnTerminalFrame = false,
+    String? reasoningEffort,
+    void Function()? onResponseActivity,
   }) async* {
     yield ChatStreamEvent.error(errorMessage);
   }
@@ -507,6 +524,44 @@ void main() {
     expect(store.diagnostics.single.toSafeText(), contains('exactUsage=false'));
   });
 
+  test('超出模型上下文的上游用量回退到估算', () async {
+    final store = MemoryGovernanceStore();
+    await store.saveCustomCapability(
+      ApiProvider.custom.name,
+      'step-5-preview',
+      const CustomModelCapability(contextWindow: 1000000, maxOutput: 8192),
+    );
+    final client = FakeCompletionClient()
+      ..responder = (_) async => {
+            'success': true,
+            'message': 'ok',
+            'promptTokens': 100000000,
+            'cachedTokens': 2,
+            'completionTokens': 3,
+          };
+    final gateway = AiRequestGateway(store: store, client: client);
+
+    await gateway.sendChatMessage(
+      apiKey: 'secret',
+      provider: ApiProvider.custom,
+      model: 'step-5-preview',
+      messages: messages,
+      purpose: AiRequestPurpose.agent,
+      conversationId: 'group-1',
+      characterId: 'worker',
+      taskId: 'task-outlier',
+      maxRetries: 0,
+    );
+
+    final entry = store.ledgerEntries.single;
+    expect(entry.inputTokens, lessThan(1000000));
+    expect(entry.cachedInputTokens, 0);
+    expect(entry.outputTokens, 1);
+    expect(entry.exactUsage, isFalse);
+    expect(store.diagnostics.single.exactUsage, isFalse);
+    expect(store.diagnostics.single.inputTokens, entry.inputTokens);
+  });
+
   test('价格未知只记 Token，诊断不含 Key、Authorization 或正文', () async {
     final store = MemoryGovernanceStore();
     final client = FakeCompletionClient();
@@ -561,6 +616,37 @@ void main() {
     expect(client.sendCount, 0);
     expect(client.streamedCount, 0);
     expect(client.structuredStreamedCount, 2);
+  });
+
+  test(
+      'group execution keeps terminal, activity and reasoning options through fallback',
+      () async {
+    final client = FakeCompletionClient()..structuredStreamedFailure = true;
+    final gateway =
+        AiRequestGateway(store: MemoryGovernanceStore(), client: client);
+    var activity = 0;
+    await gateway.sendChatMessageStreamed(
+        apiKey: 'test-key',
+        provider: ApiProvider.custom,
+        model: 'step-5-preview',
+        messages: messages,
+        purpose: AiRequestPurpose.agent,
+        conversationId: 'group',
+        characterId: 'worker',
+        requiresTools: true,
+        maxRetries: 0,
+        receiveTimeout: const Duration(seconds: 300),
+        finishOnTerminalFrame: true,
+        reasoningEffort: 'low',
+        onResponseActivity: () {
+          activity++;
+        });
+    expect(client.terminalFrameRequested, isTrue);
+    expect(
+        client.structuredStreamedReceiveTimeout, const Duration(seconds: 300));
+    expect(client.streamedReasoningEffort, 'low');
+    expect(client.fallbackReasoningEffort, 'low');
+    expect(activity, 1);
   });
 
   test('SenseNova stalled work response retries structured non-stream JSON',

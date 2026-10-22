@@ -3,11 +3,33 @@ import 'dart:convert';
 
 import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/features/work_mode/work_context_builder.dart';
+import 'package:chat_group/features/work_mode/work_discussion_state.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hive/hive.dart';
+import 'work_candidate_test_support.dart';
 
 void main() {
   const builder = WorkContextBuilder(maxCharacters: 900);
+
+  test('群v2权威状态超预算且无可压缩诊断时不反复请求摘要模型', () async {
+    final task = candidateTestTask(candidateTestState());
+    final discussion =
+        WorkDiscussionState.fromExecutionState(task.executionStateJson)!;
+    final snapshot = builder.build(
+        conversationId: task.groupId,
+        target: '保留原任务',
+        discussionState: discussion,
+        completedSummaries: ['旧诊断' * 1000]);
+    expect(builder.shouldCompress(snapshot), isTrue);
+    var calls = 0;
+    final result = await builder.compressIfNeeded(snapshot, model: (_) async {
+      calls++;
+      return null;
+    });
+    expect(calls, 0);
+    expect(result.discussionState!.collaboration!.toJson(),
+        discussion.collaboration!.toJson());
+  }, timeout: const Timeout(Duration(seconds: 30)));
 
   test('persists only bounded task context and never tool body text', () {
     final snapshot = builder.build(

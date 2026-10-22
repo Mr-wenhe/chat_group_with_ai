@@ -1,6 +1,832 @@
 part of 'work_discussion_v2_test.dart';
 
 void _registerDiscussionHistoryRegressions() {
+  test('同需求原成员重试再次失败须重新阻塞，不能与已答决策碰撞', () async {
+    var calls = 0;
+    final runner = WorkDiscussionRunner(
+        database: db,
+        credentials: _Credentials(),
+        eventStore: events,
+        investigate: execution.investigate,
+        completion: (
+            {required character,
+            required config,
+            required apiKey,
+            required provider,
+            required conversationId,
+            required messages,
+            required timeout,
+            cancelToken}) async {
+          calls++;
+          return {'success': false, 'statusCode': 503, 'message': '上游暂不可用'};
+        });
+    await runner.runCollaboration(task, WorkTaskCancellation(), apply);
+    final shell =
+        WorkDiscussionState.fromExecutionState(task.executionStateJson)!;
+    final before = shell.collaboration!;
+    final pending = before.decisions.last;
+    final raw = before.toJson()
+      ..['revision'] = before.revision + 1
+      ..['decisions'] = [
+        for (final decision in before.decisions)
+          decision['id'] == pending['id']
+              ? {
+                  ...decision,
+                  'revision': (decision['revision'] as int) + 1,
+                  'status': 'answered',
+                  'answerKind': 'choice',
+                  'answer':
+                      ((decision['options'] as List).first as Map)['label'],
+                  'responseRef': 'user-retry-receipt',
+                }
+              : decision
+      ];
+    task.executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
+        task.executionStateJson,
+        shell.copyWith(collaboration: WorkCollaborationState.tryParse(raw)!),
+        expectedCollaborationRevision: before.revision);
+    calls = 0;
+    await runner.runCollaboration(task, WorkTaskCancellation(), apply);
+    final after =
+        WorkDiscussionState.fromExecutionState(task.executionStateJson)!
+            .collaboration!;
+    expect(calls, 1, reason: '再次失败后立即等待用户，不自动反复请求');
+    expect(after.hasBlockingDecision, isTrue);
+    expect(after.requestRevision, before.requestRevision);
+    expect(after.decisions.last['id'], isNot(pending['id']));
+    expect(
+        after.decisions.where((d) => d['id'] == pending['id']).single['status'],
+        'answered');
+  }, timeout: const Timeout(Duration(seconds: 30)));
+
+  for (final scenario in [
+    'read-only',
+    'stale-receipt',
+    'parts-only',
+    'same-content',
+    'baseline-unchanged',
+    'changed',
+    'tool-write'
+  ]) {
+    test('群制作完成必须有本工作项交付文件变更：$scenario', () async {
+      if (scenario == 'changed') db = _ReviewFixtureDatabase(dir);
+      await db.agentTaskBox.put(task.id, task);
+      await modelRunner((member, context) async {
+        final state = context['collaboration'] as Map<String, dynamic>;
+        if ((state['plan'] as String).isNotEmpty) {
+          return _turn('approve', approval: approval(state));
+        }
+        final next = proposal(state);
+        next['workItems'] = [
+          {
+            'id': 'implementation',
+            'ownerId': 'dev',
+            'kind': 'produce',
+            'dependencies': <String>[]
+          },
+          {
+            'id': 'material',
+            'ownerId': 'dev',
+            'kind': 'material',
+            'dependencies': ['implementation']
+          },
+        ];
+        next['artifactContract'] = {
+          ...state['artifactContract'] as Map,
+          'files': ['game.html'],
+          'verificationCommands': [
+            jsonEncode({'executable': 'true', 'arguments': <String>[]})
+          ]
+        };
+        return _turn('propose', proposal: next);
+      }).runCollaboration(task, WorkTaskCancellation(), apply);
+      final workspace = db.workModeWorkspaceBox.get(task.groupId)!.workDirPath;
+      final output = File('$workspace/game.html');
+      if (scenario == 'baseline-unchanged') {
+        await output.writeAsString('<html><body>实际内容</body></html>');
+      }
+      expect(await execution.prepareCollaborationWork(task), isTrue,
+          reason: task.lastError);
+      await output.writeAsString('<html><body>实际内容</body></html>');
+      final fragment = File('$workspace/part.html');
+      await fragment.writeAsString('仅分段');
+      task.lastArtifactPaths = [output.path];
+      final root = jsonDecode(task.executionStateJson) as Map<String, dynamic>;
+      final digest = sha256.convert(await output.readAsBytes()).toString();
+      root['artifactChanges'] = {
+        output.path: {'changed': true}
+      };
+      if (scenario != 'read-only' && scenario != 'tool-write') {
+        root['productionChanges'] = {
+          'binding': {
+            ...root['workItemExecution'] as Map,
+            if (scenario == 'stale-receipt') 'requestRevision': 0
+          },
+          'paths': {
+            scenario == 'parts-only' ? fragment.path : output.path: {
+              'changed': true,
+              'beforeSha256':
+                  scenario == 'same-content' ? digest : 'old-digest',
+              if (scenario != 'parts-only') 'afterSha256': digest,
+            }
+          }
+        };
+      }
+      task.executionStateJson = jsonEncode(root);
+      if (scenario == 'changed') {
+        expect(await execution.prepareCollaborationWork(task), isTrue);
+        final restored = jsonDecode(task.executionStateJson) as Map;
+        expect(restored['productionBaseline'], root['productionBaseline'],
+            reason: '恢复不能重设开工摘要');
+      }
+      final finish = jsonEncode(AgentFinishDecision(
+          publicUpdate: '已完成优化。',
+          completion: AgentFinishCompletion(
+              summary: '已完成优化。', evidence: [output.path])).toJson());
+      final patch = jsonEncode(AgentToolDecision(
+          publicUpdate: '实际修订目标文件。',
+          tool: AgentToolCall(name: AgentToolName.workspacePatch, arguments: {
+            'path': output.path,
+            'content': '<html><body>工具真实修改</body></html>',
+            'overwrite': true,
+          })).toJson());
+      if (scenario == 'tool-write') {
+        task.requestedPermissions = [
+          ToolPermission.workspaceRead,
+          ToolPermission.workspacePatch
+        ];
+        final actor = db.aiCharacterBox.get('dev')!;
+        actor.toolPermissions = [
+          ToolPermission.workspaceRead,
+          ToolPermission.workspacePatch
+        ];
+        await db.aiCharacterBox.put(actor.id, actor);
+      }
+      final client = _MaterialFinishClient(
+          [scenario == 'tool-write' ? patch : finish, finish]);
+      final runner = DefaultWorkTaskRunner(
+          database: db,
+          eventStore: events,
+          credentials: _Credentials(),
+          gateway:
+              AiRequestGateway(store: MemoryGovernanceStore(), client: client),
+          workspaceService: execution.workspaceService,
+          folderGrantService: execution.folderGrantService,
+          workspaceFileService: execution.workspaceFileService,
+          mutationService: scenario == 'tool-write'
+              ? WorkspaceMutationService(
+                  pathPolicy: execution.workspaceFileService!.pathPolicy,
+                  snapshotPort: WorkSnapshotService(
+                      appSupportDirectory: Directory('${dir.path}/snapshots'),
+                      pathPolicy: execution.workspaceFileService!.pathPolicy))
+              : execution.mutationService);
+      await runner.run(task, WorkTaskCancellation());
+      if (scenario == 'tool-write') {
+        expect(task.status, AgentTaskStatus.waitingForApproval);
+        final checkpoint = jsonDecode(task.executionStateJson) as Map;
+        task.executionStateJson =
+            jsonEncode({...checkpoint, 'approvalDecision': 'approved'});
+        task.status = AgentTaskStatus.queued;
+        await runner.run(task, WorkTaskCancellation());
+      }
+      final state =
+          WorkDiscussionState.fromExecutionState(task.executionStateJson)!
+              .collaboration!;
+      expect(state.workItems.first['status'],
+          {'changed', 'tool-write'}.contains(scenario) ? 'done' : 'active',
+          reason: task.lastError);
+      if (!{'changed', 'tool-write'}.contains(scenario)) {
+        expect(task.lastError, contains('本轮制作没有可核验的交付文件变更'));
+        expect(state.iterations, isEmpty);
+      }
+      expect(
+          await output.readAsString(),
+          scenario == 'tool-write'
+              ? '<html><body>工具真实修改</body></html>'
+              : '<html><body>实际内容</body></html>');
+      if (scenario == 'changed') {
+        expect(await runner.prepareCollaborationWork(task), isTrue,
+            reason: task.lastError);
+        await runner.run(task, WorkTaskCancellation());
+        expect(await runner.prepareCollaborationWork(task), isFalse,
+            reason: '冻结后先等用户确认是否继续测试');
+        WorkTaskCompletionChoice.setChoice(task, 'test');
+        expect(await runner.prepareCollaborationWork(task), isTrue,
+            reason: task.lastError);
+        final before =
+            WorkDiscussionState.fromExecutionState(task.executionStateJson)!
+                .collaboration!;
+        final binding =
+            (jsonDecode(task.executionStateJson) as Map)['workItemExecution'];
+        expect(binding['stage'], 'verify');
+        final failing = DefaultWorkTaskRunner(
+            database: db,
+            eventStore: events,
+            credentials: _Credentials(),
+            gateway: AiRequestGateway(
+                store: MemoryGovernanceStore(),
+                client: _MaterialFinishClient([],
+                    modelError: TimeoutException('timeout'))),
+            workspaceService: execution.workspaceService,
+            folderGrantService: execution.folderGrantService,
+            workspaceFileService: execution.workspaceFileService,
+            mutationService: execution.mutationService);
+        task.status = AgentTaskStatus.queued;
+        task.executionStateJson =
+            workWithoutArtifactDeliveryNotice(task.executionStateJson);
+        await failing.run(task, WorkTaskCancellation());
+        final after =
+            WorkDiscussionState.fromExecutionState(task.executionStateJson)!
+                .collaboration!;
+        expect(task.status, AgentTaskStatus.failed,
+            reason:
+                '${task.lastError} ${jsonEncode(after.decisions)} ${(await events.read(task.id)).events.map((e) => e.title).toList()}');
+        expect(after.requestRevision, before.requestRevision);
+        expect(after.decisions, before.decisions,
+            reason: '模型超时不能新建人工验收决策或改变需求');
+        expect(after.iterations, before.iterations);
+        expect(
+            (jsonDecode(task.executionStateJson) as Map)['workItemExecution'],
+            binding);
+      }
+    }, timeout: const Timeout(Duration(seconds: 30)));
+  }
+
+  test('群讨论收到 done 后不等待仍未关闭的流', () async {
+    final client = _ModelClient((_, __) async => _turn('respond'),
+        streamOverride: (token) {
+      final stream = StreamController<ChatStreamEvent>();
+      stream.add(ChatStreamEvent(
+          type: ChatStreamEventType.done,
+          content: _turn('silent')['message'] as String));
+      stream.onCancel = () {
+        unawaited(stream.close());
+      };
+      return stream.stream;
+    });
+    final runner = WorkDiscussionRunner(
+        database: db,
+        credentials: _Credentials(),
+        eventStore: events,
+        roleTimeout: const Duration(milliseconds: 100),
+        gateway:
+            AiRequestGateway(store: MemoryGovernanceStore(), client: client));
+    await runner.runCollaboration(task, WorkTaskCancellation(), apply);
+    final state =
+        WorkDiscussionState.fromExecutionState(task.executionStateJson)!
+            .collaboration!;
+    expect(
+        state.decisions.any((d) =>
+            (d['evidence'] as String).contains('modelCompletionTimeout')),
+        isFalse);
+  }, timeout: const Timeout(Duration(seconds: 30)));
+
+  for (final failure in [
+    'incomplete',
+    'timeout',
+    'oversized',
+    'first-byte',
+    'activity-timeout'
+  ]) {
+    test('群讨论流式响应失败保留状态并有界暂停：$failure', () async {
+      final client = _ModelClient((_, __) async => _turn('respond'),
+          reportActivity: failure == 'activity-timeout',
+          streamOverride: (token) async* {
+        if (failure != 'first-byte' && failure != 'activity-timeout') {
+          yield ChatStreamEvent.token(failure == 'oversized'
+              ? 'x' * (WorkDiscussionRunner.maxResponseBytes + 1)
+              : _turn('propose',
+                  proposal: proposal(WorkDiscussionState.fromExecutionState(
+                          task.executionStateJson)!
+                      .collaboration!
+                      .toPromptJson()))['message'] as String);
+        }
+        if (failure == 'timeout' ||
+            failure == 'first-byte' ||
+            failure == 'activity-timeout') {
+          await token!.whenCancel;
+        }
+      });
+      final runner = WorkDiscussionRunner(
+          database: db,
+          credentials: _Credentials(),
+          eventStore: events,
+          roleTimeout: const Duration(milliseconds: 100),
+          firstByteTimeout:
+              failure == 'first-byte' || failure == 'activity-timeout'
+                  ? const Duration(milliseconds: 20)
+                  : const Duration(seconds: 180),
+          gateway:
+              AiRequestGateway(store: MemoryGovernanceStore(), client: client));
+      await runner.runCollaboration(task, WorkTaskCancellation(), apply);
+      final state =
+          WorkDiscussionState.fromExecutionState(task.executionStateJson)!
+              .collaboration!;
+      expect(state.plan, isEmpty, reason: '无 done 的合法 JSON 也不能采纳');
+      expect(state.hasBlockingDecision, isTrue);
+      expect(state.decisions.last['kind'], 'member');
+      if (failure == 'activity-timeout') {
+        expect(state.decisions.last['reason'], contains('已收到模型生成活动'));
+        expect(state.decisions.last['evidence'],
+            contains('responseActivityCount=1'));
+        expect(state.decisions.last['evidence'],
+            contains('lastResponseActivityMs='));
+      }
+      expect(
+          state.decisions.where((d) => d['status'] == 'pending'), hasLength(1));
+      expect(
+          state.decisions.last['evidence'],
+          contains(failure == 'first-byte'
+              ? 'modelFirstByteStall'
+              : failure == 'timeout' || failure == 'activity-timeout'
+                  ? 'modelCompletionTimeout'
+                  : failure == 'oversized'
+                      ? 'responseTooLarge'
+                      : 'incompleteStream'));
+    }, timeout: const Timeout(Duration(seconds: 30)));
+  }
+
+  test('重复合法空转发言不能清除此前协议失败计数', () async {
+    var requests = 0;
+    await modelRunner((member, context) async {
+      if (context.containsKey('protocolError')) {
+        return {'success': true, 'message': '{broken'};
+      }
+      requests++;
+      if (requests.isEven) return _turn('respond', text: '仍按原方案等待修订。');
+      return {'success': true, 'message': '{broken'};
+    }).runCollaboration(task, WorkTaskCancellation(), apply);
+    final state =
+        WorkDiscussionState.fromExecutionState(task.executionStateJson)!
+            .collaboration!;
+    expect(state.hasBlockingDecision, isTrue);
+    expect(state.decisions.last['kind'], 'member');
+    expect(requests, lessThanOrEqualTo(5), reason: '夹杂重复合法发言仍须有界停止');
+  }, timeout: const Timeout(Duration(seconds: 30)));
+
+  test('字段修复不能改写其他方案字段且仍受完整协议校验', () {
+    final original = _turn('propose', proposal: {
+      'plan': '原方案',
+      'workItems': [
+        {
+          'id': 'build',
+          'ownerId': 'dev',
+          'dependencies': [],
+          'status': 'pending'
+        }
+      ],
+      'artifactContract': {
+        'verificationCommands': ['原命令']
+      },
+    });
+    final repair = WorkDiscussionV2Turn.proposalFieldRepair(
+        original['message'] as String,
+        'proposal.workItems 只能包含 id、ownerId、dependencies、kind')!;
+    final merged = jsonDecode(WorkDiscussionV2Turn.mergeProposalFieldRepair(
+        repair,
+        jsonEncode({
+          'workItems': [
+            {'id': 'build', 'ownerId': 'dev', 'dependencies': []}
+          ]
+        }))) as Map;
+    expect(merged['proposal']['plan'], '原方案');
+    expect(merged['proposal']['artifactContract']['verificationCommands'],
+        ['原命令']);
+    expect(
+        () => WorkDiscussionV2Turn.mergeProposalFieldRepair(
+            repair, jsonEncode({'workItems': [], 'plan': '越权修改'})),
+        throwsFormatException);
+    expect(
+        WorkDiscussionV2Turn.parse(
+            {'success': true, 'message': jsonEncode(merged)}),
+        isNull,
+        reason: '字段合并不是校验豁免，残缺合同仍必须拒绝');
+    expect(
+        WorkDiscussionV2Turn.proposalFieldRepair('{', 'proposal.workItems 不合法'),
+        isNull);
+  });
+
+  for (final scenario in [
+    'missing-then-fix',
+    'outside-then-fix',
+    'always-missing'
+  ]) {
+    test('材料证据读取失败进入有界修复且不放宽路径权限：$scenario', () async {
+      await db.agentTaskBox.put(task.id, task);
+      await modelRunner((member, context) async {
+        final current = context['collaboration'] as Map<String, dynamic>;
+        if ((current['plan'] as String).isNotEmpty) {
+          return _turn('approve', approval: approval(current));
+        }
+        final next = proposal(current);
+        next['artifactContract'] = {
+          ...current['artifactContract'] as Map,
+          'files': ['game.html'],
+          'verificationCommands': [
+            jsonEncode({'executable': 'true', 'arguments': <String>[]})
+          ],
+        };
+        next['workItems'] = [
+          {
+            'id': 'material',
+            'ownerId': 'dev',
+            'kind': 'material',
+            'dependencies': <String>[]
+          },
+          {
+            'id': 'implementation',
+            'ownerId': 'dev',
+            'kind': 'produce',
+            'dependencies': ['material']
+          },
+        ];
+        return _turn('propose', proposal: next);
+      }).runCollaboration(task, WorkTaskCancellation(), apply);
+      final root = db.workModeWorkspaceBox.get(task.groupId)!.workDirPath;
+      final material = File('$root/docs/material.md');
+      await material.parent.create(recursive: true);
+      await material.writeAsString('已确认的需求、技术和测试材料。');
+      final outside = File('${dir.path}/outside.md');
+      await outside.writeAsString('未授权的文件不能作为材料证据。');
+      final prepared = await execution.prepareCollaborationWork(task);
+      expect(prepared, isTrue, reason: task.lastError);
+      String finish(String evidence) => jsonEncode(AgentFinishDecision(
+            publicUpdate: '材料已整理，提交本工作项完成证据。',
+            completion:
+                AgentFinishCompletion(summary: '材料阶段完成', evidence: [evidence]),
+          ).toJson());
+      final invalid =
+          scenario == 'outside-then-fix' ? outside.path : 'material.md';
+      final client = _MaterialFinishClient([
+        finish(invalid),
+        finish(scenario == 'always-missing' ? invalid : material.path),
+      ]);
+      final runner = DefaultWorkTaskRunner(
+        database: db,
+        eventStore: events,
+        credentials: _Credentials(),
+        gateway:
+            AiRequestGateway(store: MemoryGovernanceStore(), client: client),
+        workspaceService: execution.workspaceService,
+        folderGrantService: execution.folderGrantService,
+        workspaceFileService: execution.workspaceFileService,
+        mutationService: execution.mutationService,
+      );
+      await runner.run(task, WorkTaskCancellation());
+      final state =
+          WorkDiscussionState.fromExecutionState(task.executionStateJson)!
+              .collaboration!;
+      final failed = scenario == 'always-missing';
+      expect(
+          task.status, failed ? AgentTaskStatus.failed : AgentTaskStatus.queued,
+          reason: task.lastError);
+      expect(state.workItems.first['status'], failed ? 'active' : 'done');
+      expect(state.workItems.last['status'], 'pending');
+      expect(state.iterations, isEmpty);
+      final history = (await events.read(task.id)).events;
+      expect(history.any((event) => event.title == '完成校验未通过，正在根据校验结果自动修复。'),
+          isTrue);
+      expect(
+          jsonEncode(client.capturedMessages), contains('completion.evidence'));
+      final prompt = jsonEncode(client.capturedMessages);
+      expect(prompt, contains('材料文件完整路径数组'));
+      expect(prompt, contains('不运行最终 HTML 的校验命令'));
+      expect(prompt, contains('不能只改分段又反复读取未更新的旧合并版'));
+      expect(prompt, contains('审批恢复后先根据真实写入记录'));
+      expect(prompt, isNot(contains('verify 工作项须实际读取或执行验证')));
+      expect(client.modelCalls, lessThanOrEqualTo(3));
+      expect(await material.readAsString(), '已确认的需求、技术和测试材料。');
+      expect(await outside.readAsString(), '未授权的文件不能作为材料证据。');
+      if (scenario == 'missing-then-fix') {
+        expect(await execution.prepareCollaborationWork(task), isTrue);
+        final stopForInspection = jsonEncode(const AgentClarifyDecision(
+          publicUpdate: '测试夹具暂停以检查实现阶段提示。',
+          completion: AgentClarifyCompletion(question: '检查本轮提示后继续？'),
+        ).toJson());
+        client.replies
+          ..clear()
+          ..addAll([stopForInspection, stopForInspection]);
+        client.modelCalls = 0;
+        client.capturedMessages.clear();
+        await runner.run(task, WorkTaskCancellation());
+        final producePrompt = jsonEncode(client.capturedMessages);
+        expect(producePrompt, contains('当前按已确认合同制作交付文件'));
+        expect(producePrompt, contains('审批恢复后先根据真实写入记录'));
+        expect(producePrompt, contains('不再换名重写 head/style'));
+        expect(producePrompt, contains('append:true 仅追加尚不存在的后续内容'));
+        expect(producePrompt,
+            contains('expectedSha256、expectedFragment、replacement 精确替换'));
+        expect(producePrompt, contains('append:false、overwrite:true'));
+        expect(producePrompt, contains('truncated:true 只代表本次读取被截断'));
+        expect(producePrompt, contains('每段不超过 6000 字节'));
+        expect(producePrompt, contains('这里的 finish 只提交候选'));
+        expect(producePrompt, contains('不支持键盘或输入框填值'));
+        expect(producePrompt, contains('不能只用快捷键'));
+        expect(producePrompt, contains('不换名创建尾部/结构/最终检查脚本'));
+        expect(producePrompt, contains('文件变化后的旧结果不授权新文件'));
+        expect(producePrompt, isNot(contains('当前仅制作需求/技术/测试工作材料')));
+        expect(await material.readAsString(), '已确认的需求、技术和测试材料。');
+      }
+    }, timeout: const Timeout(Duration(seconds: 30)));
+  }
+
+  test('相同的 idea 无效解决项不会被新增问题掩盖并重复重试', () async {
+    final discussion =
+        WorkDiscussionState.fromExecutionState(task.executionStateJson)!;
+    final current = discussion.collaboration!;
+    final next = WorkCollaborationState.tryParse(current.toJson()
+      ..['revision'] = current.revision + 1
+      ..['issues'] = [
+        {
+          'id': 'cap-browser-context',
+          'sourceId': 'dev',
+          'kind': 'idea',
+          'status': 'open',
+          'target': 'testing',
+          'problem': '独立测试需要获准的浏览器能力。',
+          'evidenceRef': 'existing-capability-evidence',
+          'resolution': '',
+          'resolutionRef': '',
+          'retestCondition': '测试成员实际操作当前候选。',
+          'requestRevision': current.requestRevision,
+        }
+      ]);
+    expect(next, isNotNull);
+    task.executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
+      task.executionStateJson,
+      discussion.copyWith(collaboration: next),
+      expectedCollaborationRevision: current.revision,
+    );
+
+    var calls = 0;
+    var repairCalls = 0;
+    String? repairError;
+    await modelRunner((member, context) async {
+      if (context.containsKey('protocolError')) {
+        repairCalls++;
+        repairError = context['protocolError'] as String?;
+        return _turn('respond', text: '只为修复解决项却引入了新问题。', issues: [
+          {
+            'id': 'introduced-by-repair-$repairCalls',
+            'kind': 'defect',
+            'target': 'workflow',
+            'problem': '定向修复不能引入的新问题。',
+            'evidenceRef': '',
+            'retestCondition': '核对修复只改解决项。'
+          }
+        ], resolutions: [
+          {
+            'id': 'cap-browser-context',
+            'resolution': '测试能力已经准备好。',
+            'evidenceRef': 'existing-capability-evidence',
+          }
+        ]);
+      }
+      calls++;
+      final response = _turn('respond', text: '记录一项新的待处理问题。', issues: [
+        {
+          'id': 'unrelated-$calls',
+          'kind': 'defect',
+          'target': 'workflow-$calls',
+          'problem': '本轮发现的独立问题 $calls。',
+          'evidenceRef': '',
+          'retestCondition': '检查独立问题 $calls 是否得到处理。'
+        }
+      ], resolutions: [
+        {
+          'id': 'cap-browser-context',
+          'resolution': '测试能力已经准备好。',
+          'evidenceRef': 'existing-capability-evidence',
+        }
+      ]);
+      final body = jsonDecode(response['message'] as String) as Map;
+      body['next_member_id'] = member.id;
+      response['message'] = jsonEncode(body);
+      return response;
+    }).runCollaboration(task, WorkTaskCancellation(), apply);
+
+    final state =
+        WorkDiscussionState.fromExecutionState(task.executionStateJson)!
+            .collaboration!;
+    expect(calls, 2);
+    expect(repairCalls, 2);
+    expect(repairError, contains('resolutions[0].id'));
+    expect(repairError, contains('方案提案'));
+    expect(
+      state.issues
+          .where((issue) => issue['id'] == 'cap-browser-context')
+          .single['status'],
+      'open',
+    );
+    expect(
+      state.issues
+          .where((issue) => issue['id'].toString().startsWith('unrelated-')),
+      hasLength(2),
+      reason: '各自合法的新问题仍应保留，不能为停止重试而丢弃证据',
+    );
+    expect(state.hasBlockingDecision, isTrue);
+    expect(state.decisions.last['kind'], 'member');
+    expect(state.decisions.last['reason'], contains('同一项解决项校验错误连续出现'));
+    expect(state.decisions.last['evidence'], contains('resolutions[0].id'));
+    expect(
+      (await events.read(task.id))
+          .events
+          .any((event) => event.title == '定向修复越界'),
+      isTrue,
+      reason: '定向修复不能夹带新的问题或改写其它协作字段。',
+    );
+  }, timeout: const Timeout(Duration(seconds: 30)));
+
+  test('重复的无效解决依据两轮后进入成员恢复决策', () async {
+    final discussion =
+        WorkDiscussionState.fromExecutionState(task.executionStateJson)!;
+    final current = discussion.collaboration!;
+    final next = WorkCollaborationState.tryParse(current.toJson()
+      ..['revision'] = current.revision + 1
+      ..['issues'] = [
+        {
+          'id': 'ISS-BAD-REF',
+          'sourceId': 'dev',
+          'kind': 'defect',
+          'status': 'open',
+          'target': 'dev',
+          'problem': '解决问题引用了不存在的证据。',
+          'evidenceRef': 'existing-defect-evidence',
+          'resolution': '',
+          'resolutionRef': '',
+          'retestCondition': '使用当前真实证据重新提交解决项。',
+          'requestRevision': current.requestRevision,
+        }
+      ]);
+    expect(next, isNotNull);
+    task.executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
+      task.executionStateJson,
+      discussion.copyWith(collaboration: next),
+      expectedCollaborationRevision: current.revision,
+    );
+
+    var calls = 0;
+    var repairCalls = 0;
+    String? repairError;
+    await modelRunner((member, context) async {
+      if (context.containsKey('protocolError')) {
+        repairCalls++;
+        repairError = context['protocolError'] as String?;
+      } else {
+        calls++;
+      }
+      return _turn('respond', text: '按现有信息重新处理该问题。', resolutions: [
+        {
+          'id': 'ISS-BAD-REF',
+          'resolution': '问题已经解决。',
+          'evidenceRef': 'missing-evidence-reference',
+        }
+      ]);
+    }).runCollaboration(task, WorkTaskCancellation(), apply);
+
+    final state =
+        WorkDiscussionState.fromExecutionState(task.executionStateJson)!
+            .collaboration!;
+    expect(calls, 2);
+    expect(repairCalls, 2, reason: '每轮无效证据只允许一次定向修复。');
+    expect(repairError, contains('resolutions[0].evidenceRef'));
+    expect(repairError, contains('解决依据不存在'));
+    expect(state.issues.single['status'], 'open');
+    expect(state.hasBlockingDecision, isTrue);
+    expect(state.decisions.last['kind'], 'member');
+    expect(state.decisions.last['evidence'],
+        contains('resolutions[0].evidenceRef'));
+    expect(
+      db.messageBox.values.any((message) =>
+          message.groupId == task.groupId &&
+          message.content.contains('【未采纳】') &&
+          message.content.contains('resolutions[0].evidenceRef')),
+      isTrue,
+      reason: '失败的状态更新必须在群内明确标出未采纳字段。',
+    );
+  }, timeout: const Timeout(Duration(seconds: 30)));
+
+  test('群聊搜索助手保留在群成员中，但不进入工作模式团队或模型名册', () async {
+    final membership =
+        await RoundtableNewsRoleService.ensureForGroup(db, task.groupId);
+    expect(membership, isNotNull);
+    await modelRunner((member, context) async {
+      return confirm(member, context);
+    }).runCollaboration(task, WorkTaskCancellation(), apply);
+
+    final currentGroup = db.chatGroupBox.get(task.groupId)!;
+    final current =
+        WorkDiscussionState.fromExecutionState(task.executionStateJson)!
+            .collaboration!;
+    expect(currentGroup.aiCharacterIds, contains(roundtableNewsRoleId),
+        reason: '不改写用户的群成员配置');
+    expect(current.team.map((entry) => entry['memberId']),
+        isNot(contains(roundtableNewsRoleId)));
+    expect(current.participantIds, isNot(contains(roundtableNewsRoleId)));
+  });
+
+  test('无效的旧问题解决引用不吞掉有效解决项或同轮正式方案', () async {
+    await db.messageBox.put(
+      'resolution-evidence',
+      Message(
+        id: 'resolution-evidence',
+        groupId: task.groupId,
+        senderId: 'user',
+        senderType: 'user',
+        content: '用户确认可以关闭流程记录问题。',
+        timestamp: DateTime.now(),
+        visibleToCharacterIds: const ['dev'],
+      ),
+    );
+    var calls = 0;
+    var repaired = false;
+    var repairEvidenceListed = false;
+    var sawIssueBeforeProposal = false;
+    await modelRunner((member, context) async {
+      if (context.containsKey('protocolError')) {
+        repaired = true;
+        final available = (context['availableResolutionEvidence'] as List)
+            .cast<Map>()
+            .map((entry) => entry['ref'])
+            .toList();
+        repairEvidenceListed = available.contains('resolution-evidence');
+        final original = Map<String, dynamic>.from(
+            jsonDecode(context['originalFinal'] as String) as Map);
+        final resolutions = (original['resolutions'] as List)
+            .where((resolution) => resolution['id'] != 'deleted-old-issue')
+            .toList();
+        original['resolutions'] = resolutions;
+        return {'success': true, 'message': jsonEncode(original)};
+      }
+      if (calls == 0) {
+        calls++;
+        final response = _turn('respond', text: '记录一项需要收敛的流程问题。', issues: [
+          {
+            'id': 'valid-to-resolve',
+            'kind': 'decision',
+            'target': 'workflow',
+            'problem': '需要记录方案收敛流程',
+            'evidenceRef': '',
+            'retestCondition': '群内能看到正式方案状态'
+          }
+        ]);
+        final body = jsonDecode(response['message'] as String) as Map;
+        body['next_member_id'] =
+            (context['collaboration'] as Map)['coordinatorId'];
+        response['message'] = jsonEncode(body);
+        return response;
+      }
+      if (calls == 1) {
+        calls++;
+        final current =
+            WorkDiscussionState.fromExecutionState(task.executionStateJson)!
+                .collaboration!;
+        sawIssueBeforeProposal =
+            current.issues.any((issue) => issue['id'] == 'valid-to-resolve');
+        final response = _turn('propose',
+            text: '我已提交正式方案。',
+            proposal: proposal(
+                Map<String, dynamic>.from(context['collaboration'] as Map)),
+            resolutions: [
+              {
+                'id': 'valid-to-resolve',
+                'resolution': '已记录并解决',
+                'evidenceRef': 'resolution-evidence'
+              },
+              {
+                'id': 'deleted-old-issue',
+                'resolution': '已经修复',
+                'evidenceRef': 'missing-evidence'
+              }
+            ]);
+        return response;
+      }
+      return _turn('silent', text: '');
+    }).runCollaboration(task, WorkTaskCancellation(), apply);
+
+    final current =
+        WorkDiscussionState.fromExecutionState(task.executionStateJson)!
+            .collaboration!;
+    expect(sawIssueBeforeProposal, isTrue);
+    expect(repaired, isTrue, reason: '无效解决项应触发一次字段级修复。');
+    expect(repairEvidenceListed, isTrue, reason: '修复请求必须列出可核验的真实群消息引用。');
+    expect(current.plan, '按钮移动中禁用，工作项执行后再验收。');
+    expect(current.workItems.map((item) => item['id']),
+        containsAll(['implementation', 'test']));
+    expect(
+      current.issues
+          .singleWhere((issue) => issue['id'] == 'valid-to-resolve')['status'],
+      'resolved',
+    );
+    expect(
+      (await events.read(task.id))
+          .events
+          .any((event) => event.title == '解决项依据待修复'),
+      isTrue,
+      reason: '错误引用必须先触发一次有界字段修复。',
+    );
+  });
+
   test('v2 提示为本人提供接话对象、未决问题、职责和有效关系心情', () async {
     await db.relationshipStateBox.put(
       'p3-qa-dev',
@@ -105,6 +931,11 @@ void _registerDiscussionHistoryRegressions() {
   });
 
   test('协议按 stage 裁剪 approval 段，proposal 段任何 stage 都在', () {
+    final protocol = WorkDiscussionV2Turn.protocolFor('',
+        stage: WorkDiscussionStage.resolveIssue);
+    expect(protocol, contains('kind 为 defect 或 decision'));
+    expect(protocol, contains('kind=idea'));
+    expect(protocol, contains('不得原样重试被拒绝的 id'));
     for (final stage in WorkDiscussionStage.values) {
       final protocol = WorkDiscussionV2Turn.protocolFor('', stage: stage);
       // 审批轮登记 kind=idea 后提交关联 proposal 是文档化的合法路径（"已有方案
@@ -168,7 +999,7 @@ void _registerDiscussionHistoryRegressions() {
       stage: WorkDiscussionStage.prepareProposal,
       autonomous: true,
     );
-    final combined = '$protocol\n${WorkDiscussionProtocolText.autonomyRules}';
+    final combined = protocol;
     expect(
       combined,
       contains(
@@ -481,7 +1312,7 @@ void _registerDiscussionHistoryRegressions() {
         contains('JSON 整数'));
   });
 
-  test('verificationCommands 要求 command.run 的紧凑 JSON 字符串', () {
+  test('verificationCommands 规范化 JSON 表示但保留命令参数语义', () {
     final command = jsonEncode({
       'executable': 'node',
       'arguments': ['verify.js']
@@ -519,15 +1350,21 @@ void _registerDiscussionHistoryRegressions() {
       ],
     };
     String? reason;
+    final objectCommand = WorkDiscussionV2Turn.parse(
+      _turn('propose', proposal: proposal),
+      onInvalid: (value) => reason = value,
+    );
+    expect(objectCommand, isNotNull);
     expect(
-        WorkDiscussionV2Turn.parse(_turn('propose', proposal: proposal),
-            onInvalid: (value) => reason = value),
-        isNull);
-    expect(reason, contains('verificationCommands'));
+      (objectCommand!.proposal!['artifactContract']
+          as Map)['verificationCommands'],
+      [command],
+      reason: '仅规范化表示，不得改变命令内容',
+    );
     expect(
         WorkDiscussionV2Turn.protocolFor('',
             stage: WorkDiscussionStage.prepareProposal),
-        contains('紧凑 JSON 参数字符串'));
+        contains('JSON 空白与对象键顺序不影响命令含义'));
     expect(
         WorkDiscussionV2Turn.protocolFor('',
             stage: WorkDiscussionStage.prepareProposal),
@@ -563,6 +1400,45 @@ void _registerDiscussionHistoryRegressions() {
     ];
     expect(WorkDiscussionV2Turn.parse(_turn('propose', proposal: proposal)),
         isNotNull);
+
+    const equivalentJson =
+        ' { "arguments" : ["verify.js"], "executable" : "node" } ';
+    proposal['artifactContract'] = {
+      ...proposal['artifactContract'] as Map<String, dynamic>,
+      'verificationCommands': [equivalentJson],
+    };
+    final normalized = WorkDiscussionV2Turn.parse(
+      _turn('propose', proposal: proposal),
+    );
+    expect(normalized, isNotNull);
+    expect(
+      (normalized!.proposal!['artifactContract']
+          as Map)['verificationCommands'],
+      [command],
+    );
+
+    for (final invalidCommand in <Object>[
+      {
+        'executable': 'node',
+        'arguments': ['verify.js'],
+        'cwd': '/tmp'
+      },
+      {'executable': 'node', 'arguments': 'verify.js'},
+    ]) {
+      proposal['artifactContract'] = {
+        ...proposal['artifactContract'] as Map<String, dynamic>,
+        'verificationCommands': [invalidCommand],
+      };
+      reason = null;
+      expect(
+        WorkDiscussionV2Turn.parse(
+          _turn('propose', proposal: proposal),
+          onInvalid: (value) => reason = value,
+        ),
+        isNull,
+      );
+      expect(reason, contains('verificationCommands'));
+    }
   });
 
   test('公开正文的编号清单被计数，正常句子不算', () {
@@ -1359,6 +2235,9 @@ void _registerDiscussionHistoryRegressions() {
       final s = context['collaboration'] as Map;
       final focus = context['turnFocus'] as Map;
       final budget = context['outputGuidance'] as Map;
+      expect(context.keys.toList().indexOf('turnFocus'),
+          greaterThan(context.keys.toList().indexOf('collaboration')));
+      expect(context.keys.last, 'outputGuidance');
       expect(budget.containsKey('sharedMaxTokens'), isFalse);
       expect(budget.containsKey('preferredFinalTokens'), isFalse);
       expect(budget['instruction'], contains('不由客户端指定输出 token 上限'));
@@ -1367,6 +2246,8 @@ void _registerDiscussionHistoryRegressions() {
         expect(focus['stage'], 'prepareProposal');
       } else {
         expect(focus['stage'], 'reviewApproval');
+        expect(focus['objective'], contains('不复制完整方案'));
+        expect(focus['objective'], contains('有新证据时重开'));
         final identifiers = focus['approvalIdentifiers'] as Map;
         expect(identifiers['subjectId'], task.id);
         expect(identifiers['requestRevision'], s['requestRevision']);
@@ -1475,6 +2356,69 @@ void _registerDiscussionHistoryRegressions() {
         WorkDiscussionState.fromExecutionState(task.executionStateJson)!
             .isPlanReady,
         isTrue);
+  });
+  test('协议修复的消息证据也遵守已删除上下文分界线', () async {
+    final boundary = DateTime(2026, 1, 1, 12);
+    await db.messageBox.put(
+      'old-task-context',
+      Message(
+        id: 'old-task-context',
+        groupId: task.groupId,
+        senderId: 'user',
+        senderType: 'user',
+        content: 'OLD_DELETED_TASK_CONTEXT',
+        visibleToCharacterIds: const ['dev', 'qa'],
+        timestamp: boundary.subtract(const Duration(minutes: 1)),
+      ),
+    );
+    await db.messageBox.put(
+      'new-task-context',
+      Message(
+        id: 'new-task-context',
+        groupId: task.groupId,
+        senderId: 'user',
+        senderType: 'user',
+        content: 'AFTER_BOUNDARY_CONTEXT',
+        visibleToCharacterIds: const ['dev', 'qa'],
+        timestamp: boundary.add(const Duration(minutes: 1)),
+      ),
+    );
+    await WorkContextBoundary.advance(
+        db.appSettingsBox, task.groupId, boundary);
+
+    final repairContexts = <Map<String, dynamic>>[];
+    var wrappedMalformedReply = false;
+    await modelRunner((member, context) async {
+      if (context.containsKey('originalFinal')) {
+        repairContexts.add(context);
+        return confirm(member, context);
+      }
+      final response = await confirm(member, context);
+      if (wrappedMalformedReply) return response;
+      wrappedMalformedReply = true;
+      final malformedReply = response['message'] as String;
+      return {'success': true, 'message': '```json\n$malformedReply\n```'};
+    }).runCollaboration(task, WorkTaskCancellation(), apply);
+
+    expect(repairContexts, isNotEmpty);
+    final evidence =
+        repairContexts.first['availableResolutionEvidence'] as List;
+    expect(
+      evidence.any((item) =>
+          (item as Map)['preview']
+              ?.toString()
+              .contains('OLD_DELETED_TASK_CONTEXT') ==
+          true),
+      isFalse,
+    );
+    expect(
+      evidence.any((item) =>
+          (item as Map)['preview']
+              ?.toString()
+              .contains('AFTER_BOUNDARY_CONTEXT') ==
+          true),
+      isTrue,
+    );
   });
   test('SenseNova 6.8 讨论请求不再单独抬高采样温度，模型身份不变', () async {
     // 2026-10-10 改：原先该模型走 temperature 1.0（"官方通用思考采样"）。实测群
@@ -1622,6 +2566,158 @@ void _registerDiscussionHistoryRegressions() {
     expect(state.artifactContract['location'], 'game.html');
     expect(state.planReady, isTrue);
   });
+  test('方案不能把需求确认卡中的嵌套 HTML 文件改成 index.html', () async {
+    const outputRoot = '/Users/fengye/Desktop/chat_group_out';
+    const requestedScope =
+        '请在 /Users/fengye/Desktop/chat_group_out 下创建一个飞行棋的目录，'
+        '里面放着一份飞行棋的html';
+    final root = jsonDecode(task.executionStateJson) as Map<String, dynamic>;
+    final discussion = Map<String, dynamic>.from(
+      root[WorkDiscussionState.jsonKey] as Map,
+    );
+    discussion['deliverableContract'] = {
+      ...discussion['deliverableContract'] as Map,
+      'location': outputRoot,
+    };
+    final collaboration = Map<String, dynamic>.from(
+      discussion['collaboration'] as Map,
+    );
+    collaboration['scope'] = requestedScope;
+    collaboration['artifactContract'] = {
+      ...collaboration['artifactContract'] as Map,
+      'location': 'unspecified',
+    };
+    discussion['collaboration'] = collaboration;
+    root[WorkDiscussionState.jsonKey] = discussion;
+    task.executionStateJson = jsonEncode(root);
+
+    var rejected = false;
+    String? rejection;
+    await modelRunner((member, context) async {
+      final current =
+          Map<String, dynamic>.from(context['collaboration'] as Map);
+      if ((current['plan'] as String).isEmpty && !rejected) {
+        rejected = true;
+        final wrong = proposal(current);
+        wrong['artifactContract'] = {
+          ...current['artifactContract'] as Map,
+          'location': '$outputRoot/飞行棋',
+          'files': ['index.html'],
+        };
+        return _turn('propose', proposal: wrong);
+      }
+      if (rejected && rejection == null) {
+        rejection = context['lastValidationError'] as String?;
+      }
+      if ((current['plan'] as String).isEmpty) {
+        final corrected = proposal(current);
+        corrected['artifactContract'] = {
+          ...current['artifactContract'] as Map,
+          'location': '$outputRoot/飞行棋',
+          'files': ['飞行棋.html'],
+        };
+        return _turn('propose', proposal: corrected);
+      }
+      return _turn('approve', approval: approval(current));
+    }).runCollaboration(task, WorkTaskCancellation(), apply);
+
+    expect(rejected, isTrue);
+    expect(rejection, contains('artifactContract.files'));
+    final state =
+        WorkDiscussionState.fromExecutionState(task.executionStateJson)!
+            .collaboration!;
+    expect(state.planReady, isTrue);
+    expect(state.artifactContract['location'], '$outputRoot/飞行棋');
+    expect(state.artifactContract['files'], ['飞行棋.html']);
+  }, timeout: const Timeout(Duration(seconds: 30)));
+  test('桌面路径别名保留需求确认卡指定的嵌套 HTML 路径', () async {
+    const requestedScope = '请在桌面创建一个飞行棋的目录，里面放着一份飞行棋的html';
+    final root = jsonDecode(task.executionStateJson) as Map<String, dynamic>;
+    final discussion = Map<String, dynamic>.from(
+      root[WorkDiscussionState.jsonKey] as Map,
+    );
+    discussion['deliverableContract'] = {
+      ...discussion['deliverableContract'] as Map,
+      'location': 'desktop',
+    };
+    final collaboration = Map<String, dynamic>.from(
+      discussion['collaboration'] as Map,
+    )..['scope'] = requestedScope;
+    collaboration['artifactContract'] = {
+      ...collaboration['artifactContract'] as Map,
+      'location': 'unspecified',
+    };
+    discussion['collaboration'] = collaboration;
+    root[WorkDiscussionState.jsonKey] = discussion;
+    task.executionStateJson = jsonEncode(root);
+
+    await modelRunner((member, context) async {
+      final current =
+          Map<String, dynamic>.from(context['collaboration'] as Map);
+      if ((current['plan'] as String).isEmpty) {
+        final corrected = proposal(current);
+        corrected['artifactContract'] = {
+          ...current['artifactContract'] as Map,
+          'location': 'desktop',
+          'files': ['飞行棋/飞行棋.html'],
+        };
+        return _turn('propose', proposal: corrected);
+      }
+      return _turn('approve', approval: approval(current));
+    }).runCollaboration(task, WorkTaskCancellation(), apply);
+
+    final state =
+        WorkDiscussionState.fromExecutionState(task.executionStateJson)!
+            .collaboration!;
+    expect(state.planReady, isTrue);
+    expect(state.artifactContract['location'], 'desktop');
+    expect(state.artifactContract['files'], ['飞行棋/飞行棋.html']);
+  }, timeout: const Timeout(Duration(seconds: 30)));
+  test('桌面绝对路径与需求确认卡中的嵌套 HTML 路径一致', () async {
+    const requestedScope = '请在桌面创建一个飞行棋的目录，里面放着一份飞行棋的html';
+    final desktopRoot =
+        const WorkModeDirectoryService().requestedDesktopPath(requestedScope)!;
+    final root = jsonDecode(task.executionStateJson) as Map<String, dynamic>;
+    final discussion = Map<String, dynamic>.from(
+      root[WorkDiscussionState.jsonKey] as Map,
+    );
+    discussion['deliverableContract'] = {
+      ...discussion['deliverableContract'] as Map,
+      'location': 'desktop',
+    };
+    final collaboration = Map<String, dynamic>.from(
+      discussion['collaboration'] as Map,
+    )..['scope'] = requestedScope;
+    collaboration['artifactContract'] = {
+      ...collaboration['artifactContract'] as Map,
+      'location': 'unspecified',
+    };
+    discussion['collaboration'] = collaboration;
+    root[WorkDiscussionState.jsonKey] = discussion;
+    task.executionStateJson = jsonEncode(root);
+
+    await modelRunner((member, context) async {
+      final current =
+          Map<String, dynamic>.from(context['collaboration'] as Map);
+      if ((current['plan'] as String).isEmpty) {
+        final corrected = proposal(current);
+        corrected['artifactContract'] = {
+          ...current['artifactContract'] as Map,
+          'location': '$desktopRoot/飞行棋',
+          'files': ['飞行棋.html'],
+        };
+        return _turn('propose', proposal: corrected);
+      }
+      return _turn('approve', approval: approval(current));
+    }).runCollaboration(task, WorkTaskCancellation(), apply);
+
+    final state =
+        WorkDiscussionState.fromExecutionState(task.executionStateJson)!
+            .collaboration!;
+    expect(state.planReady, isTrue);
+    expect(state.artifactContract['location'], '$desktopRoot/飞行棋');
+    expect(state.artifactContract['files'], ['飞行棋.html']);
+  }, timeout: const Timeout(Duration(seconds: 30)));
   // `calls` can only come back as 0 when `runCollaboration` returns before its
   // first turn, and which early return fired is not visible in the count: a
   // changed project binding, a blocking decision or pending input already on
@@ -1665,7 +2761,8 @@ void _registerDiscussionHistoryRegressions() {
     'empty-exhausted',
     'empty-budget'
   ]) {
-    test('v2 transport recovery keeps member and model: $failure', () async {
+    test('v2 transport failure does not replay the member request: $failure',
+        () async {
       var calls = 0;
       CancelToken? previous;
       final cancellation = WorkTaskCancellation();
@@ -1734,21 +2831,8 @@ void _registerDiscussionHistoryRegressions() {
                     as Map<String, dynamic>);
           });
       await runner.runCollaboration(task, cancellation, apply);
-      final recovered =
-          failure == '429' || failure == 'timeout' || failure == 'empty';
-      expect(
-          calls,
-          recovered
-              ? greaterThan(1)
-              : failure == 'exhausted'
-                  ? 5
-                  : failure == 'empty-exhausted'
-                      ? 2
-                      // 预算被推理吃光：首次 + 一次精简指令重试（换指令而非原样重发），
-                      // 再耗尽就如实记为成员缺口。
-                      : failure == 'empty-budget'
-                          ? 2
-                          : 1,
+      final targetedCompactRetry = failure == 'empty-budget';
+      expect(calls, targetedCompactRetry ? 2 : 1,
           reason: calls == 0 ? stopReason(task) : null);
       for (final record in callRecords) {
         expect(record.modelName, record.configuredModelName,
@@ -1764,8 +2848,8 @@ void _registerDiscussionHistoryRegressions() {
       final state =
           WorkDiscussionState.fromExecutionState(task.executionStateJson)!
               .collaboration!;
-      expect(state.planReady, recovered);
-      if (!recovered) expect(state.approvals, isEmpty);
+      expect(state.planReady, isFalse);
+      expect(state.approvals, isEmpty);
       expect(state.team.any((m) => m['memberId'] == 'dev'), true);
       if (failure == 'cancel') {
         expect(state.team.every((m) => m['available'] == true), true);

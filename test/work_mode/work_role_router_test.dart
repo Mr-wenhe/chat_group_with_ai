@@ -189,6 +189,48 @@ void main() {
     expect(result.confidence, greaterThan(0.9));
   });
 
+  test('work task mention stops at a known name before a Chinese locative',
+      () async {
+    final programmer = _character('programmer', '程序媛', '前端工程师');
+    const request = '大家讨论差不多了，现在需要大家决定最终方案，最终由'
+        '@程序媛在我的 /Users/fengye/Desktop/chat_group_out 这个目录中创建一个飞行棋的目录，'
+        '里面放着一份飞行棋的html';
+    final result = await router.route(
+      request: request,
+      conversationId: 'group:adjacent-chinese-locative-mention',
+      characters: [programmer, tester],
+      skills: [
+        _skill('programmer-frontend', programmer.id, 'frontend'),
+        _skill('tester-testing', tester.id, 'testing'),
+      ],
+    );
+
+    expect(result.isSuccess, isTrue, reason: result.publicReason);
+    expect(result.characterId, programmer.id);
+    expect(result.unknownMentionNames, isEmpty);
+    expect(result.deliverableContract?.format, 'html');
+    expect(result.deliverableContract?.location,
+        '/Users/fengye/Desktop/chat_group_out');
+  });
+
+  test('team selection uses the same Chinese locative mention boundary', () {
+    final programmer = _character('programmer', '程序媛', '前端工程师');
+    const request = '最终由@程序媛在我的 /Users/fengye/Desktop/chat_group_out '
+        '这个目录中创建一个飞行棋的目录，里面放着一份飞行棋的html';
+    final result = WorkRoleRouter.selectTeam(
+      request: request,
+      characters: [programmer, tester],
+      skills: [
+        _skill('programmer-frontend', programmer.id, 'frontend'),
+        _skill('tester-testing', tester.id, 'testing'),
+      ],
+    );
+
+    expect(result.errors.where((error) => error.contains('程序媛在我的')), isEmpty);
+    expect(result.team.map((member) => member['memberId']),
+        contains(programmer.id));
+  });
+
   test('new route contracts start at revision one by default', () async {
     final result = await router.route(
       request: '@all 讨论并确定最终方案',
@@ -1199,7 +1241,7 @@ void main() {
     }
   });
 
-  test('目录型路径不再把 location 误判成 desktop', () async {
+  test('显式输出目录保留完整绝对路径而非误判为 desktop', () async {
     final result = await router.route(
       request: '@小产 在 /Users/fengye/Desktop/chat_group_out 这个文件夹中创建一个目录，'
           '目录中的内容生成一份 飞行棋游戏的HTML',
@@ -1207,8 +1249,20 @@ void main() {
       characters: characters,
       skills: skills,
     );
-    expect(result.deliverableContract?.location, 'unspecified',
-        reason: '路径片段里的 Desktop 是目录名，不是"放到桌面"');
+    expect(result.deliverableContract?.location,
+        '/Users/fengye/Desktop/chat_group_out',
+        reason: '保留明确输出目录，路径中的 Desktop 不等于桌面位置词');
+  });
+
+  test('读取输入目录后在其他位置生成文件不会把输入路径当输出目录', () async {
+    final result = await router.route(
+      request: '@小产 读取 /Users/fengye/Desktop/source 这个目录，'
+          '然后生成飞行棋 HTML 并保存到桌面',
+      conversationId: 'group:input-directory-is-not-output',
+      characters: characters,
+      skills: skills,
+    );
+    expect(result.deliverableContract?.location, 'desktop');
   });
 
   test('用户确实说了桌面时 location 仍为 desktop', () async {

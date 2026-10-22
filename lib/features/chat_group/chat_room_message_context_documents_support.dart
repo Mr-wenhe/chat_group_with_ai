@@ -4,14 +4,19 @@ extension _ChatRoomMessageContextDocumentsSupport on _ChatRoomPageState {
   Future<String> _documentContextFor(
     String? query,
     List<Message> history,
-    Message? current,
-  ) {
-    if (query == null || query.trim().isEmpty) return Future.value('');
-    final messages = <Message>[...history];
-    if (current != null && !messages.any((item) => item.id == current.id)) {
-      messages.add(current);
-    }
-    final attachments = messages
+    Message? current, {
+    required String characterId,
+  }) {
+    query = query?.trim().isNotEmpty == true ? query : current?.content;
+    // 压缩后的对话只剩最后一条输入；附件仍从角色可见的近期原消息读取。
+    final messages = <String, Message>{
+      for (final message in _visibleContextForCharacter(
+          characterId, _recentMessagesForContext()))
+        message.id: message,
+      for (final message in history) message.id: message,
+      if (current != null) current.id: current,
+    }.values.toList(growable: false);
+    final attachments = messages.reversed
         .expand((message) => message.media ?? const <MediaAttachment>[])
         .where(DocumentUnderstandingService.supports)
         .toList(growable: false);
@@ -21,7 +26,7 @@ extension _ChatRoomMessageContextDocumentsSupport on _ChatRoomPageState {
     _documentProcessingProgress = 0;
     if (_canTouchUi) _setUiState(() {});
     return DocumentUnderstandingService.buildPromptContext(
-      query: query,
+      query: query ?? '',
       attachments: attachments,
       cancelToken: token,
       onProgress: (value) {
@@ -189,6 +194,7 @@ extension _ChatRoomMessageContextDocumentsSupport on _ChatRoomPageState {
       userMessage,
       recentHistory,
       currentUserMessage,
+      characterId: character.id,
     );
     if (documentContext.isNotEmpty) {
       msgs.add({'role': 'system', 'content': documentContext});

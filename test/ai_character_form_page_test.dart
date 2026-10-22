@@ -9,6 +9,7 @@ import 'package:chat_group/core/models/tool_permission.dart';
 import 'package:chat_group/features/ai_character/ai_character_form_page.dart';
 import 'package:chat_group/features/ai_character/providers/ai_character_providers.dart';
 import 'package:chat_group/features/ai_character/widgets/ip_portrait_panel.dart';
+import 'package:chat_group/core/widgets/required_fields_banner.dart';
 import 'package:chat_group/core/widgets/top_toast.dart';
 import 'package:chat_group/providers/providers.dart';
 import 'package:flutter/material.dart';
@@ -151,6 +152,144 @@ void main() {
     await tester.pump();
 
     expect(find.text('请选择性别'), findsOneWidget);
+  });
+
+  /// 顶栏提示条里的正文。
+  ///
+  /// 必须限定在 [RequiredFieldsBanner] 子树内找：IP 形象面板与顶栏共用同一份
+  /// 文案（`requiredFieldsMessage`），整页 `find.text` 会同时命中面板那行，
+  /// "恰好 1 个"与"一个都没有"两种断言都会失真。
+  Finder bannerText(String message) => find.descendant(
+        of: find.byType(RequiredFieldsBanner),
+        matching: find.text(message),
+      );
+
+  /// 提示条当前高度；0 表示没显示（无缺项时 `appBarBottom` 给出 `Size.zero`）。
+  double bannerHeight(WidgetTester tester) =>
+      tester.getSize(find.byType(RequiredFieldsBanner)).height;
+
+  testWidgets('打开表单时不预先报错，点创建后顶栏点名缺什么', (tester) async {
+    // 一进页面就报"缺名字"是把尚未开始的填写当成错误，所以提示条必须等这次
+    // 失败的点按。API 配置在新建态会被预选（见 initState），因此不在缺项里。
+    await tester.pumpWidget(app(const AICharacterFormPage()));
+    await tester.pump();
+
+    expect(bannerHeight(tester), 0);
+
+    await tester.tap(find.text('创建').first);
+    await tester.pump();
+
+    expect(bannerText('请先填写：名字、性别、角色'), findsOneWidget);
+  });
+
+  testWidgets('缺项清单随填写实时收敛，补齐后提示自动消失', (tester) async {
+    tester.view.physicalSize = const Size(800, 2000);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(app(const AICharacterFormPage()));
+    await tester.pump();
+    await tester.tap(find.text('创建').first);
+    await tester.pump();
+    expect(bannerText('请先填写：名字、性别、角色'), findsOneWidget);
+
+    await tester.enterText(find.byType(TextFormField).at(0), '阿杰');
+    await tester.pump();
+    expect(bannerText('请先填写：性别、角色'), findsOneWidget);
+
+    await tester.enterText(find.byType(TextFormField).at(2), '工程师');
+    await tester.pump();
+    expect(bannerText('请先填写：性别'), findsOneWidget);
+
+    await tester.tap(find.byType(DropdownButtonFormField<CharacterGender>));
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.tap(find.text('男'));
+    await tester.pump();
+
+    expect(bannerHeight(tester), 0);
+  });
+
+  testWidgets('一个配置都没有时，顶栏把「API 配置」也算作缺项', (tester) async {
+    // 配置列表为空时下拉框只能显示哨兵项，字段级红字与顶栏汇总必须同时报，
+    // 否则用户按红字补完名字性别角色，点创建还是只看到一句"请选择 API 配置"。
+    await tester.runAsync(() => db.apiConfigBox.clear());
+
+    await tester.pumpWidget(app(const AICharacterFormPage()));
+    await tester.pump();
+    await tester.tap(find.text('创建').first);
+    await tester.pump();
+
+    expect(bannerText('请先填写：名字、性别、角色、API 配置'), findsOneWidget);
+  });
+
+  testWidgets('纯空格的名字与角色不算填过，顶栏与字段级红字同时报', (tester) async {
+    // 顶栏清单与 validator 曾经各写一份判据（一个 trim、一个不 trim），空格名字
+    // 就会变成"顶栏报缺、字段却没红字"；而保存时统一 trim，空白名字会被落库成
+    // 空串。两处必须由同一个判据说话。
+    tester.view.physicalSize = const Size(800, 2000);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(app(const AICharacterFormPage()));
+    await tester.pump();
+    await tester.enterText(find.byType(TextFormField).at(0), '   ');
+    await tester.enterText(find.byType(TextFormField).at(2), '  ');
+    await tester.pump();
+    await tester.tap(find.text('创建').first);
+    await tester.pump();
+
+    expect(bannerText('请先填写：名字、性别、角色'), findsOneWidget);
+    expect(find.text('请输入名字'), findsOneWidget);
+    expect(find.text('请输入角色'), findsOneWidget);
+  });
+
+  testWidgets('绑定的配置已经不存在时，API 配置重新算缺项', (tester) async {
+    // 下拉框的 value 会因为 id 不在列表而回落成 null（红字报「请选择 API 配置」），
+    // 顶栏汇总必须跟着报同一项，否则用户按红字补完别的项再点，还是交不上去。
+    tester.view.physicalSize = const Size(800, 2000);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    final saved = character(apiConfigId: 'config-gone');
+    await tester.runAsync(() => db.aiCharacterBox.put(saved.id, saved));
+
+    await tester.pumpWidget(app(AICharacterFormPage(character: saved)));
+    await tester.pump();
+    await tester.tap(find.text('更新').first);
+    await tester.pump();
+
+    expect(bannerText('请先填写：API 配置'), findsOneWidget);
+    expect(find.text('请选择 API 配置'), findsOneWidget);
+  });
+
+  testWidgets('开了智谱搜索流程却没绑 glm-4-flash 时，这项也进顶栏清单', (tester) async {
+    // 这道门从前只弹一句几秒后自己消失的 Toast——正是顶栏汇总要修的那类反馈。
+    // 它和必填项不是一回事，但同样属于"点创建交不上去"，必须一起说出来。
+    tester.view.physicalSize = const Size(800, 2000);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(app(const AICharacterFormPage()));
+    await tester.pump();
+    await tester.enterText(find.byType(TextFormField).at(0), '阿杰');
+    await tester.enterText(find.byType(TextFormField).at(2), '研究员');
+    await tester.pump();
+    await tester.tap(find.byType(DropdownButtonFormField<CharacterGender>));
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.tap(find.text('女'));
+    await tester.pump();
+
+    await tester.ensureVisible(find.text('仅使用智谱搜索问答流程'));
+    await tester.tap(find.text('仅使用智谱搜索问答流程'));
+    await tester.pump();
+    await tester.tap(find.text('创建').first);
+    await tester.pump();
+
+    expect(find.text('请先填写：智谱 glm-4-flash 配置'), findsOneWidget);
   });
 
   testWidgets('gender field has only male and female choices', (tester) async {

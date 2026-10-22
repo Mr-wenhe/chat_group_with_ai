@@ -1073,6 +1073,33 @@ void main() {
       expect(retries, 1);
     });
 
+    testWidgets('offers retry for a legacy candidate publication rejection',
+        (tester) async {
+      var retries = 0;
+      final task = _task('panel-candidate-publication')
+        ..status = AgentTaskStatus.failed;
+      WorkFailure.persistOnTask(
+        task,
+        const WorkFailure(
+          type: WorkFailureType.internal,
+          title: '工作任务内部处理失败',
+          reason: '合同文件缺失、超限或不可读取，未发布完整候选。',
+          technicalDetail: '合同文件缺失、超限或不可读取，未发布完整候选。',
+          completedContent: <String>[],
+          retryable: false,
+          suggestedAction: '先检查任务上下文；确认环境正常后可重新发起任务或停止当前任务。',
+        ),
+      );
+
+      expect(task.workFailure?.type, WorkFailureType.completionUnmet);
+      expect(task.workFailure?.canRetry, isTrue);
+      await pumpPanel(tester, task, onRetry: (_) async => retries++);
+
+      expect(find.byKey(const Key('work-task-retry')), findsOneWidget);
+      await tester.tap(find.byKey(const Key('work-task-retry')));
+      expect(retries, 1);
+    });
+
     testWidgets('only exposes reauthorize for permission/auth failures',
         (tester) async {
       var calls = 0;

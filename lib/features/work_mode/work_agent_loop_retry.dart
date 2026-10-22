@@ -45,7 +45,38 @@ extension _WorkAgentLoopRetry on WorkAgentLoop {
       ..remove('timestamp')
       ..remove('durationMs');
     final outputHash = sha256.convert(utf8.encode(jsonEncode(stableData)));
-    final fingerprint = '$tool:$inputHash:$outputHash';
+    // 相同正文不是新证据，读取长度或参数顺序变化不能刷新群任务进展。
+    final readContent = result.data['content'];
+    final browserPage =
+        result.data['page'] is Map ? result.data['page'] as Map : const {};
+    final browserEvidence = call.name == AgentToolName.browserContext &&
+        result.succeeded &&
+        result.status != WorkToolResultStatus.alreadyCommitted &&
+        (browserPage['visibleText'] is String ||
+            result.usageObservation?.businessResultVerified == true);
+    final fingerprint = browserEvidence
+        ? sha256
+            .convert(utf8.encode(jsonEncode([
+              tool,
+              result.data['candidateDigest'],
+              browserPage['visibleText'],
+              browserPage['controls'],
+              result.usageObservation?.verifiedAcceptanceIds,
+              result.data['actionResult'],
+            ])))
+            .toString()
+        : call.name == AgentToolName.workspaceRead &&
+                result.succeeded &&
+                readContent is String
+            ? sha256
+                .convert(utf8.encode(jsonEncode([
+                  tool,
+                  result.data['path'] ?? call.arguments['path'],
+                  readContent,
+                  result.data['truncated'] == true,
+                ])))
+                .toString()
+            : '$tool:$inputHash:$outputHash';
     if (!result.succeeded) {
       return WorkProgressObservation(
         kind: WorkProgressObservationKind.failure,
@@ -76,6 +107,7 @@ extension _WorkAgentLoopRetry on WorkAgentLoop {
     return WorkProgressObservation(
       kind: changed &&
               (hasReadEvidence ||
+                  browserEvidence ||
                   call.name == AgentToolName.workspacePatch ||
                   call.name == AgentToolName.workspaceRename ||
                   call.name == AgentToolName.workspaceDelete)
@@ -129,8 +161,13 @@ extension _WorkAgentLoopRetry on WorkAgentLoop {
     AgentToolCall call, {
     required WorkToolActionStarter actionStarter,
   }) async {
+    final retryLimit =
+        WorkTaskExecutionPolicy.isValidatedV2GroupTask(state.task) &&
+                call.name == AgentToolName.browserContext
+            ? 0
+            : maxToolRetries;
     WorkToolResult? last;
-    for (var attempt = 0; attempt <= maxToolRetries; attempt++) {
+    for (var attempt = 0; attempt <= retryLimit; attempt++) {
       if (state.cancellation.isCancelled) {
         return const WorkToolResult.paused(message: '工具执行已停止。');
       }
@@ -160,7 +197,7 @@ extension _WorkAgentLoopRetry on WorkAgentLoop {
               .containsKey('uncertainAction') ||
           !last.retryable ||
           last.committed ||
-          attempt == maxToolRetries) {
+          attempt == retryLimit) {
         return last;
       }
       state.toolRetryCount++;
@@ -183,8 +220,12 @@ extension _WorkAgentLoopRetry on WorkAgentLoop {
     _LoopState state,
     WorkAgentModelRequest request,
   ) async {
+    final retryLimit =
+        WorkTaskExecutionPolicy.isValidatedV2GroupTask(state.task)
+            ? 0
+            : maxModelRetries;
     Map<String, dynamic>? last;
-    for (var attempt = 0; attempt <= maxModelRetries; attempt++) {
+    for (var attempt = 0; attempt <= retryLimit; attempt++) {
       if (state.cancellation.isCancelled) return const {};
       if (attempt > 0 && _budgetExceeded(state)) {
         return const {
@@ -216,7 +257,7 @@ extension _WorkAgentLoopRetry on WorkAgentLoop {
       final transient = _modelFailed(response) &&
           !_modelNeedsUserAction(response) &&
           WorkFailure.fromModelResponse(response).retryable;
-      if (!transient || attempt == maxModelRetries) {
+      if (!transient || attempt == retryLimit) {
         return response;
       }
       state.modelRetryCount++;

@@ -201,7 +201,19 @@ extension _WorkAgentLoopCheckpoint on WorkAgentLoop {
       checkpointSummary['target'] = currentScope;
       checkpointSummary['goal'] = currentScope;
     }
+    final singleHtmlDraft = _singleHtmlDraftContext(task);
     return <String, dynamic>{
+      if (WorkTaskExecutionPolicy.isValidatedV2GroupTask(task) &&
+          state.modelResults.any((r) =>
+              r['tool'] == 'browser.context' &&
+              r['data'] is Map &&
+              (r['data'] as Map)['page'] is Map))
+        'browserCurrentPage': state.modelResults.lastWhere((r) =>
+            r['tool'] == 'browser.context' &&
+            r['data'] is Map &&
+            (r['data'] as Map)['page'] is Map)['data'],
+      if (commandReapprovalContextFor(task) case final request?)
+        'commandReapprovalRequest': request,
       'goal': _publicText(currentScope),
       'plan': _publicText(task.plan),
       'resultSummary': _publicText(task.resultSummary),
@@ -214,6 +226,7 @@ extension _WorkAgentLoopCheckpoint on WorkAgentLoop {
       // 续写或成功合并会连同判定态一起清掉。
       if (state.stagedRewriteInstruction.isNotEmpty)
         'repeatedStagedWrite': state.stagedRewriteInstruction,
+      if (singleHtmlDraft != null) 'singleHtmlDraft': singleHtmlDraft,
       if (state.completionRepairInstruction.isNotEmpty)
         'previousCompletionFailure': state.completionRepairInstruction,
       if (state.failure != null) 'workFailure': state.failure!.toJson(),
@@ -492,6 +505,7 @@ bool _isDocumentImageResult(Object? rawResult) {
   return {
         AgentToolName.workspaceDocument.wireName,
         AgentToolName.nativeApp.wireName,
+        AgentToolName.browserContext.wireName,
       }.contains(rawResult['tool']) &&
       rawResult['status'] == WorkToolResultStatus.success.name;
 }

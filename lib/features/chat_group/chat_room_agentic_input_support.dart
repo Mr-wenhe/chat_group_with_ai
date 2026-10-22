@@ -169,6 +169,15 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
     // changed while an earlier normal round was draining. The send path has
     // already published the hint; never leak it into ordinary chat now.
     if (WorkModePolicy.looksLikeWorkRequest(text)) return true;
+    if (userMessage != null && isVideoOnlyMessage(userMessage)) {
+      await _appendMessage(Message(
+        groupId: widget.groupId,
+        senderId: 'system',
+        senderType: 'system',
+        content: unsupportedVideoContentNotice,
+      ));
+      return true;
+    }
     final sentiment = UserMessageSentimentAnalyzer.analyze(text);
     await _runAiRound(
       userMessage: text,
@@ -236,7 +245,8 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
         groupId: widget.groupId,
         senderId: 'system',
         senderType: 'system',
-        content: '这条工作指令没能提交成功（${ref.read(entityLabelsProvider).humanize(sanitizeWorkTaskError(error))}）；'
+        content:
+            '这条工作指令没能提交成功（${ref.read(entityLabelsProvider).humanize(sanitizeWorkTaskError(error))}）；'
             '消息已保留，可重发或到任务面板确认。',
       ));
     }
@@ -254,6 +264,22 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
     final coordinator = ref.read(workTaskCoordinatorProvider);
     final activeTask = _latestWorkTaskForConversation();
     if (activeTask != null) {
+      final acceptsCurrentRequirements = !_isDirectChat &&
+          WorkTaskRequirementsConfirmation.acceptsMessage(activeTask, text,
+              hasAttachments: hasAttachments);
+      if (acceptsCurrentRequirements) {
+        final revision = WorkDiscussionState.fromExecutionState(
+              activeTask.executionStateJson,
+            )?.requestRevision ??
+            1;
+        await coordinator.confirmRequirements(
+          activeTask.id,
+          version: WorkTaskRequirementsConfirmation.versionFor(activeTask),
+        );
+        await _publishRequirementsConfirmed(revision);
+        ref.read(workTaskOverlayControllerProvider).openTask(activeTask.id);
+        return;
+      }
       final followUpRequest = text.trim().isEmpty && hasAttachments
           ? WorkModePolicy.attachmentOnlyRequest
           : text;
@@ -306,7 +332,8 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
               groupId: widget.groupId,
               senderId: 'system',
               senderType: 'system',
-              content: '这条答复没能应用（${ref.read(entityLabelsProvider).humanize(sanitizeWorkTaskError(error))}）；'
+              content:
+                  '这条答复没能应用（${ref.read(entityLabelsProvider).humanize(sanitizeWorkTaskError(error))}）；'
                   '问题可能已经更新，请在任务面板查看最新待决事项。',
             ));
             return;
@@ -364,6 +391,26 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
       }
     }
 
+    if (!_isDirectChat) {
+      await _appendMessage(Message(
+        groupId: widget.groupId,
+        senderId: 'system',
+        senderType: 'system',
+        content: '🧭【理解中】正在核对交付目标、分工、保存位置、功能和验收；确认前不会启动群讨论或写入产物。',
+        isMention: true,
+      ));
+    }
+
+    if (!_isDirectChat) {
+      await _appendMessage(Message(
+        groupId: widget.groupId,
+        senderId: 'system',
+        senderType: 'system',
+        content: '🔎【路由检查中】正在核对当前群成员、执行资格和模型可用性；确认卡生成前不会开始讨论或写入产物。',
+        isMention: true,
+      ));
+    }
+
     // Route against the complete group membership so an explicit @ can
     // produce a useful unavailable/ambiguous diagnostic instead of silently
     // falling back to the first active character. The router also creates the
@@ -391,9 +438,23 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
       text,
       _allGroupCharacters.isEmpty ? groupCharacters : _allGroupCharacters,
     ).hasExplicitMention;
-    final routableCharacters = hasExplicitMention || _isDirectChat
-        ? groupCharacters
-        : await _charactersWithUsableCredentials(groupCharacters);
+    late final List<AICharacter> routableCharacters;
+    try {
+      routableCharacters = hasExplicitMention || _isDirectChat
+          ? groupCharacters
+          : await _charactersWithUsableCredentials(groupCharacters)
+              .timeout(const Duration(seconds: 10));
+    } on TimeoutException {
+      await _appendMessage(Message(
+        groupId: widget.groupId,
+        senderId: 'system',
+        senderType: 'system',
+        content:
+            '❌【失败】群成员模型凭据检查超过 10 秒，本次尚未创建工作任务，也未执行文件操作；没有自动重试。请检查群成员模型配置后，在本群重新发送。',
+        isMention: true,
+      ));
+      return;
+    }
     final routeSelector = WorkRoleModelSelectorService(
       characters: routableCharacters,
       credentials: _credentialResolver,
@@ -427,8 +488,8 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
         maxResponseBytes: WorkRoleModelSelectorService.maxResponseBytes,
       ),
     );
-    final route =
-        await WorkRoleRouter(modelSelector: routeSelector.select).route(
+    final routeFuture =
+        WorkRoleRouter(modelSelector: routeSelector.select).route(
       request: text,
       hasAttachments: hasAttachments,
       characters: routableCharacters,
@@ -438,6 +499,25 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
       directCharacterId: _directCharacterId,
       skills: _db.characterSkillBox.values,
     );
+    late final WorkRoleRouteResult route;
+    if (_isDirectChat) {
+      // Private task routing keeps its established path and timing.
+      route = await routeFuture;
+    } else {
+      try {
+        route = await routeFuture.timeout(const Duration(seconds: 24));
+      } on TimeoutException {
+        await _appendMessage(Message(
+          groupId: widget.groupId,
+          senderId: 'system',
+          senderType: 'system',
+          content:
+              '❌【失败】角色路由超过 24 秒仍未返回，本次尚未创建工作任务，也未执行文件操作；没有自动重试。请检查网络和群成员模型配置，确认状态后再重新发送。',
+          isMention: true,
+        ));
+        return;
+      }
+    }
     // Keep task routing and stage/permission lookup constrained to current
     // group membership.  Historical senders remain available to render old
     // bubbles, but can never become an executor or a tool-bearing stage.
@@ -633,6 +713,7 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
         WorkDiscussionState.forNewTask(task,
             routed: discussionState, requestMessageId: sourceMessageId ?? ''),
       );
+      WorkTaskRequirementsConfirmation.requireForCurrentRequest(task);
     }
     final handoff = route.handoffState;
     if (_isDirectChat && handoff != null) {
@@ -746,6 +827,7 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
       WorkDiscussionState.forNewTask(task,
           routed: state, requestMessageId: sourceMessageId ?? ''),
     );
+    WorkTaskRequirementsConfirmation.requireForCurrentRequest(task);
     final handoff = route.handoffState;
     if (_isDirectChat && handoff != null) {
       WorkHandoffState.persistToTask(task, handoff);

@@ -1,3 +1,4 @@
+import 'package:chat_group/features/work_mode/work_task_completion_choice.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'package:chat_group/features/work_mode/work_discussion_runner.dart';
@@ -53,6 +54,7 @@ import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/services/chat_api_service.dart';
 import 'package:dio/dio.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter/services.dart';
 
 import '../helpers/lifecycle_hive.dart';
 import '../helpers/memory_governance_store.dart';
@@ -115,6 +117,9 @@ class _SequencedGateway extends AiRequestGateway {
     int? runBoundary,
     bool requiresTools = false,
     bool userInitiated = false,
+    bool finishOnTerminalFrame = false,
+    String? reasoningEffort,
+    void Function()? onResponseActivity,
     void Function(ChatStreamEvent event)? onEvent,
   }) async {
     calls++;
@@ -185,6 +190,9 @@ class _AppendGateway extends AiRequestGateway {
     int? runBoundary,
     bool requiresTools = false,
     bool userInitiated = false,
+    bool finishOnTerminalFrame = false,
+    String? reasoningEffort,
+    void Function()? onResponseActivity,
     void Function(ChatStreamEvent event)? onEvent,
   }) async {
     calls++;
@@ -257,6 +265,9 @@ class _HangingModelGateway extends AiRequestGateway {
     int? runBoundary,
     bool requiresTools = false,
     bool userInitiated = false,
+    bool finishOnTerminalFrame = false,
+    String? reasoningEffort,
+    void Function()? onResponseActivity,
     void Function(ChatStreamEvent event)? onEvent,
   }) {
     final token = cancelToken!;
@@ -300,6 +311,9 @@ class _StallsAfterFirstTokenGateway extends AiRequestGateway {
     int? runBoundary,
     bool requiresTools = false,
     bool userInitiated = false,
+    bool finishOnTerminalFrame = false,
+    String? reasoningEffort,
+    void Function()? onResponseActivity,
     void Function(ChatStreamEvent event)? onEvent,
   }) {
     final token = cancelToken!;
@@ -345,6 +359,9 @@ class _FloodingProgressGateway extends AiRequestGateway {
     int? runBoundary,
     bool requiresTools = false,
     bool userInitiated = false,
+    bool finishOnTerminalFrame = false,
+    String? reasoningEffort,
+    void Function()? onResponseActivity,
     void Function(ChatStreamEvent event)? onEvent,
   }) async {
     calls++;
@@ -395,6 +412,9 @@ class _CancelsBeforeFinalProgressGateway extends AiRequestGateway {
     int? runBoundary,
     bool requiresTools = false,
     bool userInitiated = false,
+    bool finishOnTerminalFrame = false,
+    String? reasoningEffort,
+    void Function()? onResponseActivity,
     void Function(ChatStreamEvent event)? onEvent,
   }) async {
     calls++;
@@ -445,6 +465,9 @@ class _MultiPatchGateway extends AiRequestGateway {
     int? runBoundary,
     bool requiresTools = false,
     bool userInitiated = false,
+    bool finishOnTerminalFrame = false,
+    String? reasoningEffort,
+    void Function()? onResponseActivity,
     void Function(ChatStreamEvent event)? onEvent,
   }) async {
     calls++;
@@ -507,6 +530,9 @@ class _SingleToolGateway extends AiRequestGateway {
     int? runBoundary,
     bool requiresTools = false,
     bool userInitiated = false,
+    bool finishOnTerminalFrame = false,
+    String? reasoningEffort,
+    void Function()? onResponseActivity,
     void Function(ChatStreamEvent event)? onEvent,
   }) async {
     calls++;
@@ -562,6 +588,9 @@ class _CommandGateway extends AiRequestGateway {
     int? runBoundary,
     bool requiresTools = false,
     bool userInitiated = false,
+    bool finishOnTerminalFrame = false,
+    String? reasoningEffort,
+    void Function()? onResponseActivity,
     void Function(ChatStreamEvent event)? onEvent,
   }) async {
     return {
@@ -616,6 +645,9 @@ class _BinaryReadGateway extends AiRequestGateway {
     int? runBoundary,
     bool requiresTools = false,
     bool userInitiated = false,
+    bool finishOnTerminalFrame = false,
+    String? reasoningEffort,
+    void Function()? onResponseActivity,
     void Function(ChatStreamEvent event)? onEvent,
   }) async {
     calls++;
@@ -674,6 +706,9 @@ class _MissingMutationCommandGateway extends AiRequestGateway {
     int? runBoundary,
     bool requiresTools = false,
     bool userInitiated = false,
+    bool finishOnTerminalFrame = false,
+    String? reasoningEffort,
+    void Function()? onResponseActivity,
     void Function(ChatStreamEvent event)? onEvent,
   }) async {
     calls++;
@@ -735,6 +770,9 @@ class _ReadOnlyCommandGateway extends AiRequestGateway {
     int? runBoundary,
     bool requiresTools = false,
     bool userInitiated = false,
+    bool finishOnTerminalFrame = false,
+    String? reasoningEffort,
+    void Function()? onResponseActivity,
     void Function(ChatStreamEvent event)? onEvent,
   }) async {
     calls++;
@@ -797,6 +835,9 @@ class _SensitiveGateway extends AiRequestGateway {
     int? runBoundary,
     bool requiresTools = false,
     bool userInitiated = false,
+    bool finishOnTerminalFrame = false,
+    String? reasoningEffort,
+    void Function()? onResponseActivity,
     void Function(ChatStreamEvent event)? onEvent,
   }) async {
     calls++;
@@ -869,6 +910,9 @@ class _ScriptArtifactGateway extends AiRequestGateway {
     int? runBoundary,
     bool requiresTools = false,
     bool userInitiated = false,
+    bool finishOnTerminalFrame = false,
+    String? reasoningEffort,
+    void Function()? onResponseActivity,
     void Function(ChatStreamEvent event)? onEvent,
   }) async {
     calls++;
@@ -958,6 +1002,9 @@ class _WorkspaceListPathGateway extends AiRequestGateway {
     int? runBoundary,
     bool requiresTools = false,
     bool userInitiated = false,
+    bool finishOnTerminalFrame = false,
+    String? reasoningEffort,
+    void Function()? onResponseActivity,
     void Function(ChatStreamEvent event)? onEvent,
   }) async {
     calls++;
@@ -1321,6 +1368,18 @@ void main() {
     expect(gateway.requestTokens, hasLength(attempts));
     expect(gateway.requestTokens.toSet(), hasLength(attempts));
     expect(gateway.requestTokens.every((token) => token.isCancelled), isTrue);
+    final diagnostics = (await eventStore.read(task.id))
+        .events
+        .where((e) => e.title == '本次成员模型请求超时');
+    expect(diagnostics, hasLength(attempts));
+    for (final event in diagnostics) {
+      expect(event.safeMetadata['failureCode'],
+          isIn({'modelCompletionTimeout', 'modelFirstByteStall'}));
+      expect(event.safeMetadata['receivedCharacters'], 0);
+      expect(event.safeMetadata['responseActivityCount'], 0);
+      expect(event.safeMetadata['requestCharacters'], greaterThan(0));
+      expect(event.safeMetadata.keys, isNot(contains('response')));
+    }
     expect(task.workFailure?.type, WorkFailureType.retryableNetwork);
     expect(task.workFailure?.retryable, isTrue);
   });

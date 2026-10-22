@@ -40,11 +40,14 @@ class ChatReplyPromptGuard {
   /// 本轮最新一条对话的正文。多模态内容是列表，按对象同一性比对。
   final Object? latestTurn;
 
+  final List<String> documentContexts;
+
   const ChatReplyPromptGuard({
     required this.sharedContext,
     required this.personaPrompt,
     required this.latestTurn,
     this.currentUserTurn,
+    this.documentContexts = const [],
   });
 
   /// 从**尚未裁剪**的请求里认出这次必须保住的内容。
@@ -70,6 +73,12 @@ class ChatReplyPromptGuard {
       personaPrompt: personaPrompt,
       latestTurn: latestTurn,
       currentUserTurn: currentUserTurn,
+      documentContexts: messages
+          .where((message) => message['role'] == 'system')
+          .map((message) => message['content'])
+          .whereType<String>()
+          .where((content) => content.startsWith('【本地文档检索资料｜'))
+          .toList(growable: false),
     );
   }
 
@@ -97,6 +106,7 @@ class ChatReplyPromptGuard {
         content == personaPrompt) {
       return true;
     }
+    if (documentContexts.contains(content)) return true;
     if (message['role'] == 'system') return false;
     if (_carries(content, currentUserTurn)) return true;
     return _carries(content, latestTurn);
@@ -119,6 +129,10 @@ class ChatReplyPromptGuard {
     // "用户的要求被丢了"说成"接话上下文被丢了"。
     if (_turnMissing(messages, currentUserTurn)) return '本轮真人输入';
     if (_turnMissing(messages, latestTurn)) return '本轮最新一条对话';
+    if (documentContexts.any((content) =>
+        !messages.any((message) => message['content'] == content))) {
+      return '附件正文资料';
+    }
     return null;
   }
 

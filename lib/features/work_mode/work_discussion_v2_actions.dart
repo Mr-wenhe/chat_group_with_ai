@@ -1,76 +1,42 @@
 part of 'work_discussion_runner.dart';
 
-/// 旧值到新值之间的"变更连接"。
-///
-/// 中文是变更动词（"改名为""改成"…），英语是 `to` / `into` / `as`。动词前只允许
-/// 空白、引号、括号与"的文件名"这类结构性字词，于是
-/// "game.html 文件名，不要改成 game2.html" 里的逗号会直接断开匹配——名称共现
-/// 因此成不了改名授权。
-const String _changeLinkSource = r'[\s"‘’“”()（）]*'
-    r'(?:(?:的)?(?:文件名|名称|名字|路径|格式|输出|产物|文件|的))*'
-    r'[\s"‘’“”()（）]*'
-    r'(?:改名为|改名成|改名|改称|更名(?:为|成)?|重命名(?:为|成)?|改成|改为|换成|换为'
-    r'|替换(?:为|成)|变为|变成|调整为|修改(?:为|成)|切换(?:为|成)|to|into|as)'
-    r'[\s"‘’“”()（）]*';
-
-/// 否定或"保持原样"的语义。它出现在变更连接里就不是改名授权（"不要改成
-/// game2.html"）；紧贴在旧值之前也一样（"保持 game.html 文件名"，见
-/// [_prohibitionAdjacentBefore]）。
-final RegExp _userProhibition = RegExp(
-    r'不要|不用|不需要|不必|不想|无需|无须|禁止|不得|不许|不能|不可|不准|请勿|勿'
-    r'|不改名|不改|不换|不动|不重命名'
-    r'|别改|别换|别动|别把|别重|别用|别再'
-    r'|保持|维持|沿用|保留|不变|照旧|原样|依旧'
-    r"|do not|don't|dont|never|not\b|no need|keep|retain|unchanged",
-    caseSensitive: false);
-
-/// 紧贴在旧值**之前**的否定（"保持 game.html 文件名"）。
-///
-/// 必须紧贴旧值，但允许“不要把 X”或“don't rename X”的结构性连接。
-/// “在保持内容不变的前提下
-/// 把 game.html 改名为 game2.html"里的"保持"管的是内容，与改名无关，放宽成
-/// "旧值所在从句出现否定就拦"会把这类正常改名句整句挡下来。
-final RegExp _prohibitionAdjacent = RegExp(
-    r'(?:不要|不用|不需要|不必|不想|无需|无须|禁止|不得|不许|不能|不可|不准|请勿|勿'
-    r'|不改名|不改|不换|不动|不重命名'
-    r'|别改|别换|别动|别把|别重|别用|别再'
-    r'|保持|维持|沿用|保留|不变|照旧|原样|依旧'
-    r"|do not|don't|dont|never|not\b|no need|keep|retain|unchanged)"
-    r'[\s"‘’“”()（）的]*(?:把|将|让|rename\b|change\b|convert\b|replace\b|switch\b|turn\b)?'
-    r'[\s"‘’“”()（）的]*$',
-    caseSensitive: false);
-
-/// 把变更放进"要不要做"的评估框架，而不是下达变更指令。
-///
-/// 判据是变更所在**从句**里的疑问或讨论标记："先讨论把 game.html 改名为
-/// game2.html 是否合适"里那句改名只是被讨论的提议，用户并没有授权改名。
-final RegExp _evaluationFrame = RegExp(
-    r'是否|吗|？|\?|合不合适|妥不妥|该不该|可行性|先讨论|讨论一下|讨论下|评估一下|商量|询问',
-    caseSensitive: false);
-
-/// 紧跟在目标值之后的否定（"…改成 game2.html 是不允许的"）。
-///
-/// 只认紧邻的"是/就/也/都/则 + 否定"：放宽成"目标之后出现否定就算"会把下一个
-/// 从句里的"内容保持不变"也当成禁止改名，把正常的改名句挡下来。
-final RegExp _userPostProhibition =
-    RegExp(r'^[\s"‘’“”()（）]*(?:是|就|也|都|则)?[\s"‘’“”()（）]*'
-        r'(?:不行|不可|不允许|不被允许|不该|不应该|不能|禁止)');
-
-/// 汉字与日文假名的范围，用来决定词元该按哪套词字符收边。
-final RegExp _cjkCharacter =
-    RegExp(r'[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3040-\u30ff]');
-
 extension _V2DiscussionActions on _V2DiscussionSession {
-  Future<void> _consume(
+  Future<String?> _consume(
       AICharacter member, WorkDiscussionV2Turn turn, String responseRef) async {
+    final initialVerificationRevision = state.verificationRevision;
     for (final issue in turn.issues) {
-      if (state.issues.any((i) =>
-          i['id'] == issue['id'] ||
-          i['kind'] == issue['kind'] &&
-              i['target'] == issue['target'] &&
-              (i['problem'] as String).trim() ==
-                  (issue['problem'] as String).trim())) {
-        throw StateError('问题 ID 重复');
+      final relatedIssues = state.issues
+          .where((existing) =>
+              existing['kind'] == issue['kind'] &&
+              existing['target'] == issue['target'] &&
+              (existing['problem'] as String).trim() ==
+                  (issue['problem'] as String).trim())
+          .toList(growable: false);
+      if (state.issues.any((existing) => existing['id'] == issue['id'])) {
+        throw StateError('问题 ID 重复；同一问题的新证据必须使用新的问题 ID。');
+      }
+      if (relatedIssues.any((existing) => existing['status'] == 'open')) {
+        throw StateError('已有同类未解决问题，请先处理原问题。');
+      }
+      if (relatedIssues.isNotEmpty &&
+          relatedIssues.every((existing) => existing['status'] != 'open')) {
+        if (relatedIssues.any((existing) => existing['status'] != 'resolved')) {
+          throw StateError('同类问题已有已关闭记录，不能重复登记。');
+        }
+        final ref = issue['evidenceRef'] as String;
+        final fresh = evidence[ref];
+        final hasNewInvestigation = ref.startsWith('investigation:') &&
+            fresh != null &&
+            fresh['requestRevision'] == state.requestRevision &&
+            fresh['teamRevision'] == state.teamRevision &&
+            relatedIssues
+                .any((existing) => fresh['issueId'] == existing['id']) &&
+            relatedIssues.every((existing) =>
+                ref != existing['evidenceRef'] &&
+                ref != existing['resolutionRef']);
+        if (!hasNewInvestigation) {
+          throw StateError('该问题已解决；只有引用绑定到原问题的新实际调查结果，才能重新登记。');
+        }
       }
       final normalized = {
         ...issue,
@@ -90,15 +56,20 @@ extension _V2DiscussionActions on _V2DiscussionSession {
         'verificationRevision': state.verificationRevision + 1
       });
     }
-    if (turn.resolutions.isNotEmpty) {
-      await _resolve(member, turn.resolutions, responseRef);
-    }
+    final resolutionWarning = turn.resolutions.isEmpty
+        ? null
+        : await _resolve(member, turn.resolutions, responseRef);
     switch (turn.action) {
       case 'investigate':
         await _investigate(member, turn, responseRef);
       case 'propose':
         await _proposal(member, turn.proposal!, responseRef, turn.issueId);
       case 'approve':
+        if (state.verificationRevision != initialVerificationRevision) {
+          lastProposalNoOpHint = '本轮记录或解决了问题，验证版本已更新；问题证据已保留，本轮认可未写入。'
+              '请先处理这些问题，再按最新版本重新审阅。';
+          break;
+        }
         await _approve(member, turn.approval!, responseRef);
       case 'decide':
         final d = turn.decision!;
@@ -114,9 +85,57 @@ extension _V2DiscussionActions on _V2DiscussionSession {
       default:
         break;
     }
+    return resolutionWarning;
   }
 
+  Map<String, dynamic> get _formalPlanSnapshot => {
+        'taskId': task.id,
+        'requestRevision': state.requestRevision,
+        'teamRevision': state.teamRevision,
+        'scope': state.scope,
+        'plan': state.plan,
+        'artifactContract': state.artifactContract,
+        'workItems': [
+          for (final item in state.workItems)
+            {
+              for (final key in ['id', 'ownerId', 'dependencies', 'kind'])
+                if (item.containsKey(key)) key: item[key]
+            }
+        ],
+        'acceptances': [
+          for (final item in state.acceptances)
+            {
+              for (final key in ['id', 'method', 'requiredCapability'])
+                key: item[key]
+            }
+        ],
+        'usageAssignments': state.usageAssignments,
+      };
+
+  String get _formalPlanRef => _key('plan', jsonEncode(_formalPlanSnapshot));
+
+  bool get _beforeProduction =>
+      (state.currentIteration == null ||
+          state.currentIteration!['requestRevision'] != state.requestRevision ||
+          state.currentIteration!['teamRevision'] != state.teamRevision) &&
+      state.plan.isNotEmpty &&
+      state.phase == 'clarifying' &&
+      state.workItems.every((item) => item['status'] == 'pending');
+
+  bool _canReviewFormalPlanIssue(Map<String, dynamic> issue, String memberId) =>
+      _beforeProduction &&
+      runner.eventStore != null &&
+      issue['kind'] != 'idea' &&
+      !(issue['evidenceRef'] as String).startsWith('work-task-action:') &&
+      issue['sourceId'] == memberId &&
+      issue['target'] != 'code' &&
+      !(issue['evidenceRef'] as String).startsWith('investigation:') &&
+      (issue['requestRevision'] as int) < state.requestRevision;
+
   bool _knownRef(String ref, String currentResponse) =>
+      _beforeProduction && runner.eventStore != null && ref == _formalPlanRef ||
+      _folderAuthorization['status'] == 'granted' &&
+          ref == _folderAuthorizationRef ||
       ref == currentResponse ||
       evidence.containsKey(ref) ||
       state.decisions.any((d) =>
@@ -124,39 +143,124 @@ extension _V2DiscussionActions on _V2DiscussionSession {
           {'answered', 'waived'}.contains(d['status'])) ||
       runner.database.messageBox.get(ref)?.groupId == task.groupId;
 
-  Future<void> _resolve(AICharacter member,
+  String? _resolutionRejection(int index, Map<String, dynamic> resolution,
+      String responseRef, String memberId) {
+    final field = 'resolutions[$index]';
+    final issueId = resolution['id'] as String;
+    final issue = state.issues
+        .where((i) => i['id'] == issueId && i['status'] == 'open')
+        .firstOrNull;
+    if (issue == null) {
+      return '$issueId：$field.id 指向的问题不存在或已关闭；状态未变化。';
+    }
+    if (issue['kind'] == 'idea') {
+      return '$issueId：$field.id 指向方案提案，不能用解决项关闭；状态未变化。';
+    }
+    final evidenceRef = resolution['evidenceRef'] as String;
+    if (evidenceRef == responseRef || !_knownRef(evidenceRef, responseRef)) {
+      return '$issueId：$field.evidenceRef 无法核验（解决依据不存在或不是本轮之前的证据）；状态未变化。';
+    }
+    if (evidenceRef.startsWith('folder-grant:')) {
+      if (evidenceRef != _folderAuthorizationRef ||
+          _folderAuthorization['status'] != 'granted' ||
+          issue['kind'] != 'decision' ||
+          !(issue['evidenceRef'] as String)
+              .startsWith('work-task-action:${task.id}:folderAuthorization:')) {
+        return '$issueId：$field.evidenceRef 只能证明本任务当前目录授权，不能关闭其它问题或替代执行证据。';
+      }
+      return null;
+    }
+    if (evidenceRef.startsWith('plan:')) {
+      // A plan review closes only its author's pre-production concern; it never
+      // supplies execution evidence or marks a candidate acceptance as passed.
+      if (evidenceRef != _formalPlanRef ||
+          !_canReviewFormalPlanIssue(issue, memberId)) {
+        return '$issueId：$field.evidenceRef 只能由问题提出者引用修订后的当前正式方案关闭制作前问题；代码或调查问题仍需工具结果。';
+      }
+      return null;
+    }
+    final requiresToolEvidence = issue['target'] == 'code' ||
+        issue['kind'] == 'defect' &&
+            WorkRoleRouter.requestsSoftwareImplementation(task.userRequest) ||
+        (issue['evidenceRef'] as String).startsWith('investigation:');
+    final receipt = evidence[evidenceRef];
+    if (receipt != null &&
+        (receipt['issueId'] != issueId ||
+            receipt['requestRevision'] != state.requestRevision ||
+            receipt['teamRevision'] != state.teamRevision)) {
+      return '$issueId：$field.evidenceRef 必须引用绑定到该问题及当前需求、团队版本的真实工具结果；状态未变化。';
+    }
+    if (requiresToolEvidence && receipt == null) {
+      return '$issueId：$field.evidenceRef 必须引用绑定到该问题及当前需求、团队版本的真实工具结果；状态未变化。';
+    }
+    return null;
+  }
+
+  String _resolutionValidationError(
+      List<Map<String, dynamic>> resolutions, String memberId) {
+    final rejected = <String>[];
+    for (var index = 0; index < resolutions.length; index++) {
+      final error =
+          _resolutionRejection(index, resolutions[index], '', memberId);
+      if (error != null) rejected.add(error);
+    }
+    return rejected.isEmpty
+        ? ''
+        : '解决项未被采纳：${rejected.join('；')} '
+            '仅可引用当前仍开放问题的 ID 和列出的、与该问题及当前版本匹配的真实证据。';
+  }
+
+  Future<String?> _resolve(AICharacter member,
       List<Map<String, dynamic>> resolutions, String responseRef) async {
+    if (resolutions.any((item) =>
+        (item['evidenceRef'] as String).startsWith('folder-grant:'))) {
+      await _refreshFolderAuthorization();
+    }
     final updated =
         state.issues.map((i) => Map<String, dynamic>.from(i)).toList();
-    for (final resolution in resolutions) {
-      final issue = updated
-          .where((i) => i['id'] == resolution['id'] && i['status'] == 'open')
-          .firstOrNull;
-      if (issue == null ||
-          issue['kind'] == 'idea' ||
-          !_knownRef(resolution['evidenceRef'] as String, responseRef)) {
-        throw StateError('问题或依据无效');
+    final rejected = <String>[];
+    var changed = false;
+    for (var index = 0; index < resolutions.length; index++) {
+      final resolution = resolutions[index];
+      final rejection =
+          _resolutionRejection(index, resolution, responseRef, member.id);
+      if (rejection != null) {
+        rejected.add(rejection);
+        continue;
       }
-      // Code claims require a real read; an explanatory chat message cannot
-      // substitute for a tool receipt on a code investigation.
-      if ((issue['target'] == 'code' ||
-              issue['kind'] == 'defect' &&
-                  WorkRoleRouter.requestsSoftwareImplementation(
-                      task.userRequest) ||
-              (issue['evidenceRef'] as String).startsWith('investigation:')) &&
-          !evidence.containsKey(resolution['evidenceRef'])) {
-        throw StateError('代码判断需要实际工具结果');
+      final reference = resolution['evidenceRef'] as String;
+      if (reference.startsWith('plan:')) {
+        try {
+          final snapshot = await runner.eventStore!
+              .readDiscussionDetail(task.id, reference.substring(5));
+          if (_key('plan', snapshot) != reference) {
+            throw StateError('正式方案证据摘要不匹配');
+          }
+        } on Object {
+          rejected.add('${resolution['id']}：正式方案证据无法完整读取或核验，未关闭问题。');
+          continue;
+        }
       }
+      final issue = updated.firstWhere((i) => i['id'] == resolution['id']);
       issue.addAll({
         'status': 'resolved',
         'resolution': resolution['resolution'],
         'resolutionRef': resolution['evidenceRef']
       });
+      changed = true;
     }
-    await _commit('memberResolution', member.id, {
-      'issues': updated,
-      'verificationRevision': state.verificationRevision + 1
-    });
+    if (changed) {
+      await _commit('memberResolution', member.id, {
+        'issues': updated,
+        'verificationRevision': state.verificationRevision + 1
+      });
+    }
+    if (rejected.isEmpty) return null;
+
+    final detail = '解决项未被采纳：${rejected.join('；')} '
+        '仅可引用 collaboration.issues 中当前仍为 open 的问题 ID 和真实证据。';
+    await runner._recordDiagnostic(task, '成员协作增量未被采纳：$detail');
+    return detail;
   }
 
   Future<void> _investigate(
@@ -189,6 +293,7 @@ extension _V2DiscussionActions on _V2DiscussionSession {
       'memberId': member.id,
       'issueId': turn.issueId,
       'requestRevision': binding.requestRevision,
+      'teamRevision': binding.teamRevision,
       'tool': turn.tool!.name.wireName,
       'arguments': turn.tool!.arguments,
       'result': result.result.data
@@ -276,7 +381,9 @@ extension _V2DiscussionActions on _V2DiscussionSession {
       }
       await _recordScopeProposal(proposal, responseRef, idea);
     } else {
-      await _detail(proposal, responseRef);
+      await _detail(proposal, responseRef,
+          requestRevision: state.requestRevision + 1,
+          verificationRevision: state.verificationRevision + 1);
       await _installProposal(proposal);
     }
   }
@@ -331,12 +438,35 @@ extension _V2DiscussionActions on _V2DiscussionSession {
           ]);
       return;
     }
-    final ref = _key('proposal', jsonEncode(proposal));
-    if (issue['resolutionRef'] == ref &&
-        issue['requestRevision'] == state.requestRevision) {
-      return;
+    final previousRef = issue['resolutionRef'];
+    if (issue['requestRevision'] == state.requestRevision &&
+        previousRef is String &&
+        previousRef.startsWith('proposal:')) {
+      final store = runner.eventStore;
+      if (store == null) throw StateError('已保存提案详情不可用');
+      try {
+        final previous = _proposalFromDetail(
+            previousRef,
+            await store.readDiscussionDetail(
+                task.id, previousRef.substring(9)));
+        if (jsonEncode(previous) == jsonEncode(proposal)) return;
+      } on Object catch (error) {
+        await _decision(
+          'question',
+          issue['id'] as String,
+          '当前已保存提案无法完整核验，已暂停重复提交。',
+          sanitizeWorkTaskError(error),
+        );
+        return;
+      }
     }
-    await _detail(proposal, responseRef);
+    final detail = _proposalDetailSnapshot(
+      proposal,
+      verificationRevision: state.verificationRevision + 1,
+      pendingIssueId: issue['id'] as String,
+    );
+    final ref = _key('proposal', jsonEncode(detail));
+    await _attachDetail(detail, responseRef, '方案与验收详情.json');
     await _commit('coordinator', state.coordinatorId, {
       'issues': [
         for (final i in state.issues)
@@ -351,6 +481,15 @@ extension _V2DiscussionActions on _V2DiscussionSession {
       ],
       'verificationRevision': state.verificationRevision + 1
     });
+    final activeGroup = group;
+    if (activeGroup != null && _notifiedPendingProposalRefs.add(ref)) {
+      await runner._publish(
+        task,
+        activeGroup,
+        '🟡【提案待全员认可】完整提案已保存并供成员审阅；当前正式方案和验收仍未改变，全部当前成员明确认可后才会采纳。',
+        cancellation: cancellation,
+      );
+    }
   }
 
   void _validateContract(Map<String, dynamic> proposal) {
@@ -384,6 +523,33 @@ extension _V2DiscussionActions on _V2DiscussionSession {
         !WorkDiscussionV2Turn.isValidVerificationCommands(contract)) {
       throw StateError('artifactContract 字段或内容不符合 v2 协议');
     }
+    final requiredOutput =
+        WorkTaskRequirementsConfirmation.requiredNestedHtmlOutputPath(task);
+    if (requiredOutput != null) {
+      final location = (contract['location'] as String).replaceAll('\\', '/');
+      final desktopRoot = const WorkModeDirectoryService()
+          .requestedDesktopPath(WorkDiscussionState.currentRequestScope(task));
+      final normalizedDesktopRoot = desktopRoot?.replaceAll('\\', '/');
+      final requestedPath = p.isAbsolute(requiredOutput)
+          ? requiredOutput
+          : p.join(normalizedDesktopRoot ?? '', requiredOutput);
+      final proposedPaths = (contract['files'] as List? ?? const [])
+          .whereType<String>()
+          .map((file) {
+        final normalized = file.replaceAll('\\', '/');
+        final base = location.toLowerCase() == 'desktop'
+            ? normalizedDesktopRoot ?? ''
+            : location;
+        // Keep UNC roots until the shared Windows-aware key normalizes them.
+        return p.isAbsolute(normalized) ? normalized : p.join(base, normalized);
+      });
+      if (!proposedPaths.any((path) =>
+          workArtifactPathKey(path) == workArtifactPathKey(requestedPath))) {
+        throw StateError(
+          'artifactContract.files 必须保留需求确认卡指定的交付路径 $requestedPath；请保持文件名和目录后重新提交。',
+        );
+      }
+    }
     for (final key in state.artifactContract.keys) {
       final original = state.artifactContract[key];
       if (original is String &&
@@ -409,7 +575,11 @@ extension _V2DiscussionActions on _V2DiscussionSession {
   /// 说的是同一个交付类型，不该被当成改动用户合同。
   bool _sameContractValue(String key, String pinned, Object? proposed) {
     if (proposed == pinned) return true;
-    if (key != 'type' || proposed is! String) return false;
+    if (proposed is! String) return false;
+    if (key == 'location' || key == 'revisionTarget') {
+      return workArtifactPathKey(pinned) == workArtifactPathKey(proposed);
+    }
+    if (key != 'type') return false;
     return WorkRoleRouter.canonicalArtifactType(proposed) ==
         WorkRoleRouter.canonicalArtifactType(pinned);
   }
@@ -430,9 +600,11 @@ extension _V2DiscussionActions on _V2DiscussionSession {
       case 'location':
         return value.toLowerCase() == 'desktop'
             ? statesDesktopLocation(scope)
-            : statesToken(scope, value);
+            : statesToken(
+                scope.replaceAll('\\', '/'), value.replaceAll('\\', '/'));
       case 'revisionTarget':
-        return statesToken(scope, value);
+        return statesToken(
+            scope.replaceAll('\\', '/'), value.replaceAll('\\', '/'));
       case 'format':
         // 与播种同源：直接问那个推导函数"用户原话指定了什么格式"。只认逐字词元、
         // 别名族与扩展名会漏掉路由自己认的中文格式词（`网页`/`网站` → html），
@@ -493,79 +665,11 @@ extension _V2DiscussionActions on _V2DiscussionSession {
   /// 提议（见 [_evaluationFrame]）。[to] 还必须逐字出现在这句指令里：模型提案里的
   /// 新值只有被用户原话点名才算数，不能反过来由提案推定用户授权。
   bool _statesChange(String text,
-      {required String from, required String to, required bool asFormat}) {
-    final origins = _valueSpellings(from, asFormat: asFormat);
-    final targets = _valueSpellings(to, asFormat: asFormat);
-    if (origins.isEmpty || targets.isEmpty) return false;
-    final lower = text.toLowerCase();
-    final pattern = RegExp(
-      '(?:${origins.map(_tokenSource).join('|')})'
-      '($_changeLinkSource)'
-      '(?:${targets.map(_tokenSource).join('|')})',
-      unicode: true,
-    );
-    for (final match in pattern.allMatches(lower)) {
-      if (_userProhibition.hasMatch(match.group(1)!)) continue;
-      if (_prohibitionAdjacent.hasMatch(lower.substring(0, match.start))) {
-        continue;
-      }
-      if (_userPostProhibition.hasMatch(_clauseAfter(lower, match.end))) {
-        continue;
-      }
-      final clause = _clauseBefore(lower, match.start) +
-          match.group(0)! +
-          _clauseAfter(lower, match.end);
-      if (_evaluationFrame.hasMatch(clause)) continue;
-      return true;
-    }
-    return false;
-  }
+          {required String from, required String to, required bool asFormat}) =>
+      statesWorkContractChange(text, from: from, to: to, asFormat: asFormat);
 
-  /// 用户可能写出的该值拼写。
-  ///
-  /// 格式词按别名族展开（用户写 "Word"、合同写 `docx` 是同一个交付格式），
-  /// 其余字段只有原值本身。
-  List<String> _valueSpellings(String value, {required bool asFormat}) {
-    final normalized = value.trim().toLowerCase();
-    if (normalized.isEmpty) return const [];
-    final spellings = <String>{normalized};
-    if (asFormat) {
-      final canonical = WorkArtifactDeliveryGuard.formatAliases[normalized];
-      if (canonical != null) {
-        spellings.addAll(WorkArtifactDeliveryGuard.formatAliases.entries
-            .where((entry) => entry.value == canonical)
-            .map((entry) => entry.key.trim().toLowerCase()));
-      }
-    }
-    return spellings.toList();
-  }
-
-  /// 值的匹配源，两侧都要求独立成词。
-  ///
-  /// 拉丁词元只看 **ASCII** 词字符：中文里名称与汉字直接相邻是正常写法
-  /// （"把game.html改名为game2.html"），把相邻汉字也算词字符会让这类句子永远
-  /// 点不到名。CJK 词元仍按 Unicode 词字符收边，否则"软件"会点着"软件开发"。
-  String _tokenSource(String token) {
-    final normalized = token.trim().toLowerCase();
-    final edge =
-        _cjkCharacter.hasMatch(normalized) ? r'[\p{L}\p{N}_]' : r'[A-Za-z0-9_]';
-    return '(?<!$edge)${RegExp.escape(normalized)}(?!$edge)';
-  }
-
-  /// [index] 之前、最近一个句读之后的文本。
-  String _clauseBefore(String lower, int index) {
-    final start =
-        lower.substring(0, index).lastIndexOf(RegExp(r'[，,。；;！!？?：:\n]'));
-    return lower.substring(start + 1, index);
-  }
-
-  /// [index] 之后、最近一个句读之前的文本。
-  String _clauseAfter(String lower, int index) {
-    final end = lower.substring(index).indexOf(RegExp(r'[，,。；;！!？?：:\n]'));
-    return end < 0
-        ? lower.substring(index)
-        : lower.substring(index, index + end);
-  }
+  List<String> _valueSpellings(String value, {required bool asFormat}) =>
+      workContractValueSpellings(value, asFormat: asFormat);
 
   /// 由**用户身份**落盘用户明确改写的产物目标。
   ///
@@ -845,6 +949,39 @@ extension _V2DiscussionActions on _V2DiscussionSession {
     return blockers;
   }
 
-  Future<void> _detail(Map<String, dynamic> proposal, String responseRef) =>
-      _attachDetail(proposal, responseRef, '方案与验收详情.json');
+  Map<String, dynamic> _proposalDetailSnapshot(
+    Map<String, dynamic> proposal, {
+    int? requestRevision,
+    int? verificationRevision,
+    String? pendingIssueId,
+  }) =>
+      {
+        'proposal': proposal,
+        'issues': [
+          for (final issue in state.issues)
+            {
+              ...issue,
+              if (issue['id'] == pendingIssueId)
+                'resolution': '等待全员审阅；尚未改变正式方案。'
+            }
+        ],
+        'requestRevision': requestRevision ?? state.requestRevision,
+        'teamRevision': state.teamRevision,
+        'verificationRevision':
+            verificationRevision ?? state.verificationRevision,
+      };
+
+  Future<void> _detail(
+    Map<String, dynamic> proposal,
+    String responseRef, {
+    int? requestRevision,
+    int? verificationRevision,
+  }) =>
+      _attachDetail(
+        _proposalDetailSnapshot(proposal,
+            requestRevision: requestRevision,
+            verificationRevision: verificationRevision),
+        responseRef,
+        '方案与验收详情.json',
+      );
 }

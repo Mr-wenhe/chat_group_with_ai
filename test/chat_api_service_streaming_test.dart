@@ -10,6 +10,47 @@ import 'package:dio/dio.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  for (final structured in [false, true]) {
+    test('group collected stream completes before EOF structured=$structured',
+        () async {
+      var cancelled = false;
+      var activity = 0;
+      final source = StreamController<Uint8List>(onCancel: () {
+        cancelled = true;
+      });
+      addTearDown(source.close);
+      final dio = Dio();
+      dio.interceptors.add(InterceptorsWrapper(onRequest: (options, handler) {
+        handler.resolve(Response<ResponseBody>(
+            requestOptions: options,
+            statusCode: 200,
+            data: ResponseBody(source.stream, 200)));
+      }));
+      final service = ChatApiService(dio: dio);
+      final send = structured
+          ? service.sendStructuredChatMessageStreamed
+          : service.sendChatMessageStreamed;
+      final result = send(
+          apiKey: 'test-key',
+          provider: ApiProvider.custom,
+          customBaseUrl: 'http://127.0.0.1:12345',
+          model: 'arbitrary-model',
+          messages: const [],
+          maxRetries: 0,
+          finishOnTerminalFrame: true,
+          onResponseActivity: () {
+            activity++;
+          });
+      source.add(Uint8List.fromList(utf8.encode(
+          'data: {"choices":[{"delta":{"reasoning":"private"}}]}\n\n'
+          'data: {"choices":[{"delta":{"content":"complete"},"finish_reason":"stop"}]}\n\n')));
+      final response = await result.timeout(const Duration(seconds: 1));
+      expect(response['success'], isTrue);
+      expect(response['message'], 'complete');
+      expect(activity, greaterThan(0));
+      expect(cancelled, isTrue);
+    });
+  }
   test('streamed completion collects long-form agent output', () async {
     late RequestOptions captured;
     final dio = Dio();
@@ -848,6 +889,9 @@ class _ThrowingStreamChatApiService extends ChatApiService {
     int maxTokens = 1024,
     Duration receiveTimeout = const Duration(seconds: 120),
     CancelToken? cancelToken,
+    bool finishOnTerminalFrame = false,
+    String? reasoningEffort,
+    void Function()? onResponseActivity,
   }) {
     return Stream<ChatStreamEvent>.error(Exception('stream exploded'));
   }
@@ -871,6 +915,9 @@ class _AlwaysFailingStreamService extends ChatApiService {
     int maxTokens = 1024,
     Duration receiveTimeout = const Duration(seconds: 120),
     CancelToken? cancelToken,
+    bool finishOnTerminalFrame = false,
+    String? reasoningEffort,
+    void Function()? onResponseActivity,
   }) async* {
     streamCalls++;
     yield ChatStreamEvent.error('HTTP 503: busy');
@@ -895,6 +942,9 @@ class _StatusStreamChatApiService extends ChatApiService {
     int maxTokens = 1024,
     Duration receiveTimeout = const Duration(seconds: 120),
     CancelToken? cancelToken,
+    bool finishOnTerminalFrame = false,
+    String? reasoningEffort,
+    void Function()? onResponseActivity,
   }) async* {
     yield ChatStreamEvent.error('HTTP $statusCode: provider failure');
   }

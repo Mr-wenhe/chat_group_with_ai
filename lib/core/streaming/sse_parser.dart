@@ -90,7 +90,10 @@ class SseParser {
   /// visible reply. Internal structured work-mode callers may opt in.
   final bool allowReasoningContentFallback;
 
-  SseParser({this.allowReasoningContentFallback = false});
+  /// Reports generation activity without exposing private reasoning text.
+  final void Function()? onResponseActivity;
+  SseParser(
+      {this.allowReasoningContentFallback = false, this.onResponseActivity});
 
   String _buffer = '';
   String _fullContent = '';
@@ -100,6 +103,7 @@ class SseParser {
   int _cachedTokens = 0;
   bool _terminated = false;
   bool _truncated = false;
+  bool hasTerminalFrame = false;
   int _fullContentBytes = 0;
   int _fullReasoningContentBytes = 0;
   int _bufferBytes = 0;
@@ -192,12 +196,19 @@ class SseParser {
         _terminated = true;
         return ChatStreamEvent.error('API 返回错误: $errMsg');
       }
-      // Extract usage fields (typically in the last chunk).
+      // Usage frames are request totals; compatible providers may repeat them.
       final usage = json['usage'];
       if (usage is Map<String, dynamic>) {
-        _promptTokens += (usage['prompt_tokens'] as int? ?? 0);
-        _completionTokens += (usage['completion_tokens'] as int? ?? 0);
-        _cachedTokens += _extractCachedTokens(usage);
+        _promptTokens = usage['prompt_tokens'] as int? ?? _promptTokens;
+        _completionTokens =
+            usage['completion_tokens'] as int? ?? _completionTokens;
+        if (usage.containsKey('prompt_tokens_details') ||
+            usage.containsKey('input_tokens_details') ||
+            usage.containsKey('cached_tokens') ||
+            usage.containsKey('prompt_cache_hit_tokens') ||
+            usage.containsKey('cache_read_input_tokens')) {
+          _cachedTokens = _extractCachedTokens(usage);
+        }
       }
       final choices = json['choices'];
       if (choices is! List || choices.isEmpty) return null;
@@ -211,8 +222,18 @@ class SseParser {
         // 会因缺少结尾而解析失败，调用方需要据此把原因说清楚。
         _truncated = true;
       }
+      hasTerminalFrame = const {
+        'stop',
+        'length',
+        'tool_calls',
+        'content_filter'
+      }.contains(finishReason);
       final delta = firstChoice['delta'];
       if (delta is! Map<String, dynamic>) return null;
+      if (const ['content', 'reasoning_content', 'reasoning'].any(
+          (key) => delta[key] is String && (delta[key] as String).isNotEmpty)) {
+        onResponseActivity?.call();
+      }
       final content = delta['content'];
       if (content is String && content.isNotEmpty) {
         final contentBytes = utf8.encode(content).length;
@@ -294,6 +315,7 @@ class SseParser {
     _cachedTokens = 0;
     _terminated = false;
     _truncated = false;
+    hasTerminalFrame = false;
   }
 
   int _extractCachedTokens(Map<String, dynamic> usage) {

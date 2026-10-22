@@ -67,7 +67,14 @@ extension _DefaultWorkTaskRunnerReview on DefaultWorkTaskRunner {
       'tool': call.name.wireName,
       'arguments': call.arguments,
       'status': result.status.name,
-      'data': result.data
+      if (result.usageObservation != null)
+        'usageObservation': result.usageObservation!.toJson(),
+      'data': call.name == AgentToolName.browserContext
+          ? {
+              for (final key in ['operation', 'actionResult', 'evidenceRefs'])
+                key: result.data[key]
+            }
+          : result.data
     });
     final root = _decodeMap(task.executionStateJson);
     final text = const SearchSecretScanner().redact(jsonEncode({
@@ -99,7 +106,8 @@ extension _DefaultWorkTaskRunnerReview on DefaultWorkTaskRunner {
                   // Review may run approved commands, but must not rewrite the
                   // candidate or test assertions to make a failing baseline green.
                   if (definition.isMutation &&
-                      definition.name != AgentToolName.commandRun) {
+                      definition.name != AgentToolName.commandRun &&
+                      definition.name != AgentToolName.browserContext) {
                     return const WorkToolResult.permissionDenied(
                         message: '审查阶段不能改写产物或测试断言；请回群讨论修订。');
                   }
@@ -168,6 +176,26 @@ extension _DefaultWorkTaskRunnerReview on DefaultWorkTaskRunner {
       _ProductionReview review, List<String> ids) {
     final covered = <String>{};
     for (final receipt
+        in review.receipts.where((r) => r['tool'] == 'browser.context')) {
+      final observation =
+          WorkUsageObservation.tryParse(receipt['usageObservation']);
+      final arguments = receipt['arguments'] as Map;
+      final data = receipt['data'] as Map;
+      final acceptanceId = arguments['acceptanceId'];
+      final action = data['actionResult'] as Map?;
+      final result = acceptanceId is String
+          ? observation?.browserReviewResult(
+              state, review.review.actorId, acceptanceId,
+              matched: action?['matched'] as bool?,
+              textTruncated: action?['textTruncated'] == true)
+          : null;
+      if (result == null) continue;
+      covered.add(acceptanceId as String);
+      if (result == 'failed' || review.results[acceptanceId] != 'failed') {
+        review.results[acceptanceId] = result;
+      }
+    }
+    for (final receipt
         in review.receipts.where((r) => r['tool'] == 'command.run')) {
       final data = receipt['data'] as Map;
       final output = data['stdout'];
@@ -182,6 +210,7 @@ extension _DefaultWorkTaskRunnerReview on DefaultWorkTaskRunner {
           final acceptance =
               state.acceptances.where((a) => a['id'] == test['id']).firstOrNull;
           if (acceptance == null ||
+              acceptance['requiredCapability'] == 'browser.context' ||
               !{'passed', 'failed'}.contains(test['status']) ||
               test['method'] != acceptance['requiredCapability'] ||
               test['expected'] is! String ||
@@ -257,6 +286,9 @@ extension _DefaultWorkTaskRunnerReview on DefaultWorkTaskRunner {
 
   Future<String?> _validateProductionReview(AgentTask task,
       _ProductionReview review, AgentFinishCompletion completion) async {
+    if (_browserTestSessions.containsKey(task.id)) {
+      return '隔离浏览器会话尚未核实关闭，不能提交审查。';
+    }
     if (completion.evidence.length != 1) return '审查必须提交一份完整结构化结论，不把退出码当验收。';
     try {
       final conclusion = Map<String, dynamic>.from(

@@ -13,6 +13,9 @@ extension _ChatApiServiceSupport on ChatApiService {
     required Duration receiveTimeout,
     required bool structuredJson,
     CancelToken? cancelToken,
+    bool finishOnTerminalFrame = false,
+    String? reasoningEffort,
+    void Function()? onResponseActivity,
     void Function(ChatStreamEvent event)? onEvent,
   }) async {
     String content = '';
@@ -37,6 +40,9 @@ extension _ChatApiServiceSupport on ChatApiService {
               receiveTimeout: receiveTimeout,
               structuredJson: true,
               cancelToken: cancelToken,
+              finishOnTerminalFrame: finishOnTerminalFrame,
+              reasoningEffort: reasoningEffort,
+              onResponseActivity: onResponseActivity,
             )
           : streamChatMessage(
               apiKey: apiKey,
@@ -49,7 +55,11 @@ extension _ChatApiServiceSupport on ChatApiService {
               maxTokens: maxTokens,
               receiveTimeout: receiveTimeout,
               cancelToken: cancelToken,
+              finishOnTerminalFrame: finishOnTerminalFrame,
+              reasoningEffort: reasoningEffort,
+              onResponseActivity: onResponseActivity,
             );
+      completionLoop:
       await for (final event in responseStream) {
         onEvent?.call(event);
         switch (event.type) {
@@ -62,6 +72,7 @@ extension _ChatApiServiceSupport on ChatApiService {
             promptTokens = event.promptTokens;
             completionTokens = event.completionTokens;
             cachedTokens = event.cachedTokens;
+            if (finishOnTerminalFrame) break completionLoop;
             break;
           case ChatStreamEventType.error:
             // 已由 ChatApiService 分类/脱敏的消息原样透传，否则「连接超时」
@@ -114,6 +125,7 @@ extension _ChatApiServiceSupport on ChatApiService {
         receiveTimeout: receiveTimeout,
         cancelToken: cancelToken,
         structuredJson: structuredJson,
+        reasoningEffort: reasoningEffort,
         stepPlanLowReasoning: _isStepPlanEndpoint(
           provider: provider,
           customBaseUrl: customBaseUrl,

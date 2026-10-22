@@ -131,6 +131,12 @@ class WorkChangePlan {
   /// Convenience flag used by policy and the approval copy.
   bool get impactUncertain => command?.impactUncertain ?? false;
 
+  /// File operations affect exact paths; only commands can affect whole trees.
+  Iterable<String> get resourceLockPaths =>
+      actionType == WorkChangeActionType.command
+          ? {...knownAffectedDirectories, ...exactPaths}
+          : exactPaths;
+
   String get effectiveCommandReason => commandReason ?? riskReason;
 
   Map<String, dynamic> toJson() => {

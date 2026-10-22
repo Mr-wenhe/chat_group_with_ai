@@ -421,6 +421,13 @@ void _registerP7RunnerTests(Directory Function() hive,
                   .contains(work.status);
           attempt++) {
         await Future<void>.delayed(const Duration(milliseconds: 10));
+        if (work.status == AgentTaskStatus.paused &&
+            !coordinator.isTaskInFlight(work.id) &&
+            WorkTaskCompletionChoice.pending(work)) {
+          await coordinator.chooseCandidateCompletion(
+              work.id, WorkTaskCompletionChoice.identity(work)!,
+              test: true);
+        }
         final state =
             WorkDiscussionState.fromExecutionState(work.executionStateJson)!
                 .collaboration!;
@@ -520,13 +527,11 @@ void _registerP7RunnerTests(Directory Function() hive,
           candidates.map((c) => c.iterationId),
           scenario == 'portable-import'
               ? ['r008', 'r009']
-              : scenario == 'retest-failure' ||
-                      scenario == 'manual-no-tester'
+              : scenario == 'retest-failure' || scenario == 'manual-no-tester'
                   ? ['r001', 'r002', 'r003']
                   : ['r001', 'r002']);
       if (scenario == 'manual-no-tester') {
-        expect(
-            candidates.last.files.map((f) => f['sha256']),
+        expect(candidates.last.files.map((f) => f['sha256']),
             candidates[candidates.length - 2].files.map((f) => f['sha256']),
             reason: '重发的那一版必须是同一份产物，不能借闸门改动内容');
       }

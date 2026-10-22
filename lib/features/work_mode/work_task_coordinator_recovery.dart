@@ -105,6 +105,11 @@ extension _WorkTaskCoordinatorRecovery on WorkTaskCoordinator {
           !task.isUserStopped) {
         throw StateError('当前任务不需要手动继续。');
       }
+      if (isTaskInFlight(taskId)) throw StateError('当前动作正在收尾，请等待安全停点。');
+      if (WorkTaskCompletionChoice.pending(task)) {
+        throw StateError('请先选择可完成、继续测试或补充需求。');
+      }
+      WorkTaskCompletionChoice.setPaused(task, false);
       // 下面那条级联会把 lastError 清空，而 `isUserStopped` 正是靠 lastError
       // 认出来的，所以这次继续的性质必须在任何改写之前固定下来。
       final userStopped = task.isUserStopped;
@@ -164,6 +169,51 @@ extension _WorkTaskCoordinatorRecovery on WorkTaskCoordinator {
           ..actionCount = cumulativeLimits ? 0 : task.actionCount
           ..startedAt = cumulativeLimits ? _clock() : task.startedAt;
       }
+      var executionCheckpoint =
+          _withoutApprovalCheckpoint(task.executionStateJson);
+      if (WorkTaskExecutionPolicy.isValidatedV2GroupTask(task)) {
+        final execution = _decodeExecutionMap(executionCheckpoint);
+        if (task.lastError.startsWith('相同操作此前已被拒绝') &&
+            task.completedOperations.isNotEmpty) {
+          final checkpoint =
+              safeToolRequestCheckpointJson(task.completedOperations.last);
+          try {
+            final operation = jsonDecode(checkpoint);
+            if (operation is Map && operation['tool'] == 'command.run') {
+              final rawFingerprints =
+                  execution['rejectedOperationFingerprints'];
+              final fingerprints = rawFingerprints is List
+                  ? rawFingerprints.whereType<String>().toList()
+                  : <String>[];
+              final fingerprint =
+                  sha256.convert(utf8.encode(checkpoint)).toString();
+              if (!fingerprints.contains(fingerprint)) {
+                fingerprints.add(fingerprint);
+              }
+              if (fingerprints.length > 128) fingerprints.removeAt(0);
+              execution['rejectedOperationFingerprints'] = fingerprints;
+              executionCheckpoint = jsonEncode(execution);
+            }
+          } on Object {
+            // A malformed legacy checkpoint cannot authorize a new operation.
+          }
+        }
+        final rawGuard = execution[WorkProgressGuard.jsonKey];
+        final reason = rawGuard is Map ? rawGuard['reason'] : null;
+        if (rawGuard is Map &&
+            rawGuard['stalled'] == true &&
+            reason is String &&
+            reason.startsWith('连续 ')) {
+          // A deliberate resume opens one bounded run after a no-progress
+          // pause; prior failures and evidence remain available to the guard.
+          final guard = Map<String, dynamic>.from(rawGuard)
+            ..['noProgressCount'] = 0
+            ..['stalled'] = false;
+          guard.remove('reason');
+          execution[WorkProgressGuard.jsonKey] = guard;
+          executionCheckpoint = jsonEncode(execution);
+        }
+      }
       task
         ..status = AgentTaskStatus.queued
         ..resumeRequired = false
@@ -176,9 +226,7 @@ extension _WorkTaskCoordinatorRecovery on WorkTaskCoordinator {
         // A pending request payload is intentionally not persisted in full.
         // A manual restart must re-plan against the current filesystem and
         // grant state; never reuse a stale path scope.
-        ..executionStateJson = _withoutApprovalCheckpoint(
-          task.executionStateJson,
-        )
+        ..executionStateJson = executionCheckpoint
         ..updatedAt = _clock();
       // A manual continuation is a fresh plan against the current role
       // configuration. The old list was a snapshot of capabilities at task
@@ -299,12 +347,6 @@ extension _WorkTaskCoordinatorRecovery on WorkTaskCoordinator {
       _autoResumeTaskIds.remove(taskId);
       final restartFromBeginning =
           WorkTaskCoordinator.canRestartAfterUserStop(task);
-      // A finished task can still be waiting to re-send a deliverable that was
-      // saved but whose chat attachment failed. That resend runs through this
-      // same retry path, so a completed task stays retryable exactly while its
-      // delivery marker is pending.
-      final deliveryRetryPending =
-          workArtifactDeliveryRetryPending(task.executionStateJson);
       // 「从头开始」会清空执行检查点并写入一份新的 v1 讨论状态。对 v2 任务来说
       // 那等于丢掉整块协作记录（认可、待决事项、验收、候选迭代），而且不会报错。
       // 在**清空之前**拒绝，检查点因此保持原样。
@@ -316,8 +358,8 @@ extension _WorkTaskCoordinatorRecovery on WorkTaskCoordinator {
           WorkTaskCoordinator._carriesV2CollaborationState(task)) {
         throw StateError('该任务使用协作（v2）状态，不能通过「从头开始」重置，请在任务面板处理待决事项。');
       }
-      if ((task.status == AgentTaskStatus.cancelled && !restartFromBeginning) ||
-          task.status == AgentTaskStatus.completed && !deliveryRetryPending) {
+      if (!restartFromBeginning &&
+          !WorkTaskCoordinator.allowsCheckpointRetry(task)) {
         throw StateError('已停止或已完成的任务不能重试。');
       }
 

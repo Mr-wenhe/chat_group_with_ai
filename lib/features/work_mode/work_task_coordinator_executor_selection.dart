@@ -64,7 +64,18 @@ extension _WorkTaskCoordinatorExecutorSelection on WorkTaskCoordinator {
           ...?state.deliverableContract,
           'explicitExecutorId': selectedId,
         },
+        collaboration: collaboration == null
+            ? null
+            : WorkCollaborationState.tryParse(collaboration.toJson()
+              ..['revision'] = collaboration.revision + 1),
       );
+      final nextJson = WorkDiscussionState.mergeIntoExecutionState(
+        task.executionStateJson,
+        next,
+        expectedCollaborationRevision: collaboration?.revision,
+      );
+      final needsConfirmation = WorkTaskRequirementsConfirmation.hasMarker(
+          task.executionStateJson);
       task
         ..characterId = selectedId
         ..assignedCharacterIds = <String>{
@@ -74,11 +85,11 @@ extension _WorkTaskCoordinatorExecutorSelection on WorkTaskCoordinator {
         ..status = AgentTaskStatus.paused
         ..resumeRequired = false
         ..lastError = '执行人已由用户指定，正在重新校验群讨论执行门禁。'
-        ..executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
-          task.executionStateJson,
-          next,
-        )
+        ..executionStateJson = nextJson
         ..updatedAt = _clock();
+      if (needsConfirmation) {
+        WorkTaskRequirementsConfirmation.requireForCurrentRequest(task);
+      }
       await _save(task);
       await _record(
         task,

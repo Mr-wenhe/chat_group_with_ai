@@ -366,6 +366,40 @@ class _WorkRoleMentionIntent {
   });
 }
 
+/// Adds a boundary only when a known work-group member name is immediately
+/// followed by the locative Chinese word "在". This is intentionally scoped to
+/// work routing: ordinary chat mention parsing keeps its existing conservative
+/// rules, and longer real member names still win as exact matches.
+String _normalizeAdjacentLocativeWorkMentions(
+  String request,
+  List<AICharacter> characters,
+) {
+  final knownNames = characters
+      .map((character) => character.name)
+      .where((name) => name.isNotEmpty)
+      .toSet();
+  if (knownNames.isEmpty) return request;
+  final pattern = RegExp(r'@([^@\s，。！？!?、；;：:,.]+)');
+  return request.replaceAllMapped(pattern, (match) {
+    if (match.start > 0 &&
+        RegExp(r'^[A-Za-z0-9_./%+\-]$').hasMatch(request[match.start - 1])) {
+      return match.group(0)!;
+    }
+    final token = match.group(1);
+    if (token == null || knownNames.contains(token)) return match.group(0)!;
+    final prefixes = knownNames
+        .where((name) =>
+            token.startsWith(name) &&
+            token.length > name.length &&
+            token.substring(name.length).startsWith('在'))
+        .toList()
+      ..sort((left, right) => right.length.compareTo(left.length));
+    if (prefixes.isEmpty) return match.group(0)!;
+    final name = prefixes.first;
+    return '@$name ${token.substring(name.length)}';
+  });
+}
+
 /// Extracts the work-mode meaning of mentions without changing the shared
 /// chat parser. `@all` is a discussion audience; a trailing `由 @角色 执行`
 /// clause is the only assignment that can override that audience.

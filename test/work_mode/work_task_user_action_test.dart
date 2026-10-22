@@ -2,11 +2,13 @@ import 'dart:convert';
 
 import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/features/work_mode/work_discussion_state.dart';
+import 'package:chat_group/features/work_mode/work_task_requirements_confirmation.dart';
 import 'package:chat_group/features/work_mode/work_task_user_action.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 AgentTask _task({
   String id = 'task-1',
+  String userRequest = '输出 Word 需求文档',
   AgentTaskStatus status = AgentTaskStatus.paused,
   String executionStateJson = '',
 }) {
@@ -14,7 +16,7 @@ AgentTask _task({
     id: id,
     groupId: 'group-1',
     characterId: '',
-    userRequest: '输出 Word 需求文档',
+    userRequest: userRequest,
     status: status,
     executionStateJson: executionStateJson,
     workModeTask: true,
@@ -38,6 +40,7 @@ WorkDiscussionState _discussion({
   String phase = WorkDiscussionPhase.blocked,
   Iterable<String> openQuestions = const <String>[],
   Iterable<String> blockers = const <String>['missingUserInformation'],
+  Map<String, dynamic>? deliverableContract,
 }) {
   return WorkDiscussionState(
     conversationId: 'group-1',
@@ -53,11 +56,179 @@ WorkDiscussionState _discussion({
     understandingEvidence: const ['范围已记录'],
     openQuestions: openQuestions,
     blockers: blockers,
-    deliverableContract: _contract(revision: revision),
+    deliverableContract: deliverableContract ?? _contract(revision: revision),
   );
 }
 
 void main() {
+  test('确认飞行棋需求时保留明确玩法并只建议未指定的默认玩法', () {
+    const request = '制作两人飞行棋，掷出 5 或 6 都可以起飞，交付 game.html';
+    final task = _task(userRequest: request);
+    task.executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
+      '',
+      WorkDiscussionState.forNewTask(task),
+    );
+    WorkTaskRequirementsConfirmation.requireForCurrentRequest(task);
+
+    final card = WorkTaskRequirementsConfirmation.cardFor(
+      task,
+      executorName: '程序媛',
+    );
+    expect(card, contains('按你原话中已明确的规则执行'));
+    expect(card, isNot(contains('四人同机轮流')));
+    WorkTaskRequirementsConfirmation.acceptCurrentRequest(task);
+
+    final scope = WorkDiscussionState.currentRequestScope(task);
+    expect(scope, request);
+    expect(scope, isNot(contains('四人同机轮流')));
+  });
+
+  test('没有明示玩法时确认卡的默认飞行棋规则会写入任务范围', () {
+    final task = _task(userRequest: '制作一款飞行棋游戏');
+    task.executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
+      '',
+      WorkDiscussionState.forNewTask(task),
+    );
+    WorkTaskRequirementsConfirmation.requireForCurrentRequest(task);
+
+    final card = WorkTaskRequirementsConfirmation.cardFor(
+      task,
+      executorName: '程序媛',
+    );
+    expect(card, contains('玩法建议：四人同机轮流'));
+    WorkTaskRequirementsConfirmation.acceptCurrentRequest(task);
+
+    expect(
+      WorkDiscussionState.currentRequestScope(task),
+      contains('用户确认卡中接受的玩法：四人同机轮流'),
+    );
+  });
+
+  test('flight chess confirmation resolves the requested nested output file',
+      () {
+    const request = '大家讨论差不多了，现在需要大家决定最终方案，最终由@程序媛 '
+        '在我的 /Users/fengye/Desktop/chat_group_out 这个目录中 创建一个飞行棋的目录，'
+        '里面放着一份飞行棋的html';
+    final task = _task(
+      userRequest: request,
+      executionStateJson: jsonEncode({
+        'discussionState': _discussion(
+          phase: WorkDiscussionPhase.awaitingDiscussion,
+          blockers: const ['discussionRequired'],
+          deliverableContract: {
+            ..._contract(),
+            'deliverableType': 'source',
+            'format': 'html',
+            'location': '/Users/fengye/Desktop/chat_group_out',
+            'contentScope': request,
+          },
+        ).toJson(),
+      }),
+    );
+    WorkTaskRequirementsConfirmation.requireForCurrentRequest(task);
+
+    final card = WorkTaskRequirementsConfirmation.cardFor(
+      task,
+      executorName: '程序媛',
+    );
+    expect(
+      card,
+      contains(
+        '/Users/fengye/Desktop/chat_group_out/飞行棋/飞行棋.html',
+      ),
+    );
+  });
+
+  test('requirement confirmation is bound to the current request revision', () {
+    final task = _task(
+      executionStateJson: jsonEncode({
+        'discussionState': _discussion(
+          deliverableContract: {
+            ..._contract(),
+            'deliverableType': 'html',
+            'format': 'html',
+            'location': '/Users/fengye/Desktop/chat_group_out/飞行棋',
+            'revisionTarget': '飞行棋.html',
+          },
+        ).toJson(),
+        'retainedMetadata': 'keep-me',
+      }),
+      userRequest: '制作可实际游玩的单文件 HTML 飞行棋，交付飞行棋.html。'
+          'CSS 和 JavaScript 内嵌，无需安装、构建或联网，双击即可打开。'
+          '非制作人测试成员实际运行当前候选；失败时程序媛返工，再由测试成员复测。',
+    );
+    WorkTaskRequirementsConfirmation.requireForCurrentRequest(task);
+
+    final action = WorkTaskUserAction.forTask(task).single;
+    expect(action.kind, WorkTaskUserActionKind.confirmRequirements);
+    expect(action.version, isNonZero);
+    expect(
+      WorkTaskUserAction.isCurrent(
+        task,
+        blockerId: action.blockerId,
+        version: action.version,
+      ),
+      isTrue,
+    );
+    expect(jsonDecode(task.executionStateJson)['retainedMetadata'], 'keep-me');
+    final card = WorkTaskRequirementsConfirmation.cardFor(
+      task,
+      executorName: '程序媛',
+    );
+    expect(card, contains('四人同机轮流'));
+    expect(card, contains('飞行棋.html'));
+    expect(card, contains('程序媛'));
+    expect(card, contains('CSS 和 JavaScript 内嵌于同一 HTML'));
+    expect(card, contains('无需安装、构建或联网'));
+    expect(card, contains('版本摘要、测试项目、预期、实际和执行记录'));
+    expect(card, contains('由程序媛返工生成新候选后再独立复测'));
+
+    task.userRequest = '新增需求：增加规则说明和静音开关';
+    expect(WorkTaskRequirementsConfirmation.isCurrent(task), isFalse);
+    expect(
+      WorkTaskUserAction.forTask(task).single.kind,
+      WorkTaskUserActionKind.openTask,
+    );
+
+    WorkTaskRequirementsConfirmation.requireForCurrentRequest(task);
+    final revisedAction = WorkTaskUserAction.forTask(task).single;
+    expect(revisedAction.kind, WorkTaskUserActionKind.confirmRequirements);
+    expect(revisedAction.version, isNot(action.version));
+  });
+
+  test('requirement confirmation is bound to the routed deliverable contract',
+      () {
+    final task = _task(
+      executionStateJson: jsonEncode({
+        'discussionState': _discussion().toJson(),
+      }),
+    );
+    WorkTaskRequirementsConfirmation.requireForCurrentRequest(task);
+    final action = WorkTaskUserAction.forTask(task).single;
+    expect(WorkTaskRequirementsConfirmation.isCurrent(task), isTrue);
+
+    final root = jsonDecode(task.executionStateJson) as Map<String, dynamic>;
+    final discussion = Map<String, dynamic>.from(
+      root[WorkDiscussionState.jsonKey] as Map,
+    );
+    discussion['deliverableContract'] = {
+      ...discussion['deliverableContract'] as Map,
+      'location': '/Users/fengye/Desktop/changed-output',
+    };
+    root[WorkDiscussionState.jsonKey] = discussion;
+    task.executionStateJson = jsonEncode(root);
+
+    expect(WorkTaskRequirementsConfirmation.isCurrent(task), isFalse);
+    expect(
+      WorkTaskUserAction.isCurrent(
+        task,
+        blockerId: action.blockerId,
+        version: action.version,
+      ),
+      isFalse,
+    );
+  });
+
   test('binds role and question reminders to a stable task checkpoint', () {
     final roleTask = _task(
       executionStateJson: jsonEncode({

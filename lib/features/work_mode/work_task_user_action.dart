@@ -5,6 +5,7 @@ import 'package:chat_group/features/work_mode/work_failure.dart';
 import 'package:chat_group/features/work_mode/work_task_clarification.dart';
 import 'package:chat_group/features/work_mode/work_discussion_state.dart';
 import 'package:chat_group/features/work_mode/work_task_decision.dart';
+import 'package:chat_group/features/work_mode/work_task_requirements_confirmation.dart';
 import 'package:crypto/crypto.dart';
 
 /// The small set of user actions that can be advertised in a group message.
@@ -17,6 +18,7 @@ enum WorkTaskUserActionKind {
   authorizeFolder,
   approveCommand,
   confirmExecutorSwap,
+  confirmRequirements,
   openTask,
 }
 
@@ -47,6 +49,7 @@ class WorkTaskUserAction {
         WorkTaskUserActionKind.authorizeFolder => '授权目录',
         WorkTaskUserActionKind.approveCommand => '查看审批',
         WorkTaskUserActionKind.confirmExecutorSwap => '确认执行人',
+        WorkTaskUserActionKind.confirmRequirements => '确认本版需求',
         WorkTaskUserActionKind.openTask => '查看任务',
       };
 
@@ -91,6 +94,26 @@ class WorkTaskUserAction {
     }
     final actions = <WorkTaskUserAction>[];
     final metadata = _metadata(task.executionStateJson);
+    if (metadata.containsKey(WorkTaskRequirementsConfirmation.metadataKey)) {
+      final version = WorkTaskRequirementsConfirmation.versionFor(task);
+      if (version == 0) {
+        // A malformed or stale gate must remain blocked, but it cannot
+        // manufacture an actionable confirmation for a different request.
+        // Keep a safe panel entry so the user can inspect the preserved state
+        // and revise the request to produce a fresh, version-bound card.
+        return <WorkTaskUserAction>[
+          _openAction(task, 'requirementsConfirmationInvalid'),
+        ];
+      }
+      return <WorkTaskUserAction>[
+        WorkTaskUserAction(
+          taskId: task.id,
+          blockerId: WorkTaskRequirementsConfirmation.blockerId,
+          version: version,
+          kind: WorkTaskUserActionKind.confirmRequirements,
+        ),
+      ];
+    }
     if (metadata.containsKey('uncertainAction')) {
       actions.add(_openAction(task, 'uncertainAction', material: [
         jsonEncode(metadata['uncertainAction']),
@@ -487,6 +510,9 @@ class WorkTaskUserAction {
     }
     if (blockerId == 'commandApproval') {
       return WorkTaskUserActionKind.approveCommand;
+    }
+    if (blockerId == WorkTaskRequirementsConfirmation.blockerId) {
+      return WorkTaskUserActionKind.confirmRequirements;
     }
     return WorkTaskUserActionKind.openTask;
   }

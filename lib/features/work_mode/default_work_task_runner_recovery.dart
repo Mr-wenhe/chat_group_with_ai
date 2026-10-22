@@ -49,6 +49,22 @@ extension _DefaultWorkTaskRunnerRecovery on DefaultWorkTaskRunner {
       root.remove('uncertainAction');
       task.executionStateJson = jsonEncode(root);
     } else if (uncertain != null) {
+      if (uncertain is Map &&
+          uncertain['tool'] == 'browser.context' &&
+          Platform.isMacOS &&
+          _browserTestSessions.isEmpty) {
+        final status = await _invokeBrowserTestMap({
+          'operation': 'session-status',
+          'sessionRef': '',
+        });
+        if (status?['activeSessionCount'] == 0) {
+          // Offline nonpersistent sessions cannot survive verified native cleanup.
+          root.remove('uncertainAction');
+          task.executionStateJson = jsonEncode(root);
+          return null;
+        }
+        return '上次隔离浏览器会话仍未确认关闭，保留不确定操作；请先关闭测试窗口。';
+      }
       if (uncertain is! Map ||
           uncertain['expectedSha256'] is! String ||
           uncertain['path'] is! String ||

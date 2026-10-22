@@ -1,6 +1,16 @@
 part of 'chat_room_page.dart';
 
 extension _ChatRoomTaskActionSupport on _ChatRoomPageState {
+  Future<void> _publishRequirementsConfirmed(int revision) => _appendMessage(
+        Message(
+          groupId: widget.groupId,
+          senderId: 'system',
+          senderType: 'system',
+          content: '✅【需求已确认】当前需求版本 $revision 已接受，群讨论开始收敛方案。',
+          isMention: true,
+        ),
+      );
+
   /// Handles a durable task action embedded in a chat message. The message
   /// carries its own task/version; this method never falls back to the newest
   /// task in the conversation.
@@ -23,7 +33,42 @@ extension _ChatRoomTaskActionSupport on _ChatRoomPageState {
       version: action.version,
     )) {
       if (mounted) {
-        AppToast.show(context, '该提醒已失效，任务状态已经更新。');
+        if (_isDirectChat) {
+          AppToast.show(context, '该提醒已失效，任务状态已经更新。');
+        } else {
+          ref.read(workTaskOverlayControllerProvider).openTask(action.taskId);
+          AppToast.show(context, '该提醒已更新，已打开当前任务状态。');
+        }
+      }
+      return;
+    }
+
+    if (!_isDirectChat &&
+        action.kind == WorkTaskUserActionKind.confirmRequirements) {
+      final revision = WorkDiscussionState.fromExecutionState(
+            task.executionStateJson,
+          )?.requestRevision ??
+          1;
+      try {
+        await coordinator.confirmRequirements(
+          action.taskId,
+          version: action.version,
+        );
+      } on Object catch (error) {
+        if (mounted) {
+          AppToast.show(
+            context,
+            ref.read(entityLabelsProvider).humanize(
+                  sanitizeWorkTaskError(error),
+                ),
+            icon: Icons.error_outline_rounded,
+          );
+        }
+        return;
+      }
+      await _publishRequirementsConfirmed(revision);
+      if (mounted) {
+        ref.read(workTaskOverlayControllerProvider).openTask(action.taskId);
       }
       return;
     }

@@ -94,8 +94,7 @@ class WorkFollowUpOption {
     return index == null || index < 1 ? null : index;
   }
 
-  static final RegExp _leadingDecoration =
-      RegExp(r'''^[\s"'「」『』（(【]+''');
+  static final RegExp _leadingDecoration = RegExp(r'''^[\s"'「」『』（(【]+''');
   static final RegExp _trailingDecoration =
       RegExp(r'''[\s"'「」『』）)】。，、,.:：;；!！?？]+$''');
   // 「选择」必须排在「选」前面：交替是从左往右试的，先试「选」会把它切成
@@ -401,7 +400,7 @@ class WorkFollowUpPolicy {
       // revision target.
       r'(?<![\w])((?:(?:[A-Za-z]:[\\/])|/)?[\w\u0080-\uffff][\w\u0080-\uffff./\\-]*\.(?:html?|md|markdown|dart|java|txt|'
       r'json|ya?ml|svg|css|js|ts|py|sh|bash|c|cc|cpp|h|hpp|pdf|docx?|xlsx?|'
-      r'pptx?|csv|sql|log|png|jpe?g|zip))(?![\w\u0080-\uffff./\\-])',
+      r'pptx?|csv|sql|log|png|jpe?g|zip))(?![A-Za-z0-9_./\\-])',
       caseSensitive: false,
     ).firstMatch(request);
     final value = match?.group(1)?.replaceAll('\\', '/');

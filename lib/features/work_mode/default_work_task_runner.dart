@@ -1,3 +1,4 @@
+import 'work_task_completion_choice.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -78,6 +79,7 @@ import 'package:chat_group/features/work_mode/stage02_workspace_file_tool.dart';
 import 'package:chat_group/features/work_mode/weather_forecast_service.dart';
 import 'package:chat_group/features/web_search/security/search_secret_scanner.dart';
 import 'package:dio/dio.dart';
+import 'package:flutter/services.dart';
 import 'package:open_filex/open_filex.dart';
 
 part 'default_work_task_runner_execution.dart';
@@ -90,6 +92,7 @@ part 'default_work_task_runner_context.dart';
 part 'default_work_task_runner_delivery.dart';
 part 'default_work_task_runner_candidates.dart';
 part 'default_work_task_runner_production.dart';
+part 'default_work_task_runner_production_changes.dart';
 part 'default_work_task_runner_recovery.dart';
 part 'default_work_task_runner_production_delivery.dart';
 part 'default_work_task_runner_review.dart';
@@ -115,6 +118,7 @@ class DefaultWorkTaskRunner
         WorkTaskDiscussionExecutorValidator,
         WorkTaskFailureReporter,
         WorkTaskCollaborationExecutor,
+        WorkTaskUserCandidateDelivery,
         WorkTaskRecoveryValidator {
   static const investigationCredentialTimeout = Duration(seconds: 8);
 
@@ -263,6 +267,7 @@ class DefaultWorkTaskRunner
   Future<void> Function(AgentTask task)? _taskCheckpointSink;
   final Set<String> _coordinatorDeliveryTasks = {};
   final Map<String, Map<String, String>> _presentedLocalDrafts = {};
+  final Map<String, _MacWebKitTestSession> _browserTestSessions = {};
 
   /// The full request is retained only while this process is waiting for a
   /// user decision. Durable task fields contain the redacted checkpoint.
@@ -341,6 +346,11 @@ class DefaultWorkTaskRunner
     WorkDiscussionState state,
   ) =>
       _implValidateDiscussionExecutor(task, state);
+
+  @override
+  Future<bool> deliverUserConfirmedCandidate(AgentTask task,
+          {bool Function()? hasArrivingInput}) =>
+      _deliverUserConfirmedCandidate(task, hasArrivingInput: hasArrivingInput);
 
   @override
   Future<void> commitCollaborationDelivery(AgentTask task,

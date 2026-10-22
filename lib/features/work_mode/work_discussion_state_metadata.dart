@@ -173,6 +173,24 @@ Map<String, dynamic> workExecutionCheckpointReviewMetadata(Object? value) {
     final candidate = decoded[key];
     if (candidate is bool) safe[key] = candidate;
   }
+  final confirmation = decoded['requirementsConfirmation'];
+  if (confirmation is Map &&
+      confirmation['schemaVersion'] == 1 &&
+      confirmation['requestRevision'] is int &&
+      (confirmation['requestRevision'] as int) >= 1 &&
+      confirmation['scopeDigest'] is String &&
+      RegExp(r'^[0-9a-f]{64}$')
+          .hasMatch(confirmation['scopeDigest'] as String)) {
+    safe['requirementsConfirmation'] = <String, dynamic>{
+      'schemaVersion': 1,
+      'requestRevision': confirmation['requestRevision'],
+      'scopeDigest': confirmation['scopeDigest'],
+      if (confirmation['contractDigest'] is String &&
+          RegExp(r'^[0-9a-f]{64}$')
+              .hasMatch(confirmation['contractDigest'] as String))
+        'contractDigest': confirmation['contractDigest'],
+    };
+  }
   final folderPath = decoded['folderRequestPath'];
   if (folderPath is String && folderPath.trim().isNotEmpty) {
     safe['folderRequestPath'] = _cleanText(folderPath, maximum: 4096);

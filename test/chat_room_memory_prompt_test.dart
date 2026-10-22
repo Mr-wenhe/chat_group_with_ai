@@ -7,15 +7,19 @@ import 'package:chat_group/core/models/character_memory.dart';
 import 'package:chat_group/core/models/chat_group.dart';
 import 'package:chat_group/core/models/group_memory.dart';
 import 'package:chat_group/core/models/message.dart';
+import 'package:chat_group/core/models/media_attachment.dart';
 import 'package:chat_group/core/models/permanent_memory.dart';
 import 'package:chat_group/core/models/relationship_state.dart';
 import 'package:chat_group/core/models/user_profile.dart';
 import 'package:chat_group/core/storage/api_credential_resolver.dart';
 import 'package:chat_group/features/chat_group/chat_orchestrator.dart';
+import 'package:chat_group/features/chat_group/chat_reply_prompt_guard.dart';
+import 'package:chat_group/features/agentic/context_window_manager.dart';
 import 'package:chat_group/features/chat_group/chat_room_page.dart';
 import 'package:chat_group/features/chat_group/humanized_chat_orchestrator.dart';
 import 'package:chat_group/providers/providers.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -72,13 +76,18 @@ void main() {
   late PromptTestDatabaseService db;
 
   setUp(() async {
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(
+            const MethodChannel('flutter_tts'), (_) async => 1);
     tempDir = await openLifecycleHive();
     db = PromptTestDatabaseService();
   });
 
   tearDown(() async {
-    db.resetLifecycleCaches();
-    await closeLifecycleHive(tempDir);
+    await TestWidgetsFlutterBinding.instance.runAsync(() async {
+      db.resetLifecycleCaches();
+      await closeLifecycleHive(tempDir);
+    });
   });
 
   testWidgets('普通群聊页面发送入口使用统一记忆而不注入 legacy 内容', (tester) async {
@@ -302,6 +311,89 @@ void main() {
     expect(prompt, isNot(contains('LEGACY_GROUP_MEMORY_不得注入')));
 
     await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('私聊压缩历史后仍向模型提供最近上传的 HTML 正文', (tester) async {
+    final character = _character();
+    final conversation = 'dm:${character.id}';
+    final attachmentMessage = Message(
+      groupId: conversation,
+      senderId: 'user',
+      senderType: 'user',
+      content: '你看下这个html内容是什么，总结一下',
+      visibleToCharacterIds: [character.id],
+      media: [
+        MediaAttachment(
+            type: 'file',
+            localPath:
+                File('test/fixtures/attachment_preview/physics_profile.html')
+                    .absolute
+                    .path,
+            fileName: '陆博文简介.html')
+      ],
+    );
+    final hello = Message(
+        groupId: conversation,
+        senderId: 'user',
+        senderType: 'user',
+        visibleToCharacterIds: [character.id],
+        content: '哈囉');
+    await tester.runAsync(() async {
+      await _seedCommonMemory(db, character);
+      await db.aiCharacterBox.put(character.id, character);
+      final hiddenFile = await File('${tempDir.path}/hidden.html')
+          .writeAsString('<p>PRIVATE_ATTACHMENT_MUST_NOT_LEAK</p>');
+      final hiddenMessage = Message(
+          groupId: conversation,
+          senderId: 'user',
+          senderType: 'user',
+          content: '隐藏附件',
+          visibleToCharacterIds: [
+            'another-character'
+          ],
+          media: [
+            MediaAttachment(
+                type: 'file',
+                localPath: hiddenFile.path,
+                fileName: 'hidden.html')
+          ]);
+      db.historyMessages = [hiddenMessage, attachmentMessage, hello];
+    });
+    await tester.pumpWidget(ProviderScope(
+      overrides: [databaseServiceProvider.overrideWithValue(db)],
+      child: MaterialApp(
+          home: ChatRoomPage(
+              groupId: conversation,
+              credentialResolver: FixedApiCredentialResolver())),
+    ));
+    await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 100)));
+    await tester.pump();
+    final dynamic pageState = tester.state(find.byType(ChatRoomPage));
+    // 压缩路径只留下最后一条真人消息，附件仍在当前会话的近期消息中。
+    final messages = await tester.runAsync(() async =>
+        await pageState.buildPromptMessages(
+            character: character,
+            context: <Message>[hello],
+            userMessage: hello.content,
+            currentUserMessage: hello,
+            transientContextSummary: '用户要求总结附件。'));
+    final prompt = List<Map<String, dynamic>>.from(messages);
+    final guard = ChatReplyPromptGuard.collect(prompt,
+        sharedContext: '',
+        personaPrompt: character.rolePlaySystemPrompt,
+        currentUserTurn: hello.content);
+    final fitted = ContextWindowManager.fitToTokenBudget(prompt,
+        maxTokens: 8192, isProtected: guard.isRequired);
+    expect(guard.survives(fitted), isTrue);
+    expect(_allMessages(fitted), contains('量子物理'));
+    expect(_allMessages(fitted),
+        isNot(contains('PRIVATE_ATTACHMENT_MUST_NOT_LEAK')));
+    expect(_allMessages(fitted), isNot(contains('hidden.html')));
+    await tester.pumpWidget(const SizedBox());
+    await tester.pump();
+    await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 100)));
   });
 
   testWidgets('普通私聊页面发送入口使用统一记忆而不注入当前 DM legacy 内容', (tester) async {

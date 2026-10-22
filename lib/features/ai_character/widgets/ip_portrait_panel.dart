@@ -8,6 +8,7 @@ import 'package:chat_group/core/images/image_style_presets.dart';
 import 'package:chat_group/core/images/ip_image_prompt_builder.dart';
 import 'package:chat_group/core/storage/api_credential_resolver.dart';
 import 'package:chat_group/core/widgets/character_avatar.dart';
+import 'package:chat_group/core/widgets/required_fields_banner.dart';
 import 'package:chat_group/core/widgets/top_toast.dart';
 import 'package:chat_group/features/ai_character/ip_visual_description_llm.dart';
 import 'package:chat_group/features/ai_character/widgets/ip_image_prompt_dialog.dart';
@@ -24,11 +25,6 @@ const String kIpImageFileName = 'ip.png';
 const String kIpImageUnconfiguredMessage = '尚未配置图像服务，请先到 设置 → 图像服务 完成配置';
 const String kIpImageWriteFailedMessage = 'IP 形象保存到本地失败，请重试';
 const String kIpImageGenericFailedMessage = 'IP 形象生成失败，请重试';
-
-/// 「缺哪些必填项」的统一文案。提示行与生成兜底共用一份措辞，
-/// 免得两处文案各自漂移成两种说法。
-String ipPortraitMissingFieldsMessage(List<String> missing) =>
-    '请先填写：${missing.join('、')}';
 
 /// 「IP 形象」面板：按人物定义自动生成形象，并可一键设为头像。
 ///
@@ -61,7 +57,8 @@ class IpPortraitPanel extends ConsumerStatefulWidget {
   final bool initialAvatarFromIp;
   final String initialStyle;
 
-  final void Function(String relPath, bool avatarFromIp, String style) onChanged;
+  final void Function(String relPath, bool avatarFromIp, String style)
+      onChanged;
 
   @override
   ConsumerState<IpPortraitPanel> createState() => IpPortraitPanelState();
@@ -229,7 +226,8 @@ class IpPortraitPanelState extends ConsumerState<IpPortraitPanel>
           TextButton(
             key: const ValueKey('ip-portrait-open-settings'),
             onPressed: () => Navigator.of(context).push(
-              MaterialPageRoute(builder: (_) => const ImageServiceSettingsPage()),
+              MaterialPageRoute(
+                  builder: (_) => const ImageServiceSettingsPage()),
             ),
             child: const Text('前往设置'),
           ),
@@ -263,7 +261,8 @@ class IpPortraitPanelState extends ConsumerState<IpPortraitPanel>
           .map((preset) => DropdownMenuItem<String>(
                 value: preset.id,
                 child: Text(preset.label,
-                    overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 13)),
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontSize: 13)),
               ))
           .toList(),
       onChanged: _isGenerating
@@ -285,8 +284,8 @@ class IpPortraitPanelState extends ConsumerState<IpPortraitPanel>
   /// `ListView` 子项加高度会让整块内容失去命中测试（实测 `IgnorePointer`
   /// 上的 viewport 被跳过），所以提示必须复用既有行位、保持高度不变。
   String _referenceHint() {
-    final missing = widget.missingFields();
-    if (missing.isNotEmpty) return ipPortraitMissingFieldsMessage(missing);
+    final missingMessage = requiredFieldsMessage(widget.missingFields());
+    if (missingMessage != null) return missingMessage;
     final subject = widget.draftBuilder().subject;
     if (!subject.describesAi) {
       // 真人资料没有音色与人设，用户会找「人设」框找不到。
@@ -359,11 +358,11 @@ class IpPortraitPanelState extends ConsumerState<IpPortraitPanel>
 
   Future<void> _onGenerate() async {
     // 防御性校验：按钮已按同一条件置灰，这里兜住未来有人绕过 UI 门禁的情况。
-    final missing = widget.missingFields();
-    if (missing.isNotEmpty) {
+    final missingMessage = requiredFieldsMessage(widget.missingFields());
+    if (missingMessage != null) {
       AppToast.show(
         context,
-        ipPortraitMissingFieldsMessage(missing),
+        missingMessage,
         icon: Icons.error_outline_rounded,
       );
       return;

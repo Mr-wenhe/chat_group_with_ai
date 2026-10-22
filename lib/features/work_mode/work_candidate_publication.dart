@@ -101,7 +101,8 @@ class WorkCandidatePublisher {
           if (jsonEncode(_binding(candidate.manifest)) != jsonEncode(binding)) {
             throw StateError('同一发布标识不能替换内容基线。');
           }
-          await verify(candidate, expectedDigest: candidate.digest);
+          await verify(candidate,
+              expectedDigest: candidate.digest, testedFiles: sources);
           return candidate;
         }
         final reservation = File('${directory.path}/pending.json');
@@ -191,8 +192,10 @@ class WorkCandidatePublisher {
     await _prepareDirectory(staging);
     final entries = await _copyContract(staging, pending, sources);
     if (previous != null &&
-        previous.manifest['requestRevision'] == pending['requestRevision'] &&
-        previous.manifest['teamRevision'] == pending['teamRevision'] &&
+        ((pending['baseline'] as String).isEmpty ||
+            previous.manifest['requestRevision'] ==
+                    pending['requestRevision'] &&
+                previous.manifest['teamRevision'] == pending['teamRevision']) &&
         jsonEncode(previous.files) == jsonEncode(entries)) {
       throw StateError('候选内容没有变化，不能制造新的修复迭代。');
     }

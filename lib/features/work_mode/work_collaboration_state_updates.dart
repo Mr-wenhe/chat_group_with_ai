@@ -1,5 +1,52 @@
 part of 'work_collaboration_state.dart';
 
+/// Transport recovery does not change the user's requirements.
+bool isMemberRequestRecoveryDecision(Map<String, dynamic> decision) =>
+    decision['kind'] == 'member' &&
+    decision['status'] == 'pending' &&
+    decision['targetId'] is String &&
+    (decision['targetId'] as String).isNotEmpty &&
+    decision['answer'] == '' &&
+    decision['responseRef'] == '' &&
+    const {'retry-same-member', 'member-config-updated'}.every((id) =>
+        (decision['options'] as List? ?? const [])
+            .whereType<Map>()
+            .any((option) => option['id'] == id));
+
+/// A retry answers an existing member failure without changing the task scope.
+bool isMemberRequestRetryDecision(
+    Map<String, dynamic> before, Map<String, dynamic> after) {
+  if (before['kind'] != 'member' ||
+      !const {'pending', 'deferred'}.contains(before['status']) ||
+      after['status'] != 'answered' ||
+      after['answerKind'] != 'choice' ||
+      before['revision'] is! int ||
+      after['revision'] != (before['revision'] as int) + 1 ||
+      after['responseRef'] is! String ||
+      (after['responseRef'] as String).isEmpty) {
+    return false;
+  }
+  final selected = (before['options'] as List? ?? const [])
+      .whereType<Map>()
+      .any((option) =>
+          const {'retry-same-member', 'member-config-updated'}
+              .contains(option['id']) &&
+          option['label'] == after['answer']);
+  if (!selected) return false;
+  return {...before.keys, ...after.keys}.every((key) =>
+      const {
+        'revision',
+        'status',
+        'answer',
+        'answerKind',
+        'responseRef',
+        'promptedReminder'
+      }.contains(key) ||
+      (key == 'missingCondition'
+          ? after[key] == (before[key] ?? '')
+          : jsonEncode(before[key]) == jsonEncode(after[key])));
+}
+
 extension _WorkCollaborationUpdates on WorkCollaborationState {
   WorkCollaborationState _apply(WorkCollaborationUpdate update) {
     if (update.taskId != taskId || update.conversationId != conversationId) {
@@ -7,7 +54,7 @@ extension _WorkCollaborationUpdates on WorkCollaborationState {
     }
     if (appliedEventIds.contains(update.eventId)) return this;
     _validateRevision(update);
-    _validateBaselineChanges(update.next);
+    _validateBaselineChanges(update);
     _validateOrigin(update);
     if (nextPolicyChanged(update.next) &&
         !{'autonomy', 'participation'}.contains(update.sourceRole)) {
@@ -46,7 +93,8 @@ extension _WorkCollaborationUpdates on WorkCollaborationState {
     }
   }
 
-  void _validateBaselineChanges(WorkCollaborationState next) {
+  void _validateBaselineChanges(WorkCollaborationUpdate update) {
+    final next = update.next;
     if ((_changed(scope, next.scope) ||
             _changed(usageAssignments, next.usageAssignments) ||
             _changed([
@@ -77,7 +125,11 @@ extension _WorkCollaborationUpdates on WorkCollaborationState {
                       ..remove('status')
                       ..remove('resultRef'))
                     .toList()) ||
-            _decisionContentChanged(next)) &&
+            _decisionContentChanged(next,
+                allowMemberRetries:
+                    update.sourceRole == 'user' && update.sourceId == 'user',
+                allowMemberRecovery: update.sourceRole == 'router' &&
+                    update.sourceId == 'router')) &&
         next.requestRevision == requestRevision) {
       throw StateError('方案、工作项或用户决策变化必须递增需求版本。');
     }
@@ -95,10 +147,25 @@ extension _WorkCollaborationUpdates on WorkCollaborationState {
   bool _changed(Object? left, Object? right) =>
       jsonEncode(left) != jsonEncode(right);
 
-  bool _decisionContentChanged(WorkCollaborationState next) {
-    List<Map<String, dynamic>> content(List<Map<String, dynamic>> source) =>
-        source.map((item) => {...item}..remove('promptedReminder')).toList();
-    return _changed(content(decisions), content(next.decisions));
+  bool _decisionContentChanged(WorkCollaborationState next,
+      {bool allowMemberRetries = false, bool allowMemberRecovery = false}) {
+    if (decisions.length != next.decisions.length) {
+      return !(allowMemberRecovery &&
+          next.decisions.length == decisions.length + 1 &&
+          !_changed(
+              decisions, next.decisions.take(decisions.length).toList()) &&
+          isMemberRequestRecoveryDecision(next.decisions.last));
+    }
+    for (var index = 0; index < decisions.length; index++) {
+      final before = {...decisions[index]}..remove('promptedReminder');
+      final after = {...next.decisions[index]}..remove('promptedReminder');
+      if (_changed(before, after) &&
+          !(allowMemberRetries &&
+              isMemberRequestRetryDecision(before, after))) {
+        return true;
+      }
+    }
+    return false;
   }
 
   bool _sameExcept(WorkCollaborationState next, Set<String> allowed) {

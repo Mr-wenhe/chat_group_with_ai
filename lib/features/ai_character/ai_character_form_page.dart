@@ -9,6 +9,7 @@ import 'package:chat_group/core/models/character_presets.dart';
 import 'package:chat_group/core/models/tool_permission.dart';
 import 'package:chat_group/core/widgets/app_widgets.dart';
 import 'package:chat_group/core/widgets/character_avatar.dart';
+import 'package:chat_group/core/widgets/required_fields_banner.dart';
 import 'package:chat_group/core/widgets/top_toast.dart';
 import 'package:chat_group/features/agentic/character_skill_resolver.dart';
 import 'package:chat_group/features/agentic/expert_skill_catalog.dart';
@@ -69,6 +70,12 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
   String _selectedVoiceId = '';
   CharacterGender? _selectedGender;
   bool _isSaving = false;
+
+  /// 点过「创建 / 更新」且当时没通过校验才置位。
+  ///
+  /// 它只控制顶栏汇总提示条**是否出现**，不参与判缺：缺项清单每次 build 现算，
+  /// 所以用户补齐后提示自动消失，不需要再点一次按钮。
+  bool _requiredFieldsRejected = false;
   bool _agenticEnabled = true;
   bool _webSearchEnabled = false;
   bool _proactiveChatEnabled = true;
@@ -332,6 +339,15 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
     final hasKnownGender = widget.character?.hasKnownGender ?? true;
+    // 提到 build 顶层：必填清单里的「API 配置」按当前配置列表判存在性。若只读
+    // `_selectedApiConfigId`，配置被删时下拉框回退成 null（红字报「请选择 API
+    // 配置」）而顶栏汇总不报，两处判据就分叉了。
+    final configs = ref.watch(apiConfigsProvider);
+    // 只在用户点过「创建 / 更新」且当时没通过之后才出提示：一进页面就报"缺名字"
+    // 是把尚未开始的填写当成错误。之后每次 build 现算，补齐即消失。
+    final missingRequiredFields = _requiredFieldsRejected
+        ? _missingRequiredFields(configs)
+        : const <String>[];
 
     return PopScope(
       // 恒定 false：判脏必须在「按返回」的瞬间现算，取 build 时缓存下来的值
@@ -369,6 +385,11 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
                       color: cs.primary, fontWeight: FontWeight.w600)),
             ),
           ],
+          bottom: RequiredFieldsBanner.appBarBottom(
+            context: context,
+            missingFields: missingRequiredFields,
+            cs: cs,
+          ),
         ),
         body: Form(
           key: _formKey,
@@ -389,7 +410,7 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
                           decoration: appInputDecoration(
                               '名字 *', 'AI 的名字', Icons.badge_outlined, cs),
                           onChanged: (_) => setState(() {}),
-                          validator: (v) => v?.isEmpty ?? true ? '请输入名字' : null,
+                          validator: (v) => _isBlank(v) ? '请输入名字' : null,
                         ),
                       ),
                       const SizedBox(width: 14),
@@ -401,7 +422,7 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
                     key: _ipPortraitPanelKey,
                     draftBuilder: () =>
                         IpPortraitSource.fromCharacter(_draftCharacter()),
-                    missingFields: _missingPortraitFields,
+                    missingFields: _missingIdentityFields,
                     initialRelPath: _workingIpRelPath,
                     initialAvatarFromIp: _avatarFromIpImage,
                     initialStyle: _workingIpStyle,
@@ -472,7 +493,7 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
                     decoration: appInputDecoration(
                         '角色 *', '游戏达人 / 心理咨询师', Icons.work_outline_rounded, cs),
                     onChanged: (_) => setState(() {}),
-                    validator: (v) => v?.isEmpty ?? true ? '请输入角色' : null,
+                    validator: (v) => _isBlank(v) ? '请输入角色' : null,
                   ),
                   const SizedBox(height: 14),
                   TextFormField(
@@ -516,64 +537,56 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
                   Row(
                     children: [
                       Expanded(
-                        child: Consumer(
-                          builder: (context, ref, child) {
-                            final configs = ref.watch(apiConfigsProvider);
-
-                            return DropdownButtonFormField<String>(
-                              // value 映射：
-                              // - 有真实选中值且该项仍在配置列表中 → 用选中的 id；
-                              // - 关联配置已被删除（id 不在列表）→ 回退为 null，避免 value 不在 items 中触发断言；
-                              // - 完全无配置 → 用哨兵值（仅作占位、不可选）；
-                              // - 有配置但未选择 → null。
-                              value: (configs.isNotEmpty &&
-                                      _selectedApiConfigId.isNotEmpty)
-                                  ? (configs.any(
-                                          (c) => c.id == _selectedApiConfigId)
-                                      ? _selectedApiConfigId
-                                      : null)
-                                  : (configs.isEmpty
-                                      ? _kEmptyConfigValue
-                                      : null),
-                              decoration: appInputDecoration(
-                                  'API 配置 *',
-                                  '先在设置中创建 API 配置',
-                                  Icons.settings_remote_outlined,
-                                  cs),
-                              isExpanded: true,
-                              items: [
-                                if (configs.isEmpty)
-                                  const DropdownMenuItem(
-                                      value: _kEmptyConfigValue,
-                                      enabled: false,
-                                      child: Text('暂无配置，请先在设置中创建',
-                                          style: TextStyle(fontSize: 13))),
-                                ...configs.map((c) => DropdownMenuItem(
-                                      value: c.id,
-                                      child: Text('${c.name} (${c.provider})',
-                                          overflow: TextOverflow.ellipsis,
-                                          style: const TextStyle(fontSize: 14)),
-                                    )),
-                              ],
-                              onChanged: configs.isEmpty
-                                  ? null
-                                  : (v) {
-                                      // 过滤掉哨兵值与空值，确保只接受真实配置 id
-                                      if (v != null &&
-                                          v != _kEmptyConfigValue &&
-                                          v.isNotEmpty) {
-                                        setState(() {
-                                          _selectedApiConfigId = v;
-                                        });
-                                      }
-                                    },
-                              validator: (v) => (v == null ||
-                                      v == _kEmptyConfigValue ||
-                                      v.isEmpty)
-                                  ? '请选择 API 配置'
-                                  : null,
-                            );
-                          },
+                        child: DropdownButtonFormField<String>(
+                          // value 映射：
+                          // - 有真实选中值且该项仍在配置列表中 → 用选中的 id；
+                          // - 关联配置已被删除（id 不在列表）→ 回退为 null，避免 value 不在 items 中触发断言；
+                          // - 完全无配置 → 用哨兵值（仅作占位、不可选）；
+                          // - 有配置但未选择 → null。
+                          value: (configs.isNotEmpty &&
+                                  _selectedApiConfigId.isNotEmpty)
+                              ? (configs
+                                      .any((c) => c.id == _selectedApiConfigId)
+                                  ? _selectedApiConfigId
+                                  : null)
+                              : (configs.isEmpty ? _kEmptyConfigValue : null),
+                          decoration: appInputDecoration(
+                              'API 配置 *',
+                              '先在设置中创建 API 配置',
+                              Icons.settings_remote_outlined,
+                              cs),
+                          isExpanded: true,
+                          items: [
+                            if (configs.isEmpty)
+                              const DropdownMenuItem(
+                                  value: _kEmptyConfigValue,
+                                  enabled: false,
+                                  child: Text('暂无配置，请先在设置中创建',
+                                      style: TextStyle(fontSize: 13))),
+                            ...configs.map((c) => DropdownMenuItem(
+                                  value: c.id,
+                                  child: Text('${c.name} (${c.provider})',
+                                      overflow: TextOverflow.ellipsis,
+                                      style: const TextStyle(fontSize: 14)),
+                                )),
+                          ],
+                          onChanged: configs.isEmpty
+                              ? null
+                              : (v) {
+                                  // 过滤掉哨兵值与空值，确保只接受真实配置 id
+                                  if (v != null &&
+                                      v != _kEmptyConfigValue &&
+                                      v.isNotEmpty) {
+                                    setState(() {
+                                      _selectedApiConfigId = v;
+                                    });
+                                  }
+                                },
+                          validator: (v) => (v == null ||
+                                  v == _kEmptyConfigValue ||
+                                  v.isEmpty)
+                              ? '请选择 API 配置'
+                              : null,
                         ),
                       ),
                       IconButton(
@@ -754,32 +767,28 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
   }
 
   Future<void> _save() async {
-    if (!_formKey.currentState!.validate() || _isSaving) return;
+    if (_isSaving) return;
+    // 两件校验缺一不可：`validate()` 让字段级红字亮起来（年龄超范围这类只有它
+    // 能暴露），必填清单让顶栏把缺项一次说全——表单是长 ListView，缺项在屏幕外
+    // 时只看红字等于什么都没提示。
+    final formValid = _formKey.currentState!.validate();
+    final missingFields = _missingRequiredFields(ref.read(apiConfigsProvider));
+    if (!formValid || missingFields.isNotEmpty) {
+      setState(() => _requiredFieldsRejected = true);
+      return;
+    }
     _isSaving = true;
     setState(() {});
 
     try {
-      ApiConfig? config;
-
-      if (_selectedApiConfigId.isNotEmpty) {
-        config =
-            ref.read(apiConfigsProvider.notifier).getById(_selectedApiConfigId);
-      }
-
+      final config =
+          ref.read(apiConfigsProvider.notifier).getById(_selectedApiConfigId);
       if (config == null) {
+        // 顶栏那道判据已保证选中项真实存在，正常到不了这里。留着是因为
+        // `getById` 是 provider 的公开入口，它的语义若变了，不该让下面的
+        // `config.provider` 直接崩在一个 cast 异常上。
         if (mounted) {
           AppToast.show(context, '请选择 API 配置',
-              icon: Icons.info_outline_rounded);
-        }
-        _isSaving = false;
-        setState(() {});
-        return;
-      }
-      if (_zhipuSearchAnswerOnly &&
-          (config.provider != 'zhipu' ||
-              config.modelName.trim().toLowerCase() != 'glm-4-flash')) {
-        if (mounted) {
-          AppToast.show(context, '新闻角色需要选择智谱 glm-4-flash API 配置',
               icon: Icons.info_outline_rounded);
         }
         _isSaving = false;
@@ -863,11 +872,55 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
   ///
   /// 性别仅新建时拦：编辑态性别被锁死（下面的下拉 `onChanged` 为 null），且
   /// 遗留的未知性别角色本来就靠 `_selectedGender == null` 表达，那不是「没填」。
-  List<String> _missingPortraitFields() => [
-        if (_nameController.text.trim().isEmpty) '名字',
+  List<String> _missingIdentityFields() => [
+        if (_isBlank(_nameController.text)) '名字',
         if (!_isEditing && _selectedGender == null) '性别',
-        if (_roleController.text.trim().isEmpty) '角色',
+        if (_isBlank(_roleController.text)) '角色',
       ];
+
+  /// 名字 / 角色「填没填」的判据，字段级 `validator` 与顶栏缺项清单**共用**。
+  ///
+  /// 两边各写一份时边界会分叉：validator 判 `isEmpty`、清单判 `trim().isEmpty`
+  /// 的那一版，名字填成全空格就变成"顶栏报缺、字段却没红字"，用户只能猜；
+  /// 而保存时统一 `trim()`，空格名字会被静默落库成空串。
+  static bool _isBlank(String? value) => (value ?? '').trim().isEmpty;
+
+  /// 点「创建 / 更新」时判定"还缺什么"的**唯一**判据。
+  ///
+  /// 清单里每一项都必须对应一个"点创建也交不上去"的真实原因，字段级红字负责说
+  /// "在哪一项"，这里负责把散落在长表单各处的原因一次说全——少一项，用户就退回
+  /// "点了没反应"。
+  ///
+  /// API 配置**不**进 [_missingIdentityFields]（IP 形象面板那一类）：面板没绑模型
+  /// 也能走本地模板出图，只是效果打折（面板自己会标注）。
+  List<String> _missingRequiredFields(List<ApiConfig> apiConfigs) => [
+        ..._missingIdentityFields(),
+        if (!_hasUsableApiConfig(apiConfigs)) 'API 配置',
+        if (_zhipuSearchConfigMissing(apiConfigs)) '智谱 glm-4-flash 配置',
+      ];
+
+  ApiConfig? _selectedConfig(List<ApiConfig> apiConfigs) =>
+      apiConfigs.where((c) => c.id == _selectedApiConfigId).firstOrNull;
+
+  /// 选中项必须还指向一个存在的配置：配置被删后下拉框 `value` 会回落成 null，
+  /// 那时红字报"请选择 API 配置"，这里也必须跟着报。
+  bool _hasUsableApiConfig(List<ApiConfig> apiConfigs) =>
+      _selectedApiConfigId.isNotEmpty &&
+      _selectedApiConfigId != _kEmptyConfigValue &&
+      _selectedConfig(apiConfigs) != null;
+
+  /// 「仅使用智谱搜索问答流程」要求本角色绑 glm-4-flash。
+  ///
+  /// 它不是"没填"，但同样是"点创建交不上去"的原因，所以与必填项同列一张清单。
+  /// 从前它只弹一句几秒后自己消失的 Toast——正是这次要修的那类反馈。
+  /// 没绑配置时返回 false：那种情况已由「API 配置」报出，不重复占一行。
+  bool _zhipuSearchConfigMissing(List<ApiConfig> apiConfigs) {
+    if (!_zhipuSearchAnswerOnly) return false;
+    final config = _selectedConfig(apiConfigs);
+    if (config == null) return false;
+    return config.provider != 'zhipu' ||
+        config.modelName.trim().toLowerCase() != 'glm-4-flash';
+  }
 
   /// 表单文本 → 落库整数值的唯一解析口径。
   ///
