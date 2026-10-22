@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'package:chat_group/core/streaming/reported_token_usage.dart';
 
 import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/features/ai_governance/ai_governance_models.dart';
@@ -41,6 +42,12 @@ void main() {
         await restoredStore.addLedgerEntry(first);
         expect(restoredStore.ledgerEntries, hasLength(2));
         expect(db.getTokenUsage()['requestCount'], 2);
+        expect(restoredStore.ledgerEntries.first.budgetCostMicros, 7);
+        expect(
+            restoredStore.ledgerEntries.first.reportedUsage!.cacheWriteTokens,
+            1);
+        expect(restoredStore.ledgerEntries.first.reportedUsage!.cachedTokens,
+            isNull);
         expect(
           restoredStore.ledgerEntries.map((entry) => entry.requestId),
           ['root', 'root:1'],
@@ -112,8 +119,11 @@ UsageLedgerEntry _entry({
       cachedInputTokens: 0,
       outputTokens: 2,
       estimatedCostMicros: 1,
+      budgetCostMicros: 7,
       currency: 'USD',
       priceVersion: 'test',
       exactUsage: true,
+      reportedUsage: ReportedTokenUsage(
+          inputTokens: inputTokens, outputTokens: 2, cacheWriteTokens: 1),
       status: status,
     );

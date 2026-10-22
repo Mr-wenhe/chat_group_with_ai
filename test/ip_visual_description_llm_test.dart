@@ -41,6 +41,7 @@ class _FakeChatApiService extends ChatApiService {
     int maxRetries = 3,
     CancelToken? cancelToken,
     bool allowReasoningContentFallback = false,
+    String? promptCacheKey,
   }) async {
     calls.add((model: model, messages: messages));
     final failure = error;

@@ -26,8 +26,10 @@ extension _ChatRoomPageBuildSupport on _ChatRoomPageState {
     }
 
     // 私聊需要知道哪些用户消息已被对方"读过"，以渲染已读标记。
-    final readUserMessageIds =
-        _isDirectChat ? directReadUserMessageIds(_messages) : const <String>{};
+    final readUserMessageIds = _isDirectChat
+        ? directReadUserMessageIds(_messages,
+            streamingMessageId: _streamingMessage?.id)
+        : const <String>{};
     // #5 性能：消息/角色索引 Map 在父页预计算一次，避免在子组件每次 build 重建。
     final messageIndex = {for (final message in _messages) message.id: message};
     // 被引用的消息可能已滑出当前分页窗口，按需回库补齐，否则引用条显示不出来。

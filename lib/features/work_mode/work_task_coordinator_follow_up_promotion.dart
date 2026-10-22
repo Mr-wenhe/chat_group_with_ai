@@ -135,7 +135,12 @@ extension _WorkTaskCoordinatorFollowUpPromotion on WorkTaskCoordinator {
     // new request may target a different file, and a stale plan could either
     // block unrelated work or fail to serialize the new target.
     _taskLockPlans.remove(task.id);
-    final artifactPathsForRun = startsNewArtifact
+    final continuesPreviousWork = decision.isRevision ||
+        WorkModePolicy.looksLikeWorkRequest(nextRequest) ||
+        answeringModelClarification ||
+        WorkModePolicy.looksLikeWorkContinuation(nextRequest) ||
+        WorkFollowUpPolicy.looksLikeResendRequest(nextRequest);
+    final artifactPathsForRun = startsNewArtifact || !continuesPreviousWork
         ? <String>[]
         : decision.isRevision && decision.artifactPath != null
             ? <String>[decision.artifactPath!]
@@ -146,7 +151,7 @@ extension _WorkTaskCoordinatorFollowUpPromotion on WorkTaskCoordinator {
     task
       ..userRequest = nextUserRequest
       ..status = AgentTaskStatus.queued
-      ..plan = startsNewArtifact ? '' : task.plan
+      ..plan = startsNewArtifact || !continuesPreviousWork ? '' : task.plan
       ..resumeRequired = false
       ..softLimitReached = false
       ..pendingToolRequestJson = ''
@@ -223,7 +228,7 @@ extension _WorkTaskCoordinatorFollowUpPromotion on WorkTaskCoordinator {
       task,
       nextStep: '开始处理已排队的追问。',
       clearRecentToolResults: true,
-      resetTargetAndArtifacts: resetFreshContext,
+      resetTargetAndArtifacts: resetFreshContext || !continuesPreviousWork,
     );
     await _save(task);
     _enqueueTask(task);

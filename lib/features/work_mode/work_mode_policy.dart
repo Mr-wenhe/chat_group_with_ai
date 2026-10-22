@@ -1,5 +1,4 @@
 import 'package:chat_group/core/models/ai_character.dart';
-import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/core/models/character_skill.dart';
 import 'package:chat_group/features/agentic/character_skill_resolver.dart';
 import 'package:chat_group/features/agentic/tool_request.dart';
@@ -21,34 +20,32 @@ class WorkModePolicy {
     ).hasMatch(text);
   }
 
-  static bool _looksLikeWorkContinuation(String request) => RegExp(
+  /// Only the explicit room toggle authorizes routing new chat input to work.
+  ///
+  /// 保留成函数而不是让调用方直接读开关，是为了给"新输入进任务的唯一条件"
+  /// 留一处可读的判据入口；它刻意不接收请求文本或已有任务——那会让调用方
+  /// 误以为文本内容或未结束任务能改变路由结果。
+  static bool shouldRouteRequest({required bool enabled}) => enabled;
+
+  /// 明确的"接着做上一轮"指令，不含任何新需求内容。
+  ///
+  /// 这里只负责识别；是否放行仍由工作模式开关决定（见 [shouldRouteRequest]）。
+  /// 工作模式开关联动、排队派发等多处都要用同一判据，不要在调用点复制正则。
+  static bool looksLikeWorkContinuation(String request) => RegExp(
         r'^\s*(?:请)?(?:继续|重试|恢复|接着)(?:执行|处理|完成|任务|刚才|上次|上一轮)?\s*[。.!！]?\s*$',
         caseSensitive: false,
       ).hasMatch(request);
 
-  /// Decides whether a chat input must stay on the work-task route.
-  ///
-  /// A non-terminal task owns its conversation even when the page toggle was
-  /// switched off after the task started. A terminal task can still receive a
-  /// clearly work-related revision or an attachment, while ordinary social
-  /// messages remain ordinary chat. With no task, callers must show the work
-  /// mode hint and must not let a normal model turn fabricate source code.
-  static bool shouldRouteRequest({
-    required bool enabled,
-    required String request,
-    AgentTask? ownedTask,
-    bool hasAttachments = false,
-  }) {
-    if (enabled) return true;
-    if (ownedTask == null) return false;
-    if (!ownedTask.isTerminal) return true;
-    return hasAttachments ||
-        looksLikeWorkRequest(request) ||
-        _looksLikeWorkContinuation(request);
-  }
-
   static const String workModeHint =
       '这条请求需要读取或修改工作区。请先点击聊天顶部的“工作模式”按钮，开启后我才能以职业身份读取代码、写文件、运行验证或生成项目。';
+
+  /// 工作模式关闭时给聊天输入的出口说明。
+  ///
+  /// 有未结束任务时必须说清"聊天里的输入不会进入任务"，否则用户会以为
+  /// 自己在给正在跑的任务补充指令，实际只是普通聊天。
+  static String chatHintFor({required bool hasActiveTask}) => hasActiveTask
+      ? '$workModeHint\n正在运行的任务不受聊天输入影响；要让它继续、暂停或补充需求，请使用任务面板。'
+      : workModeHint;
 
   /// Durable label used when a user sends an attachment without text.
   ///

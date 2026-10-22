@@ -1,3 +1,5 @@
+import 'dart:convert';
+import 'package:crypto/crypto.dart';
 import 'package:hive/hive.dart';
 import 'package:uuid/uuid.dart';
 import 'api_provider.dart';
@@ -42,6 +44,17 @@ class ApiConfig extends HiveObject {
   @HiveField(9, defaultValue: 'openAiChatCompletions')
   String apiProtocol;
 
+  /// 用户确认中转支持后开启；不据协议标签推断服务器缓存能力。
+  @HiveField(10, defaultValue: false)
+  bool enableWorkPromptCaching;
+
+  String? workPromptCacheKey(String characterId) => enableWorkPromptCaching
+      ? sha256
+          .convert(
+              utf8.encode('work-v1:$id:$modelName:$apiProtocol:$characterId'))
+          .toString()
+      : null;
+
   /// Runtime-only compatibility accessor. It never exposes the legacy Hive key.
   String get apiKey => CredentialRepository.cached(id) ?? '';
 
@@ -75,6 +88,7 @@ class ApiConfig extends HiveObject {
     // keep this literal aligned with ApiProtocol.defaultValue and the Hive
     // field default so old records remain backwards compatible.
     this.apiProtocol = 'openAiChatCompletions',
+    this.enableWorkPromptCaching = false,
   })  : id = id ?? const Uuid().v4(),
         _legacyApiKey = apiKey,
         modelName = modelName ?? ApiProvider.defaultModels[provider] ?? '',

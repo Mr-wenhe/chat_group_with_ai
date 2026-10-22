@@ -7,6 +7,7 @@ import 'dart:typed_data';
 
 import 'package:chat_group/core/models/api_provider.dart';
 import 'package:chat_group/core/models/api_protocol.dart';
+import 'package:chat_group/features/agentic/agent_prompt_builder.dart';
 import 'package:chat_group/services/chat_api_service.dart';
 import 'package:dio/dio.dart';
 import 'package:chat_group/core/streaming/chat_stream_event.dart';
@@ -295,6 +296,66 @@ void main() {
             model == 'step-5-preview' ? effort : null);
         expect(body.containsKey('max_tokens'), isFalse);
         dio.close();
+      }
+    }
+  });
+
+  test('Step 5 非流式回退与 Messages 协议保留显式推理档', () async {
+    for (final protocol in [
+      ApiProtocol.openAiChatCompletions,
+      ApiProtocol.anthropicMessages
+    ]) {
+      for (final model in ['step-5-preview', 'other-model']) {
+        for (final effort in <String?>[null, 'low']) {
+          late Map body;
+          final dio = Dio()
+            ..interceptors
+                .add(InterceptorsWrapper(onRequest: (options, handler) {
+              body = options.data as Map;
+              final response = protocol == ApiProtocol.anthropicMessages
+                  ? {
+                      'content': [
+                        {'type': 'text', 'text': 'OK'}
+                      ]
+                    }
+                  : {
+                      'choices': [
+                        {
+                          'message': {'content': 'OK'}
+                        }
+                      ]
+                    };
+              handler.resolve(Response<ResponseBody>(
+                  requestOptions: options,
+                  statusCode: 200,
+                  data: ResponseBody.fromString(jsonEncode(response), 200)));
+            }));
+          final result = await AiRequestGateway(
+                  store: MemoryGovernanceStore(),
+                  client: ChatApiService(dio: dio))
+              .sendChatMessageWithResponseLimit(
+                  apiKey: 'test-key',
+                  provider: ApiProvider.custom,
+                  apiProtocol: protocol,
+                  customBaseUrl: 'https://example.test/v1',
+                  model: model,
+                  messages: const [],
+                  purpose: AiRequestPurpose.agent,
+                  conversationId: 'group',
+                  characterId: 'member',
+                  reasoningEffort: effort,
+                  maxResponseBytes: 4096,
+                  maxRetries: 0);
+          expect(result['success'], isTrue);
+          final expected = model == 'step-5-preview' ? effort : null;
+          final outputConfig = body['output_config'];
+          expect(
+              protocol == ApiProtocol.anthropicMessages
+                  ? (outputConfig is Map ? outputConfig['effort'] : null)
+                  : body['reasoning_effort'],
+              expected);
+          dio.close();
+        }
       }
     }
   });
@@ -738,6 +799,57 @@ void main() {
     expect(result['success'], isTrue);
     expect(result['message'], 'ok');
     expect(request.uri.queryParameters['alt'], 'sse');
+  });
+
+  test('Anthropic 缓存前缀只标稳定段，动态边界在最前面时不发空缓存块', () async {
+    final bodies = <Map<String, dynamic>>[];
+    final dio = _respondingDio((options) {
+      bodies.add(Map<String, dynamic>.from(options.data as Map));
+      return {
+        'model': 'cached-test',
+        'content': [
+          {'type': 'text', 'text': 'OK'}
+        ],
+        'usage': {'input_tokens': 10, 'output_tokens': 2},
+      };
+    });
+    addTearDown(dio.close);
+    final gateway = AiRequestGateway(
+        store: MemoryGovernanceStore(), client: ChatApiService(dio: dio));
+    Future<Map<String, dynamic>> send(String system) =>
+        gateway.sendChatMessage(
+          apiKey: 'test-key',
+          provider: ApiProvider.custom,
+          apiProtocol: ApiProtocol.anthropicMessages,
+          customBaseUrl: 'https://example.test',
+          model: 'cached-test',
+          messages: [
+            {'role': 'system', 'content': system},
+            {'role': 'user', 'content': 'hello'}
+          ],
+          purpose: AiRequestPurpose.reply,
+          conversationId: 'cache-prefix',
+          characterId: 'worker',
+          maxRetries: 0,
+          promptCacheKey: 'work-key',
+        );
+
+    // 动态边界就在最前面：没有稳定前缀可缓存，不能发空 text 块（上游会 400）。
+    await send('${AgentPromptBuilder.dynamicContextMarker}任务A');
+    final leadingDynamic = bodies.last['system'] as List;
+    expect(leadingDynamic, isNotEmpty);
+    expect(
+      leadingDynamic.any(
+          (block) => (block as Map).containsKey('cache_control')),
+      isFalse,
+      reason: '没有稳定前缀时不应带 cache_control',
+    );
+
+    // 边界在中间：稳定前缀带 cache_control，动态任务数据落在后面的 block。
+    await send('固定规则\n${AgentPromptBuilder.dynamicContextMarker}\n任务A');
+    final mixed = bodies.last['system'] as List;
+    expect((mixed.first as Map)['cache_control'], {'type': 'ephemeral'});
+    expect((mixed.last as Map)['text'], contains('任务A'));
   });
 }
 

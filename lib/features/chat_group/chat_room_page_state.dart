@@ -282,6 +282,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
 
   /// 丢弃当前流式输出的标记：用户点"停止生成"后置位，让流回调不再写状态。
   bool _discardCurrentStream = false;
+  String? _activeUserReplyMessageId;
 
   /// 普通回合的代际号：本群每次停止自动工作（离开本群、被全屏页面盖住、App 进
   /// 后台）就 +1，让所有**飞行中**的回合在下一个 await 之后作废。

@@ -1,3 +1,4 @@
+import 'package:chat_group/core/streaming/reported_token_usage.dart';
 import 'dart:async';
 
 import 'package:chat_group/core/models/api_provider.dart';
@@ -66,6 +67,7 @@ class AiRequestGateway {
     CancelToken? cancelToken,
     bool requiresTools = false,
     bool userInitiated = false,
+    String? promptCacheKey,
   }) async {
     await store.ensureLedgerBox();
     return _sendWithRetries(
@@ -86,6 +88,7 @@ class AiRequestGateway {
         apiKey: apiKey,
         provider: provider,
         apiProtocol: apiProtocol,
+        promptCacheKey: promptCacheKey,
         customBaseUrl: customBaseUrl,
         model: model,
         messages: messages,
@@ -121,9 +124,11 @@ class AiRequestGateway {
     int maxRetries = RetryHandler.defaultMaxRetries,
     CancelToken? cancelToken,
     bool structuredJson = false,
+    String? reasoningEffort,
     bool requiresTools = false,
     bool userInitiated = false,
     required int maxResponseBytes,
+    String? promptCacheKey,
   }) async {
     await store.ensureLedgerBox();
     return _sendWithRetries(
@@ -144,6 +149,7 @@ class AiRequestGateway {
         apiKey: apiKey,
         provider: provider,
         apiProtocol: apiProtocol,
+        promptCacheKey: promptCacheKey,
         customBaseUrl: customBaseUrl,
         model: model,
         messages: messages,
@@ -154,6 +160,7 @@ class AiRequestGateway {
         cancelToken: cancelToken,
         maxResponseBytes: maxResponseBytes,
         structuredJson: structuredJson,
+        reasoningEffort: reasoningEffort,
         allowReasoningContentFallback: purpose == AiRequestPurpose.agent,
       ),
     );
@@ -182,6 +189,7 @@ class AiRequestGateway {
     String? reasoningEffort,
     void Function()? onResponseActivity,
     void Function(ChatStreamEvent event)? onEvent,
+    String? promptCacheKey,
   }) async {
     await store.ensureLedgerBox();
     return _sendWithRetries(
@@ -205,6 +213,7 @@ class AiRequestGateway {
             apiKey: apiKey,
             provider: provider,
             apiProtocol: apiProtocol,
+            promptCacheKey: promptCacheKey,
             customBaseUrl: customBaseUrl,
             model: model,
             messages: messages,
@@ -222,6 +231,7 @@ class AiRequestGateway {
           apiKey: apiKey,
           provider: provider,
           apiProtocol: apiProtocol,
+          promptCacheKey: promptCacheKey,
           customBaseUrl: customBaseUrl,
           model: model,
           messages: messages,
@@ -254,6 +264,7 @@ class AiRequestGateway {
     String? reasoningEffort,
     void Function()? onResponseActivity,
     void Function(ChatStreamEvent event)? onEvent,
+    String? promptCacheKey,
   }) async {
     // No step here carries a total-duration bound: the caller owns the overall
     // work-mode deadline and the cancellation token. The streaming attempt
@@ -264,6 +275,7 @@ class AiRequestGateway {
       apiKey: apiKey,
       provider: provider,
       apiProtocol: apiProtocol,
+      promptCacheKey: promptCacheKey,
       customBaseUrl: customBaseUrl,
       model: model,
       messages: messages,
@@ -283,6 +295,7 @@ class AiRequestGateway {
       apiKey: apiKey,
       provider: provider,
       apiProtocol: apiProtocol,
+      promptCacheKey: promptCacheKey,
       customBaseUrl: customBaseUrl,
       model: model,
       messages: messages,
@@ -296,11 +309,17 @@ class AiRequestGateway {
       allowReasoningContentFallback: true,
       maxResponseBytes: ChatApiService.defaultMaxResponseBytes,
     );
-    if (structured['statusCode'] != 400) return structured;
-    return client.sendChatMessageWithResponseLimit(
+    if (structured['statusCode'] != 400 || promptCacheKey != null) {
+      return {
+        ...structured,
+        'usageAttempts': [streamed, structured]
+      };
+    }
+    final plain = await client.sendChatMessageWithResponseLimit(
       apiKey: apiKey,
       provider: provider,
       apiProtocol: apiProtocol,
+      promptCacheKey: promptCacheKey,
       customBaseUrl: customBaseUrl,
       model: model,
       messages: messages,
@@ -314,6 +333,10 @@ class AiRequestGateway {
       allowReasoningContentFallback: true,
       maxResponseBytes: ChatApiService.defaultMaxResponseBytes,
     );
+    return {
+      ...plain,
+      'usageAttempts': [streamed, structured, plain]
+    };
   }
 
   /// Whether a failed streamed attempt is worth one non-streaming retry.
@@ -370,6 +393,7 @@ class AiRequestGateway {
     bool finishOnTerminalFrame = false,
     String? reasoningEffort,
     void Function()? onResponseActivity,
+    String? promptCacheKey,
   }) async* {
     await store.ensureLedgerBox();
     final rootRequestId = const Uuid().v4();
@@ -407,6 +431,7 @@ class AiRequestGateway {
     int? inputTokens;
     int? cachedTokens;
     int? outputTokens;
+    var reportedUsage = const ReportedTokenUsage();
     var outputCharacters = 0;
     String status = 'cancelled';
     String? failureType;
@@ -417,6 +442,7 @@ class AiRequestGateway {
         apiKey: apiKey,
         provider: provider,
         apiProtocol: apiProtocol,
+        promptCacheKey: promptCacheKey,
         customBaseUrl: customBaseUrl,
         model: model,
         messages: messages,
@@ -428,12 +454,13 @@ class AiRequestGateway {
         reasoningEffort: reasoningEffort,
         onResponseActivity: onResponseActivity,
       )) {
+        reportedUsage = reportedUsage.merge(event.usage);
+        inputTokens = reportedUsage.inputTokens;
+        cachedTokens = reportedUsage.cachedTokens;
+        outputTokens = reportedUsage.outputTokens;
         if (event.type == ChatStreamEventType.token) {
           outputCharacters += event.delta?.length ?? 0;
         } else if (event.type == ChatStreamEventType.done) {
-          inputTokens = event.promptTokens;
-          cachedTokens = event.cachedTokens;
-          outputTokens = event.completionTokens;
           status = 'success';
         } else if (event.type == ChatStreamEventType.error) {
           status = 'failed';
@@ -459,6 +486,7 @@ class AiRequestGateway {
             inputTokens: inputTokens,
             cachedTokens: cachedTokens,
             outputTokens: outputTokens,
+            reportedUsage: reportedUsage,
             exactUsage: inputTokens != null && outputTokens != null,
             latencyMs: stopwatch.elapsedMilliseconds,
             retryCount: 0,
@@ -489,6 +517,7 @@ class AiRequestGateway {
           inputTokens: inputTokens,
           cachedTokens: cachedTokens,
           outputTokens: outputTokens,
+          reportedUsage: reportedUsage,
           exactUsage: inputTokens != null && outputTokens != null,
           latencyMs: stopwatch.elapsedMilliseconds,
           retryCount: 0,

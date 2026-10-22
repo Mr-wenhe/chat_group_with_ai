@@ -160,6 +160,39 @@ void main() {
     expect(task.executionStateJson, contains('supplement-message'));
   });
 
+  for (final phase in ['forming', 'producing']) {
+    testWidgets('补充暂停后可从$phase阶段继续', (tester) async {
+      final raw = candidateTestState().toJson()..['phase'] = phase;
+      if (phase == 'forming') raw['plan'] = '';
+      final task = candidateTestTask(WorkCollaborationState.tryParse(raw)!)
+        ..status = AgentTaskStatus.paused
+        ..resumeRequired = false;
+      WorkTaskCompletionChoice.setPaused(task, true);
+      var continued = false;
+      await tester.pumpWidget(MaterialApp(
+          home: Scaffold(
+              body: WorkTaskPanel(
+        tasks: [task],
+        eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+        onSelectTask: (_) {},
+        onStop: (_) {},
+        onContinue: (_) => continued = true,
+        onOpenConversation: (_) {},
+        onCollapse: () {},
+        onClose: () {},
+      ))));
+      final button = find.byKey(const Key('work-task-continue'));
+      expect(button, findsOneWidget);
+      expect(tester.widget<FilledButton>(button).onPressed, isNotNull);
+      expect(find.textContaining('需要你操作：点击继续'), findsOneWidget);
+      expect(find.textContaining('疑似停滞'), findsNothing);
+      await tester.tap(button);
+      await tester.pump();
+      expect(continued, isTrue);
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+  }
+
   testWidgets('冻结后的面板提供确认入口，普通继续不能绕过选择', (tester) async {
     await tester.pumpWidget(MaterialApp(
         home: Scaffold(

@@ -781,7 +781,9 @@ void main() {
     final result = await _loop(model: model, registry: registry).execute(task);
     expect(result.status, WorkAgentLoopStatus.paused);
     expect(task.lastError, contains('任务停滞'));
-    expect(model.requests.length, 9);
+    // noProgressResultLimit = 3：第 1 次读取产生新指纹（记为进展），随后连续 3 次
+    // 相同正文（参数变化不算新证据）判停滞，因此共发出 4 次模型请求。
+    expect(model.requests.length, 4);
   });
 
   test('discussion gate blocks model decisions and tools before readiness',

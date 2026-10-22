@@ -374,7 +374,8 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
       usageEntries = store.ledgerEntries;
       usageDiagnostics = store.diagnostics;
       final registry = ModelCapabilityRegistry();
-      for (final entry in usageEntries.where((item) => item.exactUsage)) {
+      for (final entry in usageEntries
+          .where((item) => item.exactUsage && item.reportedUsage == null)) {
         try {
           final providers = ApiProvider.values.where(
             (provider) => provider.name == entry.provider,
@@ -902,15 +903,24 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
     return callback?.call(taskId) ?? _coordinator!.approve(taskId);
   }
 
-  Future<void> _laterTask(String taskId) {
+  Future<void> _laterTask(String taskId) async {
     final coordinator = _coordinator;
-    if (coordinator == null) return Future<void>.value();
-    return coordinator.deferUserAction(taskId);
+    if (coordinator == null) return;
+    await coordinator.deferUserAction(taskId);
+    _showDeferredTaskFeedback();
   }
 
-  Future<void> _laterTaskVersioned(String taskId, int version) {
+  void _showDeferredTaskFeedback() {
+    if (!mounted) return;
+    setState(() => _isVisible = false);
+    ScaffoldMessenger.maybeOf(context)?.showSnackBar(const SnackBar(
+      content: Text('已保留当前检查点，重新打开任务面板可继续处理。'),
+    ));
+  }
+
+  Future<void> _laterTaskVersioned(String taskId, int version) async {
     final coordinator = _coordinator;
-    if (coordinator == null) return Future<void>.value();
+    if (coordinator == null) return;
     final task = coordinator.taskById(taskId);
     if (task == null) {
       return Future<void>.error(StateError('该任务已不存在。'));
@@ -923,11 +933,12 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
     if (blocker == null && !discussionCheckpoint) {
       return Future<void>.error(StateError('该任务提醒已失效。'));
     }
-    return coordinator.deferUserAction(
+    await coordinator.deferUserAction(
       taskId,
       blockerId: blocker?.blockerId ?? 'discussionRequired',
       version: version,
     );
+    _showDeferredTaskFeedback();
   }
 
   Future<void> _approveTaskVersioned(String taskId, int version) {
@@ -1547,6 +1558,8 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
   }
 
   void _openConversation(String conversationId) {
+    setState(() => _isCollapsed = true);
+    if (ConversationPresenceService.instance.isActive(conversationId)) return;
     final route = conversationId.startsWith('dm:')
         ? '/dm/${conversationId.substring(3)}'
         : '/chat/$conversationId';

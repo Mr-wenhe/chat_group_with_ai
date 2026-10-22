@@ -1,3 +1,4 @@
+import 'package:chat_group/core/models/attachment_data_uri.dart';
 import 'dart:convert';
 import 'dart:math' as math;
 
@@ -143,6 +144,9 @@ class ContextWindowManager {
         return value.fold<int>(0, (sum, item) => sum + characters(item));
       }
       if (value is Map) {
+        if (value['type'] == 'image_url') {
+          return estimatedImageInputTokens * charactersPerEstimatedToken;
+        }
         return value.entries.fold<int>(
           0,
           (sum, entry) => sum + characters(entry.key) + characters(entry.value),

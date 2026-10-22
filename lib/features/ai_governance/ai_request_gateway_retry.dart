@@ -67,42 +67,51 @@ extension _AiRequestGatewayRetrySupport on AiRequestGateway {
 
           final stopwatch = Stopwatch()..start();
           final response = await operation(attempt);
-          final success = response['success'] == true;
-          final inputTokens = response['promptTokens'] as int?;
-          final outputTokens = response['completionTokens'] as int?;
-          final cachedTokens = response['cachedTokens'] as int?;
-          final responseText = response['message']?.toString() ?? '';
-          await _recordAttempt(
-            requestId: requestId,
-            rootRequestId: rootRequestId,
-            provider: provider,
-            model: response['model']?.toString() ?? model,
-            characterId: characterId,
-            conversationId: conversationId,
-            purpose:
-                attempt.retryNumber == 0 ? purpose : AiRequestPurpose.retry,
-            taskId: taskId,
-            runBoundary: runBoundary,
-            originPurpose: purpose,
-            capability: prepared.capability!,
-            estimatedInputTokens: prepared.inputTokens,
-            estimatedOutputTokens:
-                success ? (responseText.length / 4).ceil() : 0,
-            inputTokens: inputTokens,
-            cachedTokens: cachedTokens,
-            outputTokens: outputTokens,
-            exactUsage: inputTokens != null && outputTokens != null,
-            latencyMs: stopwatch.elapsedMilliseconds,
-            retryCount: attempt.retryNumber,
-            status: success ? 'success' : 'failed',
-            failureType: success
-                ? null
-                : AiRequestGateway._failureType(responseText, response),
-            failureDetail:
-                success ? null : response['failureDetail']?.toString(),
-          );
+          final responses = _transportUsageAttempts(response);
+          for (var transport = 0; transport < responses.length; transport++) {
+            final response = responses[transport];
+            final success = response['success'] == true;
+            final inputTokens = response['promptTokens'] as int?;
+            final outputTokens = response['completionTokens'] as int?;
+            final cachedTokens = response['cachedTokens'] as int?;
+            final responseText = response['message']?.toString() ?? '';
+            await _recordAttempt(
+              requestId: transport == 0
+                  ? requestId
+                  : '$requestId:transport:$transport',
+              rootRequestId: rootRequestId,
+              provider: provider,
+              model: response['model']?.toString() ?? model,
+              characterId: characterId,
+              conversationId: conversationId,
+              purpose:
+                  attempt.retryNumber == 0 ? purpose : AiRequestPurpose.retry,
+              taskId: taskId,
+              runBoundary: runBoundary,
+              originPurpose: purpose,
+              capability: prepared.capability!,
+              estimatedInputTokens: prepared.inputTokens,
+              estimatedOutputTokens:
+                  success ? (responseText.length / 4).ceil() : 0,
+              inputTokens: inputTokens,
+              cachedTokens: cachedTokens,
+              outputTokens: outputTokens,
+              reportedUsage: ReportedTokenUsage.fromMap(response),
+              exactUsage: inputTokens != null && outputTokens != null,
+              latencyMs: stopwatch.elapsedMilliseconds,
+              retryCount: attempt.retryNumber,
+              status: success ? 'success' : 'failed',
+              failureType: success
+                  ? null
+                  : AiRequestGateway._failureType(responseText, response),
+              failureDetail:
+                  success ? null : response['failureDetail']?.toString(),
+            );
+          }
+          final publicResponse = Map<String, dynamic>.from(response)
+            ..remove('usageAttempts');
           return {
-            ...response,
+            ...publicResponse,
             'requestId': rootRequestId,
             if (prepared.warning != null) 'budgetWarning': prepared.warning,
           };
@@ -140,57 +149,73 @@ extension _AiRequestGatewayRetrySupport on AiRequestGateway {
     required int? cachedTokens,
     required int? outputTokens,
     required bool exactUsage,
+    required ReportedTokenUsage reportedUsage,
     required int latencyMs,
     required int retryCount,
     required String status,
     required String? failureType,
     required String? failureDetail,
   }) async {
-    final hasValidReportedUsage = inputTokens != null &&
-        outputTokens != null &&
-        capability.usageWithinBounds(
-          inputTokens: inputTokens,
-          outputTokens: outputTokens,
-          cachedInputTokens: cachedTokens,
-        );
-    final effectiveInput =
-        hasValidReportedUsage ? inputTokens : estimatedInputTokens;
-    final effectiveCached = hasValidReportedUsage ? cachedTokens ?? 0 : 0;
-    final effectiveOutput =
-        hasValidReportedUsage ? outputTokens : estimatedOutputTokens;
+    final hasValidReportedUsage = reportedUsage.complete && reportedUsage.valid;
+    // 失败请求可能只上报了部分 usage：例如 Anthropic 协议下 cached/written 缺失时
+    // `inputTokens` 为 null，但 `uncachedInputTokens`（不含缓存的已知输入）仍在。
+    // 此时不能用 0 覆盖已知消耗——否则预算只记了输出那点零头，下一请求不会被
+    // 硬预算阻断。保留已知输入的下界，宁可略低估也不能丢光。
+    final effectiveInput = reportedUsage.valid && inputTokens != null
+        ? inputTokens
+        : status == 'success'
+            ? estimatedInputTokens
+            : reportedUsage.valid
+                ? (reportedUsage.uncachedInputTokens ?? 0)
+                : 0;
+    final effectiveCached = reportedUsage.valid ? cachedTokens ?? 0 : 0;
+    final effectiveOutput = reportedUsage.valid && outputTokens != null
+        ? outputTokens
+        : status == 'success'
+            ? estimatedOutputTokens
+            : 0;
     int? cost;
     final price = capability.price;
-    if (price != null) {
+    if (price != null &&
+        (reportedUsage.cacheWriteTokens ?? 0) == 0 &&
+        (status == 'success' || hasValidReportedUsage)) {
       cost = price.estimateMicros(
         inputTokens: effectiveInput,
         cachedInputTokens: effectiveCached,
         outputTokens: effectiveOutput,
       );
     }
-    if (status == 'success' || hasValidReportedUsage) {
-      await store.addLedgerEntry(UsageLedgerEntry(
-        requestId: requestId,
-        rootRequestId: rootRequestId,
-        timestamp: clock(),
-        provider: provider.name,
-        model: model,
-        characterId: characterId,
-        conversationId: conversationId,
-        taskId: taskId,
-        runBoundary: runBoundary,
-        purpose: purpose,
-        originPurpose: originPurpose,
-        inputTokens: effectiveInput,
-        cachedInputTokens: effectiveCached,
-        outputTokens: effectiveOutput,
-        estimatedCostMicros: cost,
-        currency: price?.currency,
-        priceVersion: price?.version,
-        exactUsage:
-            status == 'success' ? exactUsage && hasValidReportedUsage : true,
-        status: status,
-      ));
-    }
+    // Persist unknown failures too: bounded diagnostic retention must not make
+    // an incomplete task total silently look complete later.
+    await store.addLedgerEntry(UsageLedgerEntry(
+      requestId: requestId,
+      rootRequestId: rootRequestId,
+      timestamp: clock(),
+      provider: provider.name,
+      model: model,
+      characterId: characterId,
+      conversationId: conversationId,
+      taskId: taskId,
+      runBoundary: runBoundary,
+      purpose: purpose,
+      originPurpose: originPurpose,
+      inputTokens: effectiveInput,
+      cachedInputTokens: effectiveCached,
+      outputTokens: effectiveOutput,
+      estimatedCostMicros: cost,
+      budgetCostMicros: cost ??
+          price?.estimateMicros(
+            inputTokens: effectiveInput +
+                (reportedUsage.valid ? reportedUsage.cacheWriteTokens ?? 0 : 0),
+            cachedInputTokens: 0,
+            outputTokens: effectiveOutput,
+          ),
+      currency: price?.currency,
+      priceVersion: price?.version,
+      exactUsage: exactUsage && hasValidReportedUsage,
+      reportedUsage: reportedUsage,
+      status: status,
+    ));
     await store.addDiagnostic(AiRequestDiagnostic(
       requestId: requestId,
       rootRequestId: rootRequestId,
@@ -224,6 +249,7 @@ extension _AiRequestGatewayRetrySupport on AiRequestGateway {
       exactUsage: status == 'success'
           ? exactUsage && hasValidReportedUsage
           : hasValidReportedUsage,
+      reportedUsage: reportedUsage,
       status: status,
       failureType: failureType,
       failureDetail: failureDetail,
@@ -261,4 +287,15 @@ extension _AiRequestGatewayRetrySupport on AiRequestGateway {
       failureType: AiRequestGateway._blockedFailureType(reason),
     ));
   }
+}
+
+/// Nested compatibility fallbacks are distinct billable attempts, not repeated usage frames.
+List<Map<String, dynamic>> _transportUsageAttempts(
+    Map<String, dynamic> result) {
+  final attempts = result['usageAttempts'];
+  if (attempts is! List) return [result];
+  return [
+    for (final attempt in attempts.whereType<Map>())
+      ..._transportUsageAttempts(Map<String, dynamic>.from(attempt))
+  ];
 }

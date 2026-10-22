@@ -2,6 +2,7 @@ import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/database/data_lifecycle_models.dart';
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/relationship_state.dart';
+import 'package:chat_group/features/chat_group/pending_chat_reply_store.dart';
 import 'package:chat_group/features/direct_chat/direct_chat_session.dart';
 import 'package:chat_group/features/work_mode/work_context_boundary.dart';
 
@@ -59,6 +60,8 @@ class DataLifecycleSettings {
       builder.listValue(_pinnedGroupKey, conversationId);
     }
     builder.exactKey('$_workModePrefix$conversationId');
+    builder
+        .exactKey('${PendingChatReplyStore.storageKeyPrefix}$conversationId');
     builder.exactKey(WorkContextBoundary.storageKey(conversationId));
     builder.exactKeysWithPrefix('$_checkpointPrefix$conversationId:');
     builder.nestedMapEntry(
@@ -107,6 +110,8 @@ class DataLifecycleSettings {
     builder.mapEntry(_messageIndexKey, conversationId);
     builder.mapEntry(_conversationSummariesKey, conversationId);
     builder.mapEntry(isGroup ? _groupReadKey : _directReadKey, conversationId);
+    builder
+        .exactKey('${PendingChatReplyStore.storageKeyPrefix}$conversationId');
     for (final item in _retryItems()) {
       if (item['conversationId']?.toString() != conversationId) continue;
       builder.recordValue(
@@ -131,6 +136,13 @@ class DataLifecycleSettings {
     final ids = messageIds.map((id) => id.toString()).toSet();
     if (ids.isEmpty) return const AppSettingsDeletionTargets();
     final builder = _AppSettingsTargetBuilder(this);
+    for (final id in ids) {
+      final message = db.messageBox.get(id);
+      if (message != null) {
+        builder.listValue(
+            '${PendingChatReplyStore.storageKeyPrefix}${message.groupId}', id);
+      }
+    }
     for (final item in _retryItems()) {
       if (!ids.contains(item['messageId']?.toString())) continue;
       builder.recordValue(
@@ -153,6 +165,8 @@ class DataLifecycleSettings {
     builder.listValue(_pinnedCharacterKey, characterId);
     builder.mapEntry(_directProactiveKey, characterId);
     builder.nestedMapEntry(_tokenUsageKey, 'byCharacter', characterId);
+    builder
+        .exactKey('${PendingChatReplyStore.storageKeyPrefix}$conversationId');
     builder.exactKey('$_workModePrefix$conversationId');
     builder.exactKey(WorkContextBoundary.storageKey(conversationId));
     builder.exactKeysWithPrefix('$_checkpointPrefix$conversationId:');
@@ -207,6 +221,7 @@ class DataLifecycleSettings {
       builder.exactKey(_messageIndexCountKey);
       builder.exactKey(_messageIndexSchemaVersionKey);
       builder.exactKeysWithPrefix(_workModePrefix);
+      builder.exactKeysWithPrefix(PendingChatReplyStore.storageKeyPrefix);
       builder.exactKeysWithPrefix(WorkContextBoundary.storageKeyPrefix);
       builder.exactKeysWithPrefix(_checkpointPrefix);
       builder.exactKeysWithPrefix(_retryPrefix);
@@ -259,6 +274,10 @@ class DataLifecycleSettings {
         db.appSettingsBox.get(isGroup ? _pinnedGroupKey : _pinnedCharacterKey);
     if (pins is List && pins.contains(id)) count++;
     if (db.appSettingsBox.containsKey('$_workModePrefix$id')) count++;
+    if (db.appSettingsBox
+        .containsKey('${PendingChatReplyStore.storageKeyPrefix}$id')) {
+      count++;
+    }
     if (db.appSettingsBox.containsKey(WorkContextBoundary.storageKey(id))) {
       count++;
     }

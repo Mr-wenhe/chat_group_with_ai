@@ -46,7 +46,7 @@ extension WorkCollaborationAutonomy on WorkCollaborationState {
     if (!WorkCollaborationState._records(usageAssignments, _validAssignment) ||
         !WorkCollaborationState._unique(usageAssignments, 'scenarioId') ||
         !WorkCollaborationState._unique(usageAssignments, 'memberId')) {
-      return 'usageAssignments';
+      return WorkCollaborationState.usageAssignmentsField;
     }
     if (!WorkCollaborationState._records(usageEvidenceRefs, _validUsageRef) ||
         !WorkCollaborationState._unique(usageEvidenceRefs, 'receiptRef') ||

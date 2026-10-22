@@ -86,6 +86,46 @@ void main() {
     expect(decision.autoRenameIfExists, isTrue);
   });
 
+  test('requested documents are new deliverables without creation keywords',
+      () {
+    for (final request in const [
+      '读取 /workspace/chat_group 这个项目，然后结合 github 相关的开源项目进行对比，给我一份详细的文档',
+      '给我一份详细的对比报告',
+      '提供一份完整的分析文档',
+      '撰写一份技术报告',
+    ]) {
+      final decision = policy.resolve(
+        request: request,
+        lastArtifactPaths: const ['/workspace/飞行棋.html'],
+      );
+      expect(decision.kind, WorkFollowUpKind.newArtifact, reason: request);
+      expect(decision.artifactPath, isNull);
+      expect(decision.autoRenameIfExists, isTrue);
+    }
+  });
+
+  test('requests for existing documents and results remain continuations', () {
+    for (final request in const [
+      '给我一份上次的文档',
+      '给我一份当前报告',
+      '给我结论',
+      '重新发送报告',
+    ]) {
+      expect(
+        policy.resolve(request: request).kind,
+        WorkFollowUpKind.continueTask,
+        reason: request,
+      );
+    }
+    expect(
+      policy.resolve(
+        request: '修改当前文档，给我一份详细的报告',
+        lastArtifactPaths: const ['/workspace/report.md'],
+      ).kind,
+      WorkFollowUpKind.reviseArtifact,
+    );
+  });
+
   test('relative and resolved copies of one artifact are not ambiguous', () {
     final decision = policy.resolve(
       request: '请修改当前文件',

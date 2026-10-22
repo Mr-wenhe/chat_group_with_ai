@@ -134,6 +134,7 @@ extension _ChatRoomPageSessionSupport on _ChatRoomPageState {
       }
       // 检查是否有上次异常中断的 agentic 任务需要恢复。
       _scheduleAgentTaskRecovery();
+      unawaited(_drainQueuedUserMessage());
       // 已共享的群建立实时连接；纯本机的群这里直接返回，不产生任何网络行为。
       unawaited(_startRealtimeIfNeeded());
       if (ChatActivityPolicy.canStartAutoChat(
@@ -370,7 +371,11 @@ extension _ChatRoomPageSessionSupport on _ChatRoomPageState {
     });
   }
 
-  void _stopStreaming() {
+  void _stopStreaming({bool preservePendingReply = false}) {
+    final activeMessageId = _activeUserReplyMessageId;
+    if (!preservePendingReply && activeMessageId != null) {
+      unawaited(_pendingReplyStore.remove(activeMessageId));
+    }
     _cancelActiveSearch();
     if (!_isStreaming) {
       // 选人阶段没有活跃的 stream，但同样属于"这一轮还在跑"：取消正在飞的
@@ -628,6 +633,7 @@ extension _ChatRoomPageSessionSupport on _ChatRoomPageState {
     } else if (_isAutoChatEnabled) {
       _startAutoChat();
     }
+    if (!enabled) unawaited(_drainQueuedUserMessage());
   }
 
   /// 切换圆桌会议模式；与工作模式互斥，同时保留群聊空闲自动发言。

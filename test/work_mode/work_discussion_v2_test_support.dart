@@ -9,13 +9,16 @@ class _ReviewFixtureDatabase extends DatabaseService {
   _ReviewFixtureDatabase(this.root);
   final Directory root;
   @override
-  Future<Directory> get mediaDir => Directory('${root.path}/media').create(recursive: true);
+  Future<Directory> get mediaDir =>
+      Directory('${root.path}/media').create(recursive: true);
 }
 
 class _MaterialFinishClient extends ChatApiService {
-  _MaterialFinishClient(this.replies, {this.modelError});
+  _MaterialFinishClient(this.replies,
+      {this.modelError, this.reasoningOnly = false});
   final List<String> replies;
   final Object? modelError;
+  final bool reasoningOnly;
   final capturedMessages = <List<Map<String, dynamic>>>[];
   int modelCalls = 0;
 
@@ -24,6 +27,7 @@ class _MaterialFinishClient extends ChatApiService {
     required String apiKey,
     required ApiProvider provider,
     ApiProtocol apiProtocol = ApiProtocol.defaultValue,
+    String? promptCacheKey,
     String? customBaseUrl,
     required String model,
     required List<Map<String, dynamic>> messages,
@@ -39,6 +43,17 @@ class _MaterialFinishClient extends ChatApiService {
   }) async {
     capturedMessages.add(messages);
     modelCalls++;
+    if (reasoningOnly) {
+      onResponseActivity?.call();
+      final activity = Timer.periodic(
+          const Duration(milliseconds: 5), (_) => onResponseActivity?.call());
+      try {
+        await cancelToken!.whenCancel;
+        return {'success': false, 'message': '请求已取消'};
+      } finally {
+        activity.cancel();
+      }
+    }
     if (modelError != null) throw modelError!;
     return {'success': true, 'message': replies[modelCalls > 1 ? 1 : 0]};
   }
@@ -95,6 +110,10 @@ class _ModelClient extends ChatApiService {
 
   final Stream<ChatStreamEvent> Function(CancelToken?)? streamOverride;
   final bool reportActivity;
+  final completionTimeouts = <Duration?>[];
+  final completionTokens = <CancelToken?>[];
+  final completionEfforts = <String?>[];
+  void Function()? activityCallback;
   _ModelClient(this.respond,
       {this.expectedMaxTokens = 0,
       this.streamOverride,
@@ -104,6 +123,7 @@ class _ModelClient extends ChatApiService {
     required String apiKey,
     required ApiProvider provider,
     ApiProtocol apiProtocol = ApiProtocol.defaultValue,
+    String? promptCacheKey,
     String? customBaseUrl,
     required String model,
     required List<Map<String, dynamic>> messages,
@@ -115,6 +135,7 @@ class _ModelClient extends ChatApiService {
     String? reasoningEffort,
     void Function()? onResponseActivity,
   }) async* {
+    activityCallback = onResponseActivity;
     if (reportActivity) onResponseActivity?.call();
     if (streamOverride != null) {
       yield* streamOverride!(cancelToken);
@@ -151,6 +172,7 @@ class _ModelClient extends ChatApiService {
       {required String apiKey,
       required ApiProvider provider,
       ApiProtocol apiProtocol = ApiProtocol.defaultValue,
+      String? promptCacheKey,
       String? customBaseUrl,
       required String model,
       required List<Map<String, dynamic>> messages,
@@ -163,6 +185,9 @@ class _ModelClient extends ChatApiService {
       bool structuredJson = false,
       bool allowReasoningContentFallback = false,
       required int maxResponseBytes}) {
+    completionTimeouts.add(receiveTimeout);
+    completionTokens.add(cancelToken);
+    completionEfforts.add(reasoningEffort);
     if (maxTokens != expectedMaxTokens) {
       contractViolations.add('maxTokens=$maxTokens，期望 $expectedMaxTokens');
     }

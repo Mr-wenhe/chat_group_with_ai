@@ -43,6 +43,7 @@ class _CancelableDelayedChatApiService extends ChatApiService {
     int maxRetries = 3,
     CancelToken? cancelToken,
     bool allowReasoningContentFallback = false,
+    String? promptCacheKey,
   }) async {
     calls++;
     final delayFuture = Future<void>.delayed(delay);

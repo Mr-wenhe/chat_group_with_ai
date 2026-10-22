@@ -2,6 +2,9 @@ import 'package:chat_group/core/models/character_skill.dart';
 import 'package:chat_group/core/models/media_attachment.dart';
 
 class AgentPromptBuilder {
+  /// 固定规则与动态任务数据的边界，供协议适配器标记稳定缓存前缀。
+  static const dynamicContextMarker = '【当前任务动态上下文】';
+
   /// 公开气泡的发言纪律：默认一到三个短句，只提供新增信息，不套模板。
   ///
   /// 放在 agentic 侧，供 AgentDecision 与工作模式提示共同使用；避免
@@ -41,11 +44,6 @@ class AgentPromptBuilder {
     return '''
 $identity你正在执行工作模式任务。每次只返回一个严格的 AgentDecision JSON object，不要输出解释、XML、Markdown code fence 或其他文本。
 
-用户请求：
-$userRequest${mediaHint(media)}
-
-$workModeContext
-
 可用技能：
 $skillText
 
@@ -74,6 +72,12 @@ ${AgentPromptBuilder.replyGuidance}
 - finish：tool 必须为 null；completion 为 {"summary":"最终结论","evidence":["可验证证据"]}。
 
 输出必须是裸 JSON，例如：{"action":"tool","public_update":"正在读取目标文件。","tool":{"name":"workspace.read","arguments":{"path":"lib/main.dart"}},"completion":null}
+
+$dynamicContextMarker
+用户请求：
+$userRequest${mediaHint(media)}
+
+$workModeContext
 ''';
   }
 

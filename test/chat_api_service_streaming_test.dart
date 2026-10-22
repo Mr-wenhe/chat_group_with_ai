@@ -892,6 +892,7 @@ class _ThrowingStreamChatApiService extends ChatApiService {
     bool finishOnTerminalFrame = false,
     String? reasoningEffort,
     void Function()? onResponseActivity,
+    String? promptCacheKey,
   }) {
     return Stream<ChatStreamEvent>.error(Exception('stream exploded'));
   }
@@ -918,6 +919,7 @@ class _AlwaysFailingStreamService extends ChatApiService {
     bool finishOnTerminalFrame = false,
     String? reasoningEffort,
     void Function()? onResponseActivity,
+    String? promptCacheKey,
   }) async* {
     streamCalls++;
     yield ChatStreamEvent.error('HTTP 503: busy');
@@ -945,6 +947,7 @@ class _StatusStreamChatApiService extends ChatApiService {
     bool finishOnTerminalFrame = false,
     String? reasoningEffort,
     void Function()? onResponseActivity,
+    String? promptCacheKey,
   }) async* {
     yield ChatStreamEvent.error('HTTP $statusCode: provider failure');
   }

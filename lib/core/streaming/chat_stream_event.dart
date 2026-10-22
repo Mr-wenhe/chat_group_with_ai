@@ -1,3 +1,5 @@
+import 'reported_token_usage.dart';
+
 /// 流式输出事件类型枚举：统一区分「增量 token」「整条完成」「异常」三种情况。
 ///
 /// 之所以单独抽成枚举而不是用 Map/动态对象，是为了让 UI 层能通过 `switch`
@@ -51,14 +53,26 @@ class ChatStreamEvent {
   /// 消费方必须再脱敏一次才能使用。
   final bool sanitized;
 
-  /// 估算的 prompt token 数量（用于消费统计）。
+  /// 上游实报的 prompt token 数量（用于消费统计）。
   final int? promptTokens;
 
-  /// 估算的 completion token 数量（用于消费统计）。
+  /// 上游实报的 completion token 数量（用于消费统计）。
   final int? completionTokens;
 
   /// 输入 token 中命中缓存的数量。部分供应商不返回该字段。
   final int? cachedTokens;
+  final int? cacheWriteTokens;
+  final int? reasoningTokens;
+  final int? uncachedInputTokens;
+
+  ReportedTokenUsage get usage => ReportedTokenUsage(
+        inputTokens: promptTokens,
+        outputTokens: completionTokens,
+        cachedTokens: cachedTokens,
+        cacheWriteTokens: cacheWriteTokens,
+        reasoningTokens: reasoningTokens,
+        uncachedInputTokens: uncachedInputTokens,
+      );
 
   /// type == done 时有效：本次回复是否因达到输出上限被供应商截断
   /// （OpenAI 兼容通道的 `finish_reason == 'length'`）。
@@ -78,9 +92,30 @@ class ChatStreamEvent {
     this.promptTokens,
     this.completionTokens,
     this.cachedTokens,
+    this.cacheWriteTokens,
+    this.reasoningTokens,
+    this.uncachedInputTokens,
     this.truncated = false,
     this.failureDetail,
   });
+
+  ChatStreamEvent withUsage(ReportedTokenUsage usage) => ChatStreamEvent(
+        type: type,
+        delta: delta,
+        content: content,
+        model: model,
+        message: message,
+        retryAfter: retryAfter,
+        sanitized: sanitized,
+        failureDetail: failureDetail,
+        truncated: truncated,
+        promptTokens: usage.inputTokens,
+        completionTokens: usage.outputTokens,
+        cachedTokens: usage.cachedTokens,
+        cacheWriteTokens: usage.cacheWriteTokens,
+        reasoningTokens: usage.reasoningTokens,
+        uncachedInputTokens: usage.uncachedInputTokens,
+      );
 
   factory ChatStreamEvent.token(String delta) =>
       ChatStreamEvent(type: ChatStreamEventType.token, delta: delta);

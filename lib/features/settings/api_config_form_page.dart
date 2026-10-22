@@ -43,6 +43,7 @@ class _ApiConfigFormPageState extends ConsumerState<ApiConfigFormPage> {
   ApiProvider _selectedProvider = ApiProvider.deepseek;
   ApiProtocol _selectedProtocol = ApiProtocol.defaultValue;
   bool _obscureApiKey = true;
+  bool _enableWorkPromptCaching = false;
   bool _isSaving = false;
   bool _isTesting = false;
 
@@ -64,6 +65,7 @@ class _ApiConfigFormPageState extends ConsumerState<ApiConfigFormPage> {
     _governanceStore = AiGovernanceStore.forDatabase(db);
     _apiService = AiApiService(AiRequestGateway(store: _governanceStore));
     final c = widget.config;
+    _enableWorkPromptCaching = c?.enableWorkPromptCaching ?? false;
     _nameController = TextEditingController(text: c?.name ?? '');
     // 密钥不会从持久化模型回填到编辑框；留空代表保留现有安全凭据。
     _apiKeyController = TextEditingController();
@@ -349,6 +351,17 @@ class _ApiConfigFormPageState extends ConsumerState<ApiConfigFormPage> {
                     }
                   },
                 ),
+                if (_selectedProtocol != ApiProtocol.geminiGenerateContent)
+                  SwitchListTile(
+                    key: const Key('work-prompt-caching'),
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('工作模式缓存优化'),
+                    subtitle: const Text('仅在确认此接口支持后开启。缓存写入可能单独计费；'
+                        '命中量以上游返回为准。关闭后不发送额外缓存参数。'),
+                    value: _enableWorkPromptCaching,
+                    onChanged: (value) =>
+                        setState(() => _enableWorkPromptCaching = value),
+                  ),
                 Padding(
                   padding: const EdgeInsets.only(top: 6),
                   child: Text(
@@ -577,6 +590,7 @@ class _ApiConfigFormPageState extends ConsumerState<ApiConfigFormPage> {
         name: _nameController.text.trim(),
         provider: provider.name,
         apiProtocol: _selectedProtocol.name,
+        enableWorkPromptCaching: _enableWorkPromptCaching,
         modelName: modelName,
         apiKey: _apiKeyController.text.trim(),
         customBaseUrl: _baseUrlController.text.trim(),

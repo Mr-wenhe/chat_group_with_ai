@@ -49,6 +49,7 @@ class _P7Gateway extends AiRequestGateway {
       {required String apiKey,
       required ApiProvider provider,
       ApiProtocol apiProtocol = ApiProtocol.defaultValue,
+      String? promptCacheKey,
       String? customBaseUrl,
       required String model,
       required List<Map<String, dynamic>> messages,

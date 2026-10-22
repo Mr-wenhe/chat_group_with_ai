@@ -20,12 +20,8 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
     final hasAttachments = _pendingAttachments.isNotEmpty;
     // 放宽发送条件：文案非空 或 有附件均可发送。
     if (text.isEmpty && !hasAttachments) return;
-    final ownedWorkTask = _latestWorkTaskForConversation();
     final routeToWorkMode = WorkModePolicy.shouldRouteRequest(
       enabled: _workModeEnabled,
-      request: text,
-      ownedTask: ownedWorkTask,
-      hasAttachments: hasAttachments,
     );
 
     _textController.clear();
@@ -95,12 +91,19 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
       return;
     }
 
-    if (WorkModePolicy.looksLikeWorkRequest(text)) {
+    // 工作模式关闭时，任何"要动工作区"的输入都不能落到普通聊天里：模型会
+    // 没有工具就凭空写出 HTML/源码说明。续跑类指令（"继续""重试"）同样拦下——
+    // 它们在不带新需求时不匹配 looksLikeWorkRequest，但用户真实意图是驱动任务，
+    // 而任务只认任务面板，不认聊天输入。
+    final hasActiveTask = _latestWorkTaskForConversation()?.isTerminal == false;
+    if (!hasAttachments &&
+        (WorkModePolicy.looksLikeWorkRequest(text) ||
+            (hasActiveTask && WorkModePolicy.looksLikeWorkContinuation(text)))) {
       await _appendMessage(Message(
         groupId: widget.groupId,
         senderId: 'system',
         senderType: 'system',
-        content: WorkModePolicy.workModeHint,
+        content: WorkModePolicy.chatHintFor(hasActiveTask: hasActiveTask),
       ));
       // The hint is a routing boundary, not an informational preface to a
       // normal LLM turn. Letting execution fall through here is what caused
@@ -108,30 +111,16 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
       return;
     }
 
-    if (_isAiReplying) {
-      // AI 正在回复中，排队等待当前回合结束后再处理。
-      _conversationController.enqueue(PendingUserMessage(
-        text,
-        mentionedIds,
-        message: userMessage,
-      ));
-      return;
-    }
-
-    final dispatched = await _dispatchUserRequest(
-      text: text,
-      mentionedIds: mentionedIds,
-      userMessage: userMessage,
-    );
-    if (!dispatched) {
-      // 消息已落库，但派发时页面已经不可见（例如刚落库就被别的页面盖住）。
-      // 放回队列等回到本群再处理，否则这条输入既没有回复、也不会被重新排队。
-      _conversationController.enqueue(PendingUserMessage(
-        text,
-        mentionedIds,
-        message: userMessage,
-      ));
-    }
+    // Register both queues before yielding so a finishing round cannot dispatch
+    // this input while the send path is still deciding whether to enqueue it.
+    final pendingWrite = _pendingReplyStore.add(userMessage.id);
+    _conversationController.enqueue(PendingUserMessage(
+      text,
+      mentionedIds,
+      message: userMessage,
+    ));
+    await pendingWrite;
+    await _drainQueuedUserMessage();
   }
 
   /// 根据当前模式把用户请求派发给"工作模式任务"或"普通聊天回合"。
@@ -147,9 +136,6 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
   }) async {
     final routeToWorkMode = WorkModePolicy.shouldRouteRequest(
       enabled: _workModeEnabled,
-      request: text,
-      ownedTask: _latestWorkTaskForConversation(),
-      hasAttachments: userMessage?.media?.isNotEmpty == true,
     );
     if (routeToWorkMode) {
       await _runWorkModeTaskWithFailureReport(
@@ -160,15 +146,36 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
             userMessage?.media?.isNotEmpty == true ? userMessage?.id : null,
         sourceMessageId: userMessage?.id,
       );
+      if (userMessage != null) {
+        await _pendingReplyStore.remove(userMessage.id);
+      }
       return true;
     }
     // 普通聊天一律等到用户重新看着本群再派发：这里连"工作模式提示"也不写，
     // 因为那同样是在用户看不见的群里留下内容。
     if (!_roomWorkAllowed) return false;
-    // A queued work-like message may reach this method after the page toggle
-    // changed while an earlier normal round was draining. The send path has
-    // already published the hint; never leak it into ordinary chat now.
-    if (WorkModePolicy.looksLikeWorkRequest(text)) return true;
+    // 排队中的工作请求可能在开关被关闭后才被派发：不能泄漏进普通聊天，
+    // 也不能静默丢弃。
+    if (userMessage?.media?.isNotEmpty != true &&
+        WorkModePolicy.looksLikeWorkRequest(text)) {
+      // 发送时开关还开着，所以发送路径没有给出出口提示；关闭动作发生在排队
+      // 之后。这里必须补一条可见说明并清掉待回复标记——只 return 会留下标记，
+      // 之后每次回到本群都会把它重新取出、无效果地空转一次，而用户看到的
+      // 是一条永远没有回应的消息。
+      if (userMessage != null) {
+        await _appendMessage(Message(
+          groupId: widget.groupId,
+          senderId: 'system',
+          senderType: 'system',
+          content: WorkModePolicy.chatHintFor(
+            hasActiveTask:
+                _latestWorkTaskForConversation()?.isTerminal == false,
+          ),
+        ));
+        await _pendingReplyStore.remove(userMessage.id);
+      }
+      return true;
+    }
     if (userMessage != null && isVideoOnlyMessage(userMessage)) {
       await _appendMessage(Message(
         groupId: widget.groupId,
@@ -176,6 +183,7 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
         senderType: 'system',
         content: unsupportedVideoContentNotice,
       ));
+      await _pendingReplyStore.remove(userMessage.id);
       return true;
     }
     final sentiment = UserMessageSentimentAnalyzer.analyze(text);
@@ -192,8 +200,15 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
   /// controller. Queued input is retained while a page is invisible and is
   /// resumed by the lifecycle activation hook or the next drained round.
   Future<void> _drainQueuedUserMessage() async {
-    if (!_canTouchUi || _isAiReplying) return;
-    final next = _conversationController.takeNext();
+    if (!_canTouchUi || !_roomWorkAllowed || _isLoading || _isAiReplying) {
+      return;
+    }
+    var next = _conversationController.takeNext();
+    final interrupted = _nextPendingUserReply();
+    if (interrupted != null && next?.message?.id != interrupted.message?.id) {
+      if (next != null) _conversationController.requeueFirst(next);
+      next = interrupted;
+    }
     if (next == null) return;
     await _dispatchQueuedUserMessage(next);
   }
@@ -455,6 +470,7 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
       ));
       return;
     }
+    final routedTaskId = const Uuid().v4();
     final routeSelector = WorkRoleModelSelectorService(
       characters: routableCharacters,
       credentials: _credentialResolver,
@@ -482,7 +498,9 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
         maxRetries: 0,
         purpose: AiRequestPurpose.agent,
         conversationId: widget.groupId,
-        characterId: 'work-role-router',
+        characterId: character.id,
+        taskId: routedTaskId,
+        promptCacheKey: config.workPromptCacheKey(character.id),
         requiresTools: false,
         userInitiated: true,
         maxResponseBytes: WorkRoleModelSelectorService.maxResponseBytes,
@@ -530,6 +548,7 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
         hasAttachments: hasAttachments,
         attachmentMessageId: attachmentMessageId,
         sourceMessageId: sourceMessageId,
+        taskId: routedTaskId,
         route: route,
         charactersById: charactersById,
       );
@@ -570,6 +589,7 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
         hasAttachments: hasAttachments,
         attachmentMessageId: attachmentMessageId,
         sourceMessageId: sourceMessageId,
+        taskId: routedTaskId,
         route: route,
         charactersById: charactersById,
         additionalBlockers: const ['executorUnavailable'],
@@ -585,6 +605,7 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
         hasAttachments: hasAttachments,
         attachmentMessageId: attachmentMessageId,
         sourceMessageId: sourceMessageId,
+        taskId: routedTaskId,
         route: route,
         charactersById: charactersById,
         additionalBlockers: const ['executorUnavailable'],
@@ -638,6 +659,7 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
         hasAttachments: hasAttachments,
         attachmentMessageId: attachmentMessageId,
         sourceMessageId: sourceMessageId,
+        taskId: routedTaskId,
         route: route,
         charactersById: charactersById,
         additionalBlockers: const ['executorUnavailable'],
@@ -675,6 +697,7 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
     // becomes a visible, recoverable execution failure instead of a one-off
     // system message that bypasses R01/R04.
     final task = AgentTask(
+      id: routedTaskId,
       groupId: widget.groupId,
       characterId: executor.id,
       // Keep the chat message's original empty text, but give the durable
@@ -736,6 +759,7 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
     required bool hasAttachments,
     required String? attachmentMessageId,
     String? sourceMessageId,
+    String? taskId,
     required WorkRoleRouteResult route,
     required Map<String, AICharacter> charactersById,
     Iterable<String> additionalBlockers = const [],
@@ -810,6 +834,7 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
       blockers: blockers,
     );
     final task = AgentTask(
+      id: taskId,
       groupId: widget.groupId,
       characterId: route.characterId ?? '',
       userRequest: taskRequest,
@@ -851,6 +876,7 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
     required bool hasAttachments,
     required String? attachmentMessageId,
     String? sourceMessageId,
+    String? taskId,
     required WorkRoleRouteResult route,
     required Map<String, AICharacter> charactersById,
     Iterable<String> additionalBlockers = const [],
@@ -866,6 +892,7 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
       hasAttachments: hasAttachments,
       attachmentMessageId: attachmentMessageId,
       sourceMessageId: sourceMessageId,
+      taskId: taskId,
       route: route,
       charactersById: charactersById,
       additionalBlockers: extraBlockers,

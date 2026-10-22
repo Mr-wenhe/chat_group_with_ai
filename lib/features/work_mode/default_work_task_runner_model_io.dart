@@ -96,6 +96,7 @@ extension _DefaultWorkTaskRunnerModelIo on DefaultWorkTaskRunner {
     required ApiConfig config,
     required String apiKey,
     required String requestText,
+    required Object? attachmentContent,
     required String actorCharacterId,
     required CancelToken cancellationToken,
     required WorkTaskCancellation cancellation,
@@ -126,6 +127,9 @@ extension _DefaultWorkTaskRunnerModelIo on DefaultWorkTaskRunner {
             '$boundedRaw',
       });
     }
+    if (attachmentContent != null) {
+      messages.add({'role': 'user', 'content': attachmentContent});
+    }
     final outputTokens = workModeOutputReservationTokens(
       capabilityMaxOutput: capabilityMaxOutput,
       capabilityContextWindow: capabilityContextWindow,
@@ -137,6 +141,10 @@ extension _DefaultWorkTaskRunnerModelIo on DefaultWorkTaskRunner {
     final coreMessages = ContextWindowManager.fitToTokenBudget(
       messages,
       maxTokens: inputBudget,
+      isProtected: (message) =>
+          message['content'] == requestText ||
+          (attachmentContent != null &&
+              identical(message['content'], attachmentContent)),
     );
     final actor = database.aiCharacterBox.get(task.characterId);
     if (actor == null) throw StateError('当前工作成员已不可用。');
@@ -161,6 +169,15 @@ extension _DefaultWorkTaskRunnerModelIo on DefaultWorkTaskRunner {
       maximumPromptTokens: inputBudget,
       run: (prepared) async => prepared,
     );
+    if (attachmentContent != null &&
+        !boundedMessages.any(
+            (message) => identical(message['content'], attachmentContent))) {
+      return {
+        'success': false,
+        'message': '附件内容超过当前模型上下文上限，未省略附件发送；请减少附件或选择更大窗口模型。',
+        'failureCode': 'contextWindowExceeded',
+      };
+    }
     final publicUpdateStream = WorkPublicUpdateStream();
     var streamedCharacters = 0;
     var lastPublicUpdateAt = DateTime.fromMillisecondsSinceEpoch(0);
@@ -198,6 +215,7 @@ extension _DefaultWorkTaskRunnerModelIo on DefaultWorkTaskRunner {
           apiKey: apiKey,
           provider: provider,
           apiProtocol: config.protocol,
+          promptCacheKey: config.workPromptCacheKey(task.characterId),
           customBaseUrl: config.customBaseUrl,
           model: config.modelName,
           messages: boundedMessages,
@@ -232,10 +250,6 @@ extension _DefaultWorkTaskRunnerModelIo on DefaultWorkTaskRunner {
                         responseActivityCount++;
                         lastResponseActivityMs =
                             clock().difference(requestStartedAt).inMilliseconds;
-                        if (!firstByte.isCompleted) {
-                          firstTokenMs = lastResponseActivityMs;
-                          firstByte.complete();
-                        }
                       }
                     }
                   : null,
@@ -433,6 +447,7 @@ extension _DefaultWorkTaskRunnerModelIo on DefaultWorkTaskRunner {
         apiKey: apiKey,
         provider: provider,
         apiProtocol: config.protocol,
+        promptCacheKey: config.workPromptCacheKey(task.characterId),
         customBaseUrl: config.customBaseUrl,
         model: config.modelName,
         messages: ContextWindowManager.fitToTokenBudget(

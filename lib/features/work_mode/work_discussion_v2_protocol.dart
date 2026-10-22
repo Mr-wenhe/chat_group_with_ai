@@ -264,8 +264,9 @@ class WorkDiscussionV2Turn {
       WorkDiscussionProtocolText.tailCommon(autonomous: autonomous);
 
   /// 协议总则加材料要求：首轮请求与协议修复器共用同一份。
-  static String _withContractRules(String userRequest) =>
-      WorkDiscussionProtocolText.head +
+  static String _withContractRules(String userRequest,
+          {required bool autonomous}) =>
+      WorkDiscussionProtocolText.headFor(autonomous: autonomous) +
       (requestsSingleArtifact(userRequest)
           ? WorkDiscussionProtocolText.singleArtifactRule
           : WorkDiscussionProtocolText.materialsRule);
@@ -289,7 +290,8 @@ class WorkDiscussionV2Turn {
     required WorkDiscussionStage stage,
     bool autonomous = false,
   }) =>
-      _withContractRules(userRequest) + _tailFor(stage, autonomous: autonomous);
+      _withContractRules(userRequest, autonomous: autonomous) +
+      _tailFor(stage, autonomous: autonomous);
 
   /// 协议修复器用的全量协议：修复器要把任意原始响应转成合法 JSON。
   ///
@@ -297,7 +299,7 @@ class WorkDiscussionV2Turn {
   /// 救回来，所以这里刻意不带 stage 参数。
   static String repairProtocolFor(String userRequest,
           {bool autonomous = false}) =>
-      _withContractRules(userRequest) +
+      _withContractRules(userRequest, autonomous: autonomous) +
       _tail(includeApproval: true, autonomous: autonomous);
 
   static WorkDiscussionV2Turn? parse(Map<String, dynamic> response,

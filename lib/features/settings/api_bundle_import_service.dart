@@ -225,6 +225,7 @@ class ApiBundleImportService {
           baseUrl: entry.baseUrl,
           protocol: protocol,
           name: entry.name,
+          enableWorkPromptCaching: entry.enableWorkPromptCaching,
         )) {
       skip('与现有配置一致，保持不变');
       return null;
@@ -241,8 +242,12 @@ class ApiBundleImportService {
           : '更新为 ${provider.label} · ${model.isEmpty ? '默认模型' : model} 并替换密钥',
       keyFingerprint: fingerprint,
     ));
-    return _ChatWrite(entry: entry, target: target, provider: provider,
-        protocol: protocol, model: model);
+    return _ChatWrite(
+        entry: entry,
+        target: target,
+        provider: provider,
+        protocol: protocol,
+        model: model);
   }
 
   _VoiceWrite? _resolveVoice(
@@ -294,7 +299,8 @@ class ApiBundleImportService {
       return null;
     }
     final uri = Uri.tryParse(entry.baseUrl);
-    if (uri == null || !uri.isAbsolute ||
+    if (uri == null ||
+        !uri.isAbsolute ||
         (uri.scheme != 'http' && uri.scheme != 'https')) {
       // 这里不套用 SearchEndpointValidator：那个校验器带的是搜索域的
       // 「release 必须 HTTPS / 禁本地网关」策略，把它套到生图端点上会拒掉
@@ -353,8 +359,7 @@ class ApiBundleImportService {
       final validation = SearchEndpointValidator.validate(
         entry.baseUrl,
         isRelease: _isRelease,
-        allowLocalDevelopmentGateway:
-            _searchStore.allowLocalDevelopmentGateway,
+        allowLocalDevelopmentGateway: _searchStore.allowLocalDevelopmentGateway,
       );
       if (!validation.isValid) {
         skip(validation.message);
@@ -397,9 +402,8 @@ class ApiBundleImportService {
     final configured = _zhipuSearchStore.hasConfiguredCredential;
     changes.add(BundleChange(
       service: BundleService.search,
-      action: configured
-          ? BundleChangeAction.overwrite
-          : BundleChangeAction.create,
+      action:
+          configured ? BundleChangeAction.overwrite : BundleChangeAction.create,
       title: _zhipuNativeSearchTitle,
       detail: configured ? '替换智谱原生搜索 API Key' : '写入智谱原生搜索 API Key',
       keyFingerprint: _fingerprint(entry.apiKey),
@@ -426,6 +430,9 @@ class ApiBundleImportService {
       // createdAt 是 final；覆盖时透传旧值，否则每次导入都会把「创建时间」刷新。
       createdAt: target?.createdAt,
       apiProtocol: write.protocol.name,
+      enableWorkPromptCaching: write.entry.enableWorkPromptCaching ??
+          target?.enableWorkPromptCaching ??
+          false,
     );
     try {
       await _db.saveApiConfig(config);
@@ -560,9 +567,7 @@ class ApiBundleImportService {
       service: BundleService.search,
       title: _zhipuNativeSearchTitle,
       succeeded: result.isSuccess,
-      reason: result.isSuccess
-          ? ''
-          : (result.message ?? '智谱原生搜索凭据写入失败'),
+      reason: result.isSuccess ? '' : (result.message ?? '智谱原生搜索凭据写入失败'),
     );
   }
 
@@ -593,6 +598,7 @@ class ApiBundleImportService {
     required String baseUrl,
     required ApiProtocol protocol,
     required String name,
+    bool? enableWorkPromptCaching,
   }) =>
       // 名称也算「元数据」：只改名也是一次真实变更，判成「无变化」会让用户
       // 反复导入却看不到任何效果，而且没有任何提示。
@@ -600,7 +606,9 @@ class ApiBundleImportService {
       target.provider == provider.name &&
       target.modelName == model &&
       _normalizeUrl(target.customBaseUrl) == _normalizeUrl(baseUrl) &&
-      target.apiProtocol == protocol.name;
+      target.apiProtocol == protocol.name &&
+      (enableWorkPromptCaching == null ||
+          target.enableWorkPromptCaching == enableWorkPromptCaching);
 
   static String _normalizeUrl(String raw) {
     var value = raw.trim();

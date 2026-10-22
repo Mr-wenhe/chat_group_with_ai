@@ -15,6 +15,12 @@ part 'work_collaboration_state_autonomy_updates.dart';
 /// The bounded business facts of a v2 group task. Full conversation and test
 /// logs live in existing message/event stores; these records contain IDs only.
 class WorkCollaborationState {
+  /// 校验器用协议字段名回传失败原因；调用方按它分类用户话术。
+  ///
+  /// 产生处与识别处必须共用这一常量：写字面量第二次，改字段名或本地化时
+  /// 分类会静默失配，用户看到的就是原始技术文案。
+  static const String usageAssignmentsField = 'usageAssignments';
+
   final String taskId;
   final String conversationId;
   final String projectScopeId;

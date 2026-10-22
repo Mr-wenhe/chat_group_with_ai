@@ -843,7 +843,10 @@ extension _DefaultWorkTaskRunnerUsage on DefaultWorkTaskRunner {
           'sessionRef': session.sessionRef,
         }).timeout(const Duration(seconds: 10));
         _browserTestSessions.remove(task.id);
-        return const WorkToolResult.success(message: '隔离浏览器会话已关闭。');
+        return WorkToolResult.success(
+          message: '隔离浏览器会话已关闭。',
+          data: {'sessionClosed': true, 'sessionRef': session.sessionRef},
+        );
       } on Object catch (error) {
         return WorkToolResult.paused(
             message: '浏览器会话关闭未能核实：${sanitizeWorkTaskError(error)}；当前场景仍被占用。');

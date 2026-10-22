@@ -1,3 +1,4 @@
+import 'package:chat_group/core/models/media_attachment.dart';
 import 'package:chat_group/features/work_mode/work_task_completion_choice.dart';
 import 'dart:async';
 import 'dart:convert';

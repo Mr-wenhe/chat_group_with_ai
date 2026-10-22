@@ -48,6 +48,7 @@ class FakeCompletionClient extends ChatApiService {
     int maxRetries = 5,
     CancelToken? cancelToken,
     bool allowReasoningContentFallback = false,
+    String? promptCacheKey,
   }) async {
     sendCount++;
     lastSendMaxTokens = maxTokens;
@@ -79,6 +80,7 @@ class FakeCompletionClient extends ChatApiService {
     bool structuredJson = false,
     bool allowReasoningContentFallback = false,
     required int maxResponseBytes,
+    String? promptCacheKey,
   }) async {
     fallbackReasoningEffort = reasoningEffort;
     boundedCount++;
@@ -104,6 +106,7 @@ class FakeCompletionClient extends ChatApiService {
     String? reasoningEffort,
     void Function()? onResponseActivity,
     void Function(ChatStreamEvent event)? onEvent,
+    String? promptCacheKey,
   }) async {
     streamedCount++;
     return {'success': true, 'message': '{}'};
@@ -126,6 +129,7 @@ class FakeCompletionClient extends ChatApiService {
     String? reasoningEffort,
     void Function()? onResponseActivity,
     void Function(ChatStreamEvent event)? onEvent,
+    String? promptCacheKey,
   }) async {
     terminalFrameRequested = finishOnTerminalFrame;
     streamedReasoningEffort = reasoningEffort;
@@ -161,6 +165,7 @@ class FakeStreamingErrorClient extends ChatApiService {
     bool finishOnTerminalFrame = false,
     String? reasoningEffort,
     void Function()? onResponseActivity,
+    String? promptCacheKey,
   }) async* {
     yield ChatStreamEvent.error(errorMessage);
   }
@@ -170,6 +175,88 @@ void main() {
   const messages = [
     {'role': 'user', 'content': 'hello'},
   ];
+
+  for (final status in ['success', 'failed']) {
+    for (final scope in ['daily', 'monthly', 'conversation', 'autoChat']) {
+      test('缓存写入 $status 仍占用 $scope 预算，费用未知不等于零', () async {
+        final store = MemoryGovernanceStore(
+            budgetSettings: BudgetSettings(
+          dailyHardLimitMicros: scope == 'daily' ? 100000 : null,
+          monthlyHardLimitMicros: scope == 'monthly' ? 100000 : null,
+          conversationHardLimitMicros: scope == 'conversation' ? 100000 : null,
+          autoChatDailyHardLimitMicros: scope == 'autoChat' ? 100000 : null,
+        ));
+        final client = FakeCompletionClient()
+          ..responder = (_) async => {
+                'success': status == 'success',
+                'message': 'not retryable',
+                'promptTokens': 1000000,
+                'completionTokens': 20,
+                'cachedTokens': 0,
+                'cacheWriteTokens': 900000,
+              };
+        final gateway = AiRequestGateway(store: store, client: client);
+        final purpose = scope == 'autoChat'
+            ? AiRequestPurpose.autoChat
+            : AiRequestPurpose.agent;
+        Future<Map<String, dynamic>> send() => gateway.sendChatMessage(
+              apiKey: 'test',
+              provider: ApiProvider.deepseek,
+              model: 'deepseek-chat',
+              messages: messages,
+              purpose: purpose,
+              conversationId: 'room',
+              characterId: 'actor',
+              taskId: 'task',
+              maxRetries: 0,
+            );
+        await send();
+        final entry = store.ledgerEntries.single;
+        expect(entry.estimatedCostMicros, isNull);
+        expect(entry.budgetCostMicros, greaterThan(100000));
+        expect(UsageLedgerEntry.fromMap(entry.toMap()).budgetCostMicros,
+            entry.budgetCostMicros);
+        final result = await send();
+        expect(result['governanceBlocked'], isTrue);
+        expect(client.sendCount, 1);
+        expect(gateway.guard.reservedMicrosTotal, 0);
+      });
+    }
+  }
+
+  test('旧缓存写入账本缺少预算字段时仍回算预算，不改写实报', () async {
+    final store = MemoryGovernanceStore(
+        budgetSettings: const BudgetSettings(dailyHardLimitMicros: 100000));
+    final client = FakeCompletionClient()
+      ..responder = (_) async => {
+            'success': true,
+            'message': 'OK',
+            'promptTokens': 1000000,
+            'completionTokens': 20,
+            'cachedTokens': 0,
+            'cacheWriteTokens': 900000,
+          };
+    final gateway = AiRequestGateway(store: store, client: client);
+    Future<Map<String, dynamic>> send() => gateway.sendChatMessage(
+          apiKey: 'test',
+          provider: ApiProvider.deepseek,
+          model: 'deepseek-chat',
+          messages: messages,
+          purpose: AiRequestPurpose.agent,
+          conversationId: 'room',
+          characterId: 'actor',
+          taskId: 'task',
+          maxRetries: 0,
+        );
+    await send();
+    final legacyMap = store.ledgerEntries.single.toMap()
+      ..remove('budgetCostMicros');
+    store.ledgerEntries[0] = UsageLedgerEntry.fromMap(legacyMap);
+    expect(store.ledgerEntries.single.budgetCostMicros, isNull);
+    expect((await send())['governanceBlocked'], isTrue);
+    expect(client.sendCount, 1);
+    expect(store.ledgerEntries.single.reportedUsage!.inputTokens, 1000000);
+  });
 
   test('能力和硬预算均在网络调用前阻断', () async {
     final store = MemoryGovernanceStore(
@@ -524,7 +611,7 @@ void main() {
     expect(store.diagnostics.single.toSafeText(), contains('exactUsage=false'));
   });
 
-  test('超出模型上下文的上游用量回退到估算', () async {
+  test('模型能力声明不改写结构有效的上游实报用量', () async {
     final store = MemoryGovernanceStore();
     await store.saveCustomCapability(
       ApiProvider.custom.name,
@@ -554,11 +641,12 @@ void main() {
     );
 
     final entry = store.ledgerEntries.single;
-    expect(entry.inputTokens, lessThan(1000000));
-    expect(entry.cachedInputTokens, 0);
-    expect(entry.outputTokens, 1);
-    expect(entry.exactUsage, isFalse);
-    expect(store.diagnostics.single.exactUsage, isFalse);
+    expect(entry.inputTokens, 100000000);
+    expect(entry.cachedInputTokens, 2);
+    expect(entry.outputTokens, 3);
+    expect(entry.exactUsage, isTrue);
+    expect(entry.reportedUsage!.inputTokens, 100000000);
+    expect(store.diagnostics.single.exactUsage, isTrue);
     expect(store.diagnostics.single.inputTokens, entry.inputTokens);
   });
 

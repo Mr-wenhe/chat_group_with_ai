@@ -128,22 +128,12 @@ extension _ChatRoomContextCompactionSupport on _ChatRoomPageState {
         summary: summary.summary,
       );
       return (
-        messages: _lastUserOnly(visibleFallbackContext),
+        messages: ChatReplyPromptGuard.currentExchange(visibleFallbackContext),
         summary: summary.summary,
       );
     } catch (_) {
       // 压缩失败就退回完整上下文：宁可多花 token，也不能丢上下文。
       return (messages: visibleFallbackContext, summary: transient?.summary);
     }
-  }
-
-  /// 压缩后仅保留最后一条用户消息作为上下文。
-  ///
-  /// 历史已由摘要代表，这里只需保留"当前要回应的那句话"。
-  List<Message> _lastUserOnly(List<Message> messages) {
-    for (final message in messages.reversed) {
-      if (message.senderType == 'user') return [message];
-    }
-    return const [];
   }
 }

@@ -75,6 +75,7 @@ class _SequencedGateway extends AiRequestGateway {
   final Map<String, dynamic>? patchArguments;
   final bool repeatToolOnSecondModelCall;
   final String? finishSummary;
+  final bool invalidFirst;
 
   _SequencedGateway({
     this.patchPath = 'notes.txt',
@@ -82,6 +83,7 @@ class _SequencedGateway extends AiRequestGateway {
     this.patchArguments,
     this.repeatToolOnSecondModelCall = false,
     this.finishSummary,
+    this.invalidFirst = false,
   }) : super(
           store: MemoryGovernanceStore(),
           client: _UnusedClient(),
@@ -121,6 +123,7 @@ class _SequencedGateway extends AiRequestGateway {
     String? reasoningEffort,
     void Function()? onResponseActivity,
     void Function(ChatStreamEvent event)? onEvent,
+    String? promptCacheKey,
   }) async {
     calls++;
     observedModels.add(model);
@@ -130,7 +133,12 @@ class _SequencedGateway extends AiRequestGateway {
           .map((message) => Map<String, dynamic>.from(message))
           .toList(growable: false),
     );
-    final returnsTool = repeatToolOnSecondModelCall ? calls <= 2 : calls == 1;
+    if (invalidFirst && calls == 1) {
+      return {'success': true, 'message': '未遵循 JSON 协议'};
+    }
+    final returnsTool = repeatToolOnSecondModelCall
+        ? calls <= 2
+        : calls == (invalidFirst ? 2 : 1);
     return {
       'success': true,
       'message': returnsTool
@@ -155,6 +163,28 @@ class _SequencedGateway extends AiRequestGateway {
             }),
     };
   }
+}
+
+class _AttachmentGateway extends _SequencedGateway {
+  _AttachmentGateway({this.vision = true, super.invalidFirst});
+  final bool vision;
+
+  @override
+  ModelCapability capability(ApiProvider provider, String model) =>
+      ModelCapability(
+        provider: provider.name,
+        modelId: model,
+        isKnown: true,
+        supportsStreaming: true,
+        supportsVision: vision,
+        supportsTools: true,
+        contextWindow: 200000,
+        maxOutput: 8192,
+        price: null,
+        source: 'test',
+        version: '1',
+        updatedAt: DateTime(2026),
+      );
 }
 
 /// 连续三次追加同一个交付物，然后收尾；用来钉住"create 一次 + modify 一次
@@ -194,6 +224,7 @@ class _AppendGateway extends AiRequestGateway {
     String? reasoningEffort,
     void Function()? onResponseActivity,
     void Function(ChatStreamEvent event)? onEvent,
+    String? promptCacheKey,
   }) async {
     calls++;
     if (calls <= chunks.length) {
@@ -269,6 +300,7 @@ class _HangingModelGateway extends AiRequestGateway {
     String? reasoningEffort,
     void Function()? onResponseActivity,
     void Function(ChatStreamEvent event)? onEvent,
+    String? promptCacheKey,
   }) {
     final token = cancelToken!;
     requestTokens.add(token);
@@ -315,6 +347,7 @@ class _StallsAfterFirstTokenGateway extends AiRequestGateway {
     String? reasoningEffort,
     void Function()? onResponseActivity,
     void Function(ChatStreamEvent event)? onEvent,
+    String? promptCacheKey,
   }) {
     final token = cancelToken!;
     requestTokens.add(token);
@@ -363,6 +396,7 @@ class _FloodingProgressGateway extends AiRequestGateway {
     String? reasoningEffort,
     void Function()? onResponseActivity,
     void Function(ChatStreamEvent event)? onEvent,
+    String? promptCacheKey,
   }) async {
     calls++;
     for (var index = 0; index < tokenCount; index++) {
@@ -416,6 +450,7 @@ class _CancelsBeforeFinalProgressGateway extends AiRequestGateway {
     String? reasoningEffort,
     void Function()? onResponseActivity,
     void Function(ChatStreamEvent event)? onEvent,
+    String? promptCacheKey,
   }) async {
     calls++;
     cancelToken?.cancel('模拟流结束时的取消竞态');
@@ -469,6 +504,7 @@ class _MultiPatchGateway extends AiRequestGateway {
     String? reasoningEffort,
     void Function()? onResponseActivity,
     void Function(ChatStreamEvent event)? onEvent,
+    String? promptCacheKey,
   }) async {
     calls++;
     final patchIndex = calls - 1;
@@ -534,6 +570,7 @@ class _SingleToolGateway extends AiRequestGateway {
     String? reasoningEffort,
     void Function()? onResponseActivity,
     void Function(ChatStreamEvent event)? onEvent,
+    String? promptCacheKey,
   }) async {
     calls++;
     final response = calls == 1
@@ -592,6 +629,7 @@ class _CommandGateway extends AiRequestGateway {
     String? reasoningEffort,
     void Function()? onResponseActivity,
     void Function(ChatStreamEvent event)? onEvent,
+    String? promptCacheKey,
   }) async {
     return {
       'success': true,
@@ -649,6 +687,7 @@ class _BinaryReadGateway extends AiRequestGateway {
     String? reasoningEffort,
     void Function()? onResponseActivity,
     void Function(ChatStreamEvent event)? onEvent,
+    String? promptCacheKey,
   }) async {
     calls++;
     lastMessages = messages;
@@ -710,6 +749,7 @@ class _MissingMutationCommandGateway extends AiRequestGateway {
     String? reasoningEffort,
     void Function()? onResponseActivity,
     void Function(ChatStreamEvent event)? onEvent,
+    String? promptCacheKey,
   }) async {
     calls++;
     final content = calls == 1
@@ -774,6 +814,7 @@ class _ReadOnlyCommandGateway extends AiRequestGateway {
     String? reasoningEffort,
     void Function()? onResponseActivity,
     void Function(ChatStreamEvent event)? onEvent,
+    String? promptCacheKey,
   }) async {
     calls++;
     final content = calls == 1
@@ -839,6 +880,7 @@ class _SensitiveGateway extends AiRequestGateway {
     String? reasoningEffort,
     void Function()? onResponseActivity,
     void Function(ChatStreamEvent event)? onEvent,
+    String? promptCacheKey,
   }) async {
     calls++;
     return {
@@ -914,6 +956,7 @@ class _ScriptArtifactGateway extends AiRequestGateway {
     String? reasoningEffort,
     void Function()? onResponseActivity,
     void Function(ChatStreamEvent event)? onEvent,
+    String? promptCacheKey,
   }) async {
     calls++;
     final content = switch (calls) {
@@ -1006,6 +1049,7 @@ class _WorkspaceListPathGateway extends AiRequestGateway {
     String? reasoningEffort,
     void Function()? onResponseActivity,
     void Function(ChatStreamEvent event)? onEvent,
+    String? promptCacheKey,
   }) async {
     calls++;
     final index = calls - 1;
@@ -1279,6 +1323,64 @@ void main() {
 
   _registerP6RunnerTests(
       () => hiveDirectory, () => authorizedDirectory, () => eventStore);
+
+  for (final vision in [false, true]) {
+    test(
+        'task attachments enter first request and protocol repair vision=$vision',
+        () async {
+      final gateway = _AttachmentGateway(vision: vision, invalidFirst: true);
+      final fixture = await _runPatchShapeTask(
+        database: database,
+        eventStore: eventStore,
+        authorizedDirectory: authorizedDirectory,
+        hiveDirectory: hiveDirectory,
+        gateway: gateway,
+        groupId: 'attachment-input',
+        userRequest: '根据附件写说明',
+        initialCheckpoint: {'attachmentMessageId': 'input'},
+      );
+      final image =
+          await File('${hiveDirectory.path}/input.png').writeAsBytes([1, 2, 3]);
+      final document = await File('${hiveDirectory.path}/input.html')
+          .writeAsString('<p>附件中的唯一验收要求：量子物理</p>');
+      await database.messageBox.put(
+          'input',
+          Message(
+            id: 'input',
+            groupId: fixture.task.groupId,
+            senderId: 'user',
+            senderType: 'user',
+            content: fixture.task.userRequest,
+            visibleToCharacterIds: [fixture.task.characterId],
+            media: [
+              MediaAttachment(
+                  type: 'image', localPath: image.path, mimeType: 'image/png'),
+              MediaAttachment(
+                  type: 'file',
+                  localPath: document.path,
+                  fileName: 'input.html'),
+            ],
+          ));
+      await fixture.runner.run(fixture.task, WorkTaskCancellation());
+      if (!vision) {
+        expect(gateway.calls, 0);
+        expect(fixture.task.status, AgentTaskStatus.paused);
+        expect(
+            jsonDecode(fixture.task.executionStateJson)['visionModelRequired'],
+            true);
+        expect(fixture.task.lastError, contains('视觉模型'));
+        expect(
+            fixture.task.workFailure?.type, WorkFailureType.userActionRequired);
+      } else {
+        expect(gateway.observedMessages.length, 2);
+        for (final request in gateway.observedMessages) {
+          final encoded = jsonEncode(request);
+          expect(encoded, contains('data:image/png;base64,AQID'));
+          expect(encoded, contains('量子物理'));
+        }
+      }
+    });
+  }
 
   test('runner does not rewrite a terminal task through discussion validation',
       () async {

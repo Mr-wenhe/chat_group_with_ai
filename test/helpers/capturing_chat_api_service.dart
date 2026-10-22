@@ -27,6 +27,7 @@ class CapturingChatApiService extends ChatApiService {
     int? maxRetries,
     CancelToken? cancelToken,
     bool allowReasoningContentFallback = false,
+    String? promptCacheKey,
   }) async {
     sendCount++;
     _capture(messages);
@@ -48,6 +49,7 @@ class CapturingChatApiService extends ChatApiService {
     bool finishOnTerminalFrame = false,
     String? reasoningEffort,
     void Function()? onResponseActivity,
+    String? promptCacheKey,
   }) async* {
     streamCount++;
     _capture(messages);

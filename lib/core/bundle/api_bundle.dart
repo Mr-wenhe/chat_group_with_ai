@@ -61,6 +61,7 @@ class ApiBundleChatEntry {
     required this.protocol,
     required this.apiKey,
     required this.setDefault,
+    this.enableWorkPromptCaching,
   });
 
   /// 空串表示「没有指定 id」，由匹配规则决定新增还是覆盖。
@@ -76,6 +77,7 @@ class ApiBundleChatEntry {
   final String protocol;
   final String apiKey;
   final bool setDefault;
+  final bool? enableWorkPromptCaching;
 }
 
 class ApiBundleVoiceEntry {
@@ -213,19 +215,22 @@ class ApiBundle {
 
     final issues = <ApiBundleIssue>[];
     return ApiBundle(
-      label: _readText(json['label'], maxLength: ApiBundleLimits.maxLabelLength),
-      issuedAt:
-          _readText(json['issuedAt'], maxLength: ApiBundleLimits.maxIssuedAtLength),
+      label:
+          _readText(json['label'], maxLength: ApiBundleLimits.maxLabelLength),
+      issuedAt: _readText(json['issuedAt'],
+          maxLength: ApiBundleLimits.maxIssuedAtLength),
       chat: _parseChat(json['chat'], issues),
       voice: _parseVoice(json['voice'], issues),
       image: _parseImage(json['image'], issues),
       search: _parseSearch(json['search'], issues),
-      zhipuNativeSearch: _parseZhipuNativeSearch(json['zhipuNativeSearch'], issues),
+      zhipuNativeSearch:
+          _parseZhipuNativeSearch(json['zhipuNativeSearch'], issues),
       issues: issues,
     );
   }
 
-  static List<ApiBundleChatEntry> _parseChat(Object? raw, List<ApiBundleIssue> issues) {
+  static List<ApiBundleChatEntry> _parseChat(
+      Object? raw, List<ApiBundleIssue> issues) {
     const section = '聊天';
     final list = _asList(raw);
     if (list.length > ApiBundleLimits.maxEntriesPerSection) {
@@ -241,7 +246,8 @@ class ApiBundle {
       final map = _asMap(list[i]);
       final title = '第 ${i + 1} 条';
       if (map == null) {
-        issues.add(ApiBundleIssue(section: section, title: title, reason: '不是配置对象'));
+        issues.add(
+            ApiBundleIssue(section: section, title: title, reason: '不是配置对象'));
         continue;
       }
       final provider = _requireText(map['provider'],
@@ -280,11 +286,16 @@ class ApiBundle {
           title: title,
           label: 'apiProtocol',
           issues: issues);
-      if (provider == null || apiKey == null || baseUrl == null || id == null ||
-          model == null || protocol == null) {
+      if (provider == null ||
+          apiKey == null ||
+          baseUrl == null ||
+          id == null ||
+          model == null ||
+          protocol == null) {
         continue;
       }
-      final name = _readText(map['name'], maxLength: ApiBundleLimits.maxNameLength);
+      final name =
+          _readText(map['name'], maxLength: ApiBundleLimits.maxNameLength);
       result.add(ApiBundleChatEntry(
         id: id,
         name: name.isEmpty ? provider : name,
@@ -294,17 +305,22 @@ class ApiBundle {
         protocol: protocol,
         apiKey: apiKey,
         setDefault: map['makeDefault'] == true,
+        enableWorkPromptCaching: map.containsKey('enableWorkPromptCaching')
+            ? map['enableWorkPromptCaching'] == true
+            : null,
       ));
     }
     return result;
   }
 
-  static ApiBundleVoiceEntry? _parseVoice(Object? raw, List<ApiBundleIssue> issues) {
+  static ApiBundleVoiceEntry? _parseVoice(
+      Object? raw, List<ApiBundleIssue> issues) {
     const section = '语音';
     if (raw == null) return null;
     final map = _asMap(raw);
     if (map == null) {
-      issues.add(const ApiBundleIssue(section: section, title: '语音服务', reason: '不是配置对象'));
+      issues.add(const ApiBundleIssue(
+          section: section, title: '语音服务', reason: '不是配置对象'));
       return null;
     }
     final apiKey = _requireText(map['apiKey'],
@@ -325,12 +341,14 @@ class ApiBundle {
     );
   }
 
-  static ApiBundleImageEntry? _parseImage(Object? raw, List<ApiBundleIssue> issues) {
+  static ApiBundleImageEntry? _parseImage(
+      Object? raw, List<ApiBundleIssue> issues) {
     const section = '图像';
     if (raw == null) return null;
     final map = _asMap(raw);
     if (map == null) {
-      issues.add(const ApiBundleIssue(section: section, title: '图像服务', reason: '不是配置对象'));
+      issues.add(const ApiBundleIssue(
+          section: section, title: '图像服务', reason: '不是配置对象'));
       return null;
     }
     final apiKey = _requireText(map['apiKey'],
@@ -357,7 +375,8 @@ class ApiBundle {
       baseUrl: baseUrl,
       model: model,
       size: _readText(map['size'], maxLength: ApiBundleLimits.maxNameLength),
-      quality: _readText(map['quality'], maxLength: ApiBundleLimits.maxNameLength),
+      quality:
+          _readText(map['quality'], maxLength: ApiBundleLimits.maxNameLength),
       disableWatermark: map['disableWatermark'] == true,
     );
   }
@@ -415,8 +434,11 @@ class ApiBundle {
           title: fallbackTitle,
           label: 'apiKey',
           issues: issues);
-      if (id == null || name == null || provider == null ||
-          baseUrl == null || apiKey == null) {
+      if (id == null ||
+          name == null ||
+          provider == null ||
+          baseUrl == null ||
+          apiKey == null) {
         continue;
       }
       result.add(ApiBundleSearchEntry(
@@ -472,7 +494,8 @@ class ApiBundle {
   }) {
     final text = value?.toString().trim() ?? '';
     if (text.isEmpty) {
-      issues.add(ApiBundleIssue(section: section, title: title, reason: '$label 不能为空'));
+      issues.add(ApiBundleIssue(
+          section: section, title: title, reason: '$label 不能为空'));
       return null;
     }
     if (text.length > maxLength) {

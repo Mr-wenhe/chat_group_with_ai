@@ -244,6 +244,25 @@ extension _WorkDiscussionRunnerModelIo on WorkDiscussionRunner {
     required Duration timeout,
     required CancelToken cancelToken,
   }) async {
+    final attachmentContent = await WorkTaskAttachmentContext.prepare(
+      task: task,
+      attachments: WorkTaskAttachmentContext.attachments(
+        task,
+        database.messageBox.values,
+        characterId: member.character.id,
+      ),
+      supportsVision: gateway
+          .capability(member.provider!, member.config!.modelName)
+          .supportsVision,
+    );
+    if (cancelToken.isCancelled) throw cancelToken.cancelError!;
+    if (attachmentContent != null) {
+      messages = [
+        ...messages.take(messages.length - 1),
+        {'role': 'user', 'content': attachmentContent},
+        messages.last,
+      ];
+    }
     final override = completion;
     if (override != null) {
       return override(
@@ -303,6 +322,7 @@ extension _WorkDiscussionRunnerModelIo on WorkDiscussionRunner {
       apiKey: apiKey,
       provider: provider,
       apiProtocol: config.protocol,
+      promptCacheKey: config.workPromptCacheKey(character.id),
       customBaseUrl: completionBaseUrl,
       model: config.modelName,
       messages: messages,
@@ -325,6 +345,9 @@ extension _WorkDiscussionRunnerModelIo on WorkDiscussionRunner {
       userInitiated: true,
       maxResponseBytes: WorkDiscussionRunner.maxResponseBytes,
       structuredJson: structuredJson,
+      reasoningEffort: config.modelName.trim().toLowerCase() == 'step-5-preview'
+          ? 'low'
+          : null,
     );
   }
 

@@ -527,7 +527,9 @@ bool _hasPendingGroupDiscussion(AgentTask task) {
 bool _canResumeV2GroupDiscussion(AgentTask task) =>
     WorkTaskExecutionPolicy.isValidatedV2GroupTask(task) &&
     _hasPendingGroupDiscussion(task) &&
-    (task.isUserStopped || _isPausedStatus(task.status) && task.resumeRequired);
+    (task.isUserStopped ||
+        _isPausedStatus(task.status) &&
+            (task.resumeRequired || WorkTaskCompletionChoice.paused(task)));
 
 bool _requiresExplicitCommandRequest(AgentTask task) {
   try {

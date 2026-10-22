@@ -50,6 +50,7 @@ class _ScriptedChatApi extends ChatApiService {
     // 替身只回一个固定的合法正文，没有需要 `reasoning_content` 兜底的空内容场景。
     bool allowReasoningContentFallback = false,
     required int maxResponseBytes,
+    String? promptCacheKey,
   }) async {
     pickerCalls.add(messages);
     pickerModels.add(model);
@@ -71,6 +72,7 @@ class _ScriptedChatApi extends ChatApiService {
     bool finishOnTerminalFrame = false,
     String? reasoningEffort,
     void Function()? onResponseActivity,
+    String? promptCacheKey,
   }) async* {
     replyCalls.add(messages);
     yield ChatStreamEvent.done('测试回复');

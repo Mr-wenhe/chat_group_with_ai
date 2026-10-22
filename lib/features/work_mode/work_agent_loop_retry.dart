@@ -54,6 +54,10 @@ extension _WorkAgentLoopRetry on WorkAgentLoop {
         result.status != WorkToolResultStatus.alreadyCommitted &&
         (browserPage['visibleText'] is String ||
             result.usageObservation?.businessResultVerified == true);
+    final browserClosed = call.name == AgentToolName.browserContext &&
+        call.arguments['operation'] == 'close' &&
+        result.succeeded &&
+        result.data['sessionClosed'] == true;
     final fingerprint = browserEvidence
         ? sha256
             .convert(utf8.encode(jsonEncode([
@@ -77,7 +81,22 @@ extension _WorkAgentLoopRetry on WorkAgentLoop {
                 ])))
                 .toString()
             : '$tool:$inputHash:$outputHash';
-    if (!result.succeeded) {
+    // command.run 的真实产物变化：命令桥只报 `artifactPaths`（无文件哈希），
+    // 它是"这次运行真实改写了哪些文件"的证据（见 `_existingCommandArtifactPaths`
+    // 基于运行前快照 diff）。只认非空列表——像 `true` 这种验证/空跑命令返回
+    // 空 artifactPaths，不该被当作文件变化刷新进展，否则"写入→验证→再写入"
+    // 的每次验证都会把 noProgressCount 清零，掩盖真正的停滞。
+    //
+    // 不要求 `result.succeeded`：命令可能"部分写入后失败"（exitCode 非 0），
+    // 但 `_existingCommandArtifactPaths` 基于运行前快照 diff，返回非空即代表
+    // 文件确实发生了变化。这种"写了一半但确实改了文件"也是进展，不能被纯
+    // failure 口径吞掉，否则后续的验证/再写入会被 noProgressCount 误判停滞。
+    final commandChangedArtifact =
+        call.name == AgentToolName.commandRun &&
+            result.status != WorkToolResultStatus.alreadyCommitted &&
+            result.data['artifactPaths'] is List &&
+            (result.data['artifactPaths'] as List).isNotEmpty;
+    if (!result.succeeded && !commandChangedArtifact) {
       return WorkProgressObservation(
         kind: WorkProgressObservationKind.failure,
         fingerprint: sha256
@@ -108,6 +127,8 @@ extension _WorkAgentLoopRetry on WorkAgentLoop {
       kind: changed &&
               (hasReadEvidence ||
                   browserEvidence ||
+                  browserClosed ||
+                  commandChangedArtifact ||
                   call.name == AgentToolName.workspacePatch ||
                   call.name == AgentToolName.workspaceRename ||
                   call.name == AgentToolName.workspaceDelete)

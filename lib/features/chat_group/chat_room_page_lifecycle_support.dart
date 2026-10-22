@@ -49,7 +49,7 @@ extension _ChatRoomPageLifecycleSupport on _ChatRoomPageState {
     _autoChatScheduler.stop();
     _cancelActiveSpeakerPick();
     _roomRoundGeneration++;
-    if (_isStreaming) _stopStreaming();
+    if (_isStreaming) _stopStreaming(preservePendingReply: true);
   }
 
   /// 恢复本群的自动行为。
@@ -108,7 +108,7 @@ extension _ChatRoomPageLifecycleSupport on _ChatRoomPageState {
     // Stop an active stream as early as possible. The run guard in the caller
     // still performs the controller completion if the underlying Future has
     // not returned yet.
-    _stopStreaming();
+    _stopStreaming(preservePendingReply: true);
     // 页面离开是"不能继续自动工作"的一种，交给统一闸门收口：它会停调度器、
     // 取消正在飞的选择请求，并清掉启动延迟计时器。
     _refreshRoomActivity();

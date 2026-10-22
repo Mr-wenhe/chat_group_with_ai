@@ -3749,6 +3749,63 @@ void main() {
       await tester.pumpWidget(const SizedBox.shrink());
     });
 
+    for (final conversationId in ['group-return', 'dm:character-return']) {
+      for (final alreadyActive in [true, false]) {
+        testWidgets(
+            'return to conversation $conversationId active=$alreadyActive avoids duplicate routes',
+            (tester) async {
+          final presence = ConversationPresenceService.instance;
+          presence.enter(alreadyActive ? conversationId : 'other-room');
+          addTearDown(
+              () => presence.leave(presence.activeConversationId ?? ''));
+          final updates = StreamController<List<AgentTask>>.broadcast();
+          addTearDown(updates.close);
+          final navigatorKey = GlobalKey<NavigatorState>();
+          final openedRoutes = <String?>[];
+          await tester.pumpWidget(MaterialApp(
+            navigatorKey: navigatorKey,
+            onGenerateRoute: (settings) {
+              openedRoutes.add(settings.name);
+              return MaterialPageRoute<void>(
+                settings: settings,
+                builder: (_) => const Scaffold(body: Text('target room')),
+              );
+            },
+            home: WorkTaskOverlayHost(
+              navigatorKey: navigatorKey,
+              taskStream: updates.stream,
+              eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+              child: const Scaffold(body: Text('room list')),
+            ),
+          ));
+          updates.add([
+            _task(
+              id: 'return-task',
+              conversationId: conversationId,
+              characterId: 'developer',
+            ),
+          ]);
+          await tester.pump();
+          final panel =
+              tester.widget<WorkTaskPanel>(find.byType(WorkTaskPanel));
+          panel.onOpenConversation(conversationId);
+          await tester.pump();
+          expect(find.byKey(const Key('work-task-mini-bar')), findsOneWidget);
+          expect(
+              openedRoutes,
+              alreadyActive
+                  ? isEmpty
+                  : [
+                      conversationId.startsWith('dm:')
+                          ? '/dm/character-return'
+                          : '/chat/group-return',
+                    ]);
+          expect(navigatorKey.currentState!.canPop(), !alreadyActive);
+          await tester.pumpWidget(const SizedBox.shrink());
+        }, timeout: const Timeout(Duration(seconds: 30)));
+      }
+    }
+
     testWidgets('collapse does not stop the running task', (tester) async {
       final task = _task(
         id: 'running-task',
@@ -4803,6 +4860,37 @@ void main() {
       await taskBox.clear();
     });
 
+    testWidgets('稍后处理保留检查点并收起面板，重新打开仍可继续', (tester) async {
+      final task = _decisionTask('later-feedback', 'group-later')
+        ..status = AgentTaskStatus.paused;
+      await tester.runAsync(() => taskBox.put(task.id, task));
+      final checkpoint = task.executionStateJson;
+      await tester.pumpWidget(MaterialApp(
+          home: WorkTaskOverlayHost(
+        coordinator: coordinator,
+        eventStore: eventStore,
+        child: const Scaffold(body: SizedBox.expand()),
+      )));
+      await tester.pump();
+      final later = find.byKey(const Key('work-task-later'));
+      await _pumpUntilFound(tester, later);
+      await tester.ensureVisible(later);
+      await tester.runAsync(() => tester.tap(later));
+      await tester.pump();
+      expect(task.resumeRequired, isTrue);
+      expect(task.executionStateJson, checkpoint);
+      await _pumpUntilFound(tester, find.byKey(const Key('work-task-reopen')));
+      expect(find.byType(WorkTaskPanel), findsNothing);
+      expect(find.text('已保留当前检查点，重新打开任务面板可继续处理。'), findsOneWidget);
+      final reopen = find.byTooltip('显示执行面板（任务仍在继续）');
+      await tester.tap(reopen);
+      await tester.pump();
+      final resume = find.byKey(const Key('work-task-continue'));
+      expect(resume, findsOneWidget);
+      expect(tester.widget<FilledButton>(resume).onPressed, isNotNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    }, timeout: const Timeout(Duration(seconds: 30)));
+
     testWidgets('群任务面板回复精确回答待决项，不创建新需求', (tester) async {
       final raw = candidateTestState().toJson()
         ..['decisions'] = [
@@ -5605,7 +5693,8 @@ void main() {
       ),
     ));
 
-    expect(find.text('用量 140 个 Token · 异常 1 条'), findsOneWidget);
+    expect(find.text('用量未知'), findsOneWidget);
+    expect(find.byKey(const Key('work-task-usage-summary')), findsOneWidget);
     await tester.tap(find.byKey(const Key('work-task-usage-details')));
     await tester.pumpAndSettle();
     expect(find.textContaining('输入 110 Token（缓存 25，已包含在输入中）'), findsOneWidget);

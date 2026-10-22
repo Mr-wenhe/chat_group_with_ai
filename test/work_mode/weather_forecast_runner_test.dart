@@ -65,6 +65,7 @@ class _WeatherGateway extends AiRequestGateway {
     String? reasoningEffort,
     void Function()? onResponseActivity,
     void Function(ChatStreamEvent event)? onEvent,
+    String? promptCacheKey,
   }) async {
     return {
       'success': true,

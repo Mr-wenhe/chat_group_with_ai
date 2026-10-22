@@ -130,6 +130,22 @@ extension _ChatRoomMessageContextDocumentsSupport on _ChatRoomPageState {
     bool isAutoChat = false,
     void Function(Object? rendered)? onCurrentUserTurn,
   }) async {
+    final recentHistory =
+        context.length > 20 ? context.sublist(context.length - 20) : context;
+    final hasSentMessage =
+        ChatReplyPromptGuard.currentExchange(recentHistory).any(
+      (message) =>
+          message.senderType == Message.senderTypeAi &&
+          message.senderId == character.id,
+    );
+    final turnInstruction = !isAutoChat
+        ? '用户刚给你发了一条消息，请自然回应。'
+        : hasSentMessage
+            ? '你已经发过消息，用户还没有新回复。'
+                '请承接你刚发出的消息继续聊，只补充新的内容或自然推进话题。'
+                '不要换一种说法重新回答，不要再次确认同一事实，也不要重复已经问过的问题。'
+                '不要替用户编造回答，也不要把自己上一条问题当作用户的问题来回答。'
+            : '用户暂时没有回复你，你主动发一条消息找他聊天，可以问问他近况、分享一件事或开启新话题，但不要重复之前说过的话。';
     final msgs = <Map<String, dynamic>>[];
     // ── 1. 全局永久记忆（跨群/DM，按 observerCharacterId 读取） ─────────
     final permanentMemory = await _memoryContextSelector.select(
@@ -182,14 +198,11 @@ extension _ChatRoomMessageContextDocumentsSupport on _ChatRoomPageState {
       'content': '当前真实时间：${DateTime.now().toLocal().toIso8601String()}。'
           '涉及当前事实、新闻、价格、职位、规则或你不知道的内容时，不要编造；请说明不确定，并建议联网搜索或让用户授权搜索。'
           '如果用户要求你贴图、发图或发送附件，可以自然说明“我附上了”，应用会把本轮产物作为图片或文件附件显示。'
-          '${isAutoChat ? '用户暂时没有回复你，你主动发一条消息找他聊天，可以问问他近况、分享一件事或开启新话题，但不要重复之前说过的话。' : '用户刚给你发了一条消息，请自然回应。'}'
+          '$turnInstruction'
           '私聊主动找用户时最多连续三条，之后等待用户回复。',
     });
     msgs.add({'role': 'system', 'content': character.rolePlaySystemPrompt});
 
-    // 私聊同样只保留最近 20 条历史。
-    final recentHistory =
-        context.length > 20 ? context.sublist(context.length - 20) : context;
     final documentContext = await _documentContextFor(
       userMessage,
       recentHistory,
@@ -233,6 +246,13 @@ extension _ChatRoomMessageContextDocumentsSupport on _ChatRoomPageState {
       msgs.add({'role': 'user', 'content': content});
     }
 
+    // 以明确的新轮次请求续聊，避免末尾 assistant 被上游当成预填充。
+    if (isAutoChat && hasSentMessage) {
+      msgs.add({
+        'role': 'user',
+        'content': DirectChatSession.continuationInstruction,
+      });
+    }
     return msgs;
   }
 

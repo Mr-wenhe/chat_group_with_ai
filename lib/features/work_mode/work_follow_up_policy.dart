@@ -130,6 +130,20 @@ class WorkFollowUpOption {
 class WorkFollowUpPolicy {
   const WorkFollowUpPolicy();
 
+  /// 识别"重发已有产物"的追问（"重新发送报告""重发文档"等）。
+  ///
+  /// 这类请求在 [resolve] 里会落回 [WorkFollowUpKind.continueTask]，但它和
+  /// "你确定不认识？"这类纯闲聊追问不同——它指向的是上一轮已经产出的交付物，
+  /// 必须保留旧的 lastArtifactPaths 让 runner 找到要重发的对象。与
+  /// [WorkModePolicy.looksLikeWorkContinuation]（"继续/重试"）分开，是因为
+  /// "重发"语义是投递既有产物，不是接着写新内容。
+  static bool looksLikeResendRequest(String request) => RegExp(
+        r'(重新(?:发送|发|投递|交付)|重发|再(?:发|发送|投递|交付)(?:一次|一遍|一下|份)?|'
+        r'发(?:一次|一遍|一下)(?:上次|之前|刚才|之前)?(?:的)?(?:报告|文档|文件|附件|产物|结果)|'
+        r'\b(?:resend|re-deliver|redeliver)\b)',
+        caseSensitive: false,
+      ).hasMatch(request);
+
   WorkFollowUpDecision resolve({
     required String request,
     Iterable<String> lastArtifactPaths = const [],
@@ -465,6 +479,10 @@ class WorkFollowUpPolicy {
 
   bool _hasNewFileIntent(String request) => RegExp(
         r'(新建|创建|(?<!重新)生成(?:一个|一份)?|写一个|做一个|制作一个|实现(?:一个|一份)|另存为|'
+        // 索要新文档不一定带创建动词；限定交付名词，避免把旧文件重发当成新建。
+        r'(?:给我|提供|输出|整理|撰写|编写)\s*(?:一份|一个|一篇)\s*'
+        r'(?:(?:详细|完整|对比|分析|技术|调研|研究|说明|项目|的)\s*)*'
+        r'(?:文档|报告|说明书|方案)|'
         r'\b(?:new|create|generate|make)\b)',
         caseSensitive: false,
       ).hasMatch(request);

@@ -289,6 +289,44 @@ extension _DefaultWorkTaskRunnerExecution on DefaultWorkTaskRunner {
         taskId: task.id,
       );
       final capability = gateway.capability(provider, config.modelName);
+      final attachments = WorkTaskAttachmentContext.attachments(
+        task,
+        database.messageBox.values,
+        characterId: character.id,
+      );
+      if (attachments.any((attachment) => attachment.type == 'image') &&
+          !capability.supportsVision) {
+        const reason = '当前角色模型不支持图片输入，请选择已配置的视觉模型后再继续；应用不会自动切换。';
+        task
+          ..status = AgentTaskStatus.paused
+          ..resumeRequired = false
+          ..lastError = reason
+          ..executionStateJson = jsonEncode(
+            _decodeMap(task.executionStateJson)
+              ..['visionModelRequired'] = true
+              ..['visionModelProvider'] = config.provider
+              ..['visionModel'] = config.modelName,
+          )
+          ..updatedAt = clock();
+        WorkFailure.persistOnTask(
+            task,
+            WorkFailure.fromToolResult(
+              const WorkToolResult.paused(
+                message: reason,
+                failureCode: 'visionModelRequired',
+              ),
+              completedContent: task.lastArtifactPaths,
+            ));
+        await _persistCheckpoint(task);
+        await _record(task, WorkTaskEventKind.paused, reason);
+        return;
+      }
+      final attachmentContent = await WorkTaskAttachmentContext.prepare(
+        task: task,
+        attachments: attachments,
+        supportsVision: capability.supportsVision,
+      );
+      if (cancellation.isCancelled || task.isTerminal) return;
       final review = v2 == null ? null : await _prepareProductionReview(task);
       final usage = v2 == null ? null : await _prepareProductionUsage(task);
       final registry = _registryFor(
@@ -329,6 +367,7 @@ extension _DefaultWorkTaskRunnerExecution on DefaultWorkTaskRunner {
           config: config,
           apiKey: apiKey,
           requestText: requestText,
+          attachmentContent: attachmentContent,
           actorCharacterId: character.id,
           cancellationToken: cancellationToken,
           cancellation: cancellation,

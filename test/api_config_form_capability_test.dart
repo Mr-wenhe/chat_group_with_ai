@@ -71,6 +71,26 @@ void main() {
       .widget<SwitchListTile>(find.widgetWithText(SwitchListTile, label))
       .value;
 
+  testWidgets('缓存开关默认关闭，编辑已有配置时读取保存值', (tester) async {
+    await pumpPage(tester,
+        config: ApiConfig(
+            name: 'relay', provider: 'custom', enableWorkPromptCaching: true));
+    expect(
+        tester
+            .widget<SwitchListTile>(
+                find.byKey(const Key('work-prompt-caching')))
+            .value,
+        isTrue);
+    await tester.tap(find.byKey(const Key('work-prompt-caching')));
+    await tester.pump();
+    expect(
+        tester
+            .widget<SwitchListTile>(
+                find.byKey(const Key('work-prompt-caching')))
+            .value,
+        isFalse);
+  });
+
   testWidgets('新建时选 Oray：预填地址与 Anthropic 协议，模型仍留空', (tester) async {
     await pumpPage(tester);
 
@@ -166,6 +186,7 @@ void main() {
 
     await tester.enterText(fieldWithLabel('配置名称 *'), '自建端点');
     await tester.enterText(fieldWithLabel('API Key *'), 'sk-test');
+    await tester.tap(find.byKey(const Key('work-prompt-caching')));
     await tester.pump();
 
     await tester.runAsync(() async {
@@ -183,6 +204,7 @@ void main() {
     expect(declared!.contextWindow, 8192);
     expect(declared.supportsStreaming, isTrue);
     expect(declared.supportsTools, isTrue);
+    expect(db.apiConfigBox.values.single.enableWorkPromptCaching, isTrue);
   });
 
   testWidgets('新建配置不预选模型，未选模型时能力字段用未登记模型的兜底值', (tester) async {

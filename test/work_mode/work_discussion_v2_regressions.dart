@@ -1,6 +1,71 @@
 part of 'work_discussion_v2_test.dart';
 
 void _registerDiscussionHistoryRegressions() {
+  for (final vision in [false, true]) {
+    test('群讨论自动携带用户图片和文档 vision=$vision', () async {
+      if (vision) {
+        for (final config in db.apiConfigBox.values.toList()) {
+          config.modelName = 'deepseek-vl';
+          await db.apiConfigBox.put(config.id, config);
+        }
+      }
+      final image =
+          await File('${dir.path}/discussion.png').writeAsBytes([1, 2, 3]);
+      final document = await File('${dir.path}/discussion.html')
+          .writeAsString('<p>附件唯一要求：量子物理</p>');
+      await db.messageBox.put(
+          'discussion-input',
+          Message(
+            id: 'discussion-input',
+            groupId: task.groupId,
+            senderId: 'user',
+            senderType: 'user',
+            content: task.userRequest,
+            visibleToCharacterIds: ['dev', 'qa', 'extra'],
+            media: [
+              MediaAttachment(
+                  type: 'image', localPath: image.path, mimeType: 'image/png'),
+              MediaAttachment(
+                  type: 'file',
+                  localPath: document.path,
+                  fileName: 'discussion.html'),
+            ],
+          ));
+      task.executionStateJson = jsonEncode(
+          (jsonDecode(task.executionStateJson) as Map)
+            ..['attachmentMessageId'] = 'discussion-input');
+      var calls = 0;
+      await modelRunner(
+          (member, context) async => _turn('respond', text: '还需核对方案。'),
+          onMessages: (member, messages) {
+        calls++;
+        final content = jsonEncode(messages);
+        expect(content, contains('量子物理'));
+        expect(content.contains('data:image/png;base64,AQID'), vision);
+        if (!vision) expect(content, contains('图片内容未发送'));
+      }).runCollaboration(task, WorkTaskCancellation(), apply);
+      expect(calls, greaterThan(0));
+    });
+  }
+
+  test('连续三次无进展提供重试选项而非空白建议输入', () async {
+    var calls = 0;
+    await modelRunner((member, context) async {
+      calls++;
+      return _turn('respond', text: '暂时没有新的依据。');
+    }).runCollaboration(task, WorkTaskCancellation(), apply);
+    final state =
+        WorkDiscussionState.fromExecutionState(task.executionStateJson)!
+            .collaboration!;
+    expect(calls, 3);
+    final decision = state.decisions.last;
+    expect(decision['reason'], contains('连续 3 个结果'));
+    expect(decision['kind'], 'member');
+    expect((decision['options'] as List).map((o) => o['id']),
+        containsAll(['retry-same-member', 'member-config-updated']));
+    expect(decision['impact'], contains('无需填写内部字段'));
+  }, timeout: const Timeout(Duration(seconds: 30)));
+
   test('同需求原成员重试再次失败须重新阻塞，不能与已答决策碰撞', () async {
     var calls = 0;
     final runner = WorkDiscussionRunner(
@@ -281,18 +346,15 @@ void _registerDiscussionHistoryRegressions() {
         isFalse);
   }, timeout: const Timeout(Duration(seconds: 30)));
 
-  for (final failure in [
-    'incomplete',
-    'timeout',
-    'oversized',
-    'first-byte',
-    'activity-timeout'
-  ]) {
+  for (final failure in ['incomplete', 'timeout', 'oversized', 'first-byte']) {
     test('群讨论流式响应失败保留状态并有界暂停：$failure', () async {
-      final client = _ModelClient((_, __) async => _turn('respond'),
-          reportActivity: failure == 'activity-timeout',
-          streamOverride: (token) async* {
-        if (failure != 'first-byte' && failure != 'activity-timeout') {
+      final client = _ModelClient(
+          (_, __) async => {
+                'success': false,
+                'message': '非流式回退失败',
+                'failureCode': 'fallbackTestFailure'
+              }, streamOverride: (token) async* {
+        if (failure != 'first-byte') {
           yield ChatStreamEvent.token(failure == 'oversized'
               ? 'x' * (WorkDiscussionRunner.maxResponseBytes + 1)
               : _turn('propose',
@@ -301,9 +363,7 @@ void _registerDiscussionHistoryRegressions() {
                       .collaboration!
                       .toPromptJson()))['message'] as String);
         }
-        if (failure == 'timeout' ||
-            failure == 'first-byte' ||
-            failure == 'activity-timeout') {
+        if (failure == 'timeout' || failure == 'first-byte') {
           await token!.whenCancel;
         }
       });
@@ -312,10 +372,9 @@ void _registerDiscussionHistoryRegressions() {
           credentials: _Credentials(),
           eventStore: events,
           roleTimeout: const Duration(milliseconds: 100),
-          firstByteTimeout:
-              failure == 'first-byte' || failure == 'activity-timeout'
-                  ? const Duration(milliseconds: 20)
-                  : const Duration(seconds: 180),
+          firstByteTimeout: failure == 'first-byte'
+              ? const Duration(milliseconds: 20)
+              : const Duration(seconds: 180),
           gateway:
               AiRequestGateway(store: MemoryGovernanceStore(), client: client));
       await runner.runCollaboration(task, WorkTaskCancellation(), apply);
@@ -325,26 +384,204 @@ void _registerDiscussionHistoryRegressions() {
       expect(state.plan, isEmpty, reason: '无 done 的合法 JSON 也不能采纳');
       expect(state.hasBlockingDecision, isTrue);
       expect(state.decisions.last['kind'], 'member');
-      if (failure == 'activity-timeout') {
-        expect(state.decisions.last['reason'], contains('已收到模型生成活动'));
-        expect(state.decisions.last['evidence'],
-            contains('responseActivityCount=1'));
-        expect(state.decisions.last['evidence'],
-            contains('lastResponseActivityMs='));
-      }
       expect(
           state.decisions.where((d) => d['status'] == 'pending'), hasLength(1));
       expect(
           state.decisions.last['evidence'],
           contains(failure == 'first-byte'
-              ? 'modelFirstByteStall'
-              : failure == 'timeout' || failure == 'activity-timeout'
+              ? 'fallbackTestFailure'
+              : failure == 'timeout'
                   ? 'modelCompletionTimeout'
                   : failure == 'oversized'
                       ? 'responseTooLarge'
                       : 'incompleteStream'));
     }, timeout: const Timeout(Duration(seconds: 30)));
   }
+
+  test('群制作持续推理不能撤销首段正文停滞保护', () async {
+    await db.agentTaskBox.put(task.id, task);
+    await modelRunner((member, context) async {
+      final current = context['collaboration'] as Map<String, dynamic>;
+      if ((current['plan'] as String).isNotEmpty) {
+        return _turn('approve', approval: approval(current));
+      }
+      final next = proposal(current);
+      next['workItems'] = [
+        {
+          'id': 'implementation',
+          'ownerId': 'dev',
+          'kind': 'produce',
+          'dependencies': <String>[]
+        },
+        {
+          'id': 'material',
+          'ownerId': 'dev',
+          'kind': 'material',
+          'dependencies': ['implementation']
+        },
+      ];
+      next['artifactContract'] = {
+        ...current['artifactContract'] as Map,
+        'files': ['game.html'],
+        'verificationCommands': [
+          jsonEncode({'executable': 'true', 'arguments': <String>[]})
+        ],
+      };
+      return _turn('propose', proposal: next);
+    }).runCollaboration(task, WorkTaskCancellation(), apply);
+    expect(await execution.prepareCollaborationWork(task), isTrue,
+        reason: task.lastError);
+    final client = _MaterialFinishClient([], reasoningOnly: true);
+    final runner = DefaultWorkTaskRunner(
+        database: db,
+        eventStore: events,
+        credentials: _Credentials(),
+        gateway:
+            AiRequestGateway(store: MemoryGovernanceStore(), client: client),
+        workspaceService: execution.workspaceService,
+        folderGrantService: execution.folderGrantService,
+        workspaceFileService: execution.workspaceFileService,
+        mutationService: execution.mutationService,
+        modelFirstTokenTimeout: const Duration(milliseconds: 50),
+        modelCompletionTimeout: const Duration(seconds: 2));
+    await runner.run(task, WorkTaskCancellation());
+    final timeouts = (await events.read(task.id))
+        .events
+        .where((e) => e.title == '本次成员模型请求超时')
+        .toList();
+    expect(timeouts, isNotEmpty);
+    for (final event in timeouts) {
+      expect(event.safeMetadata['failureCode'], 'modelFirstByteStall');
+      expect(event.safeMetadata['receivedCharacters'], 0);
+      expect(event.safeMetadata['responseActivityCount'], greaterThan(0));
+      expect(event.safeMetadata['elapsedMs'], lessThan(1500));
+    }
+  }, timeout: const Timeout(Duration(seconds: 30)));
+
+  for (final outcome in [
+    'success',
+    'empty',
+    'failure',
+    'timeout',
+    'stop',
+    'stop-fallback'
+  ]) {
+    test('群讨论持续推理无正文仅回退一次并共用总时限：$outcome', () async {
+      final config = db.apiConfigBox.get('config-dev')!;
+      config.modelName = 'step-5-preview';
+      await db.apiConfigBox.put(config.id, config);
+      const total = Duration(milliseconds: 400);
+      final cancellation = WorkTaskCancellation();
+      CancelToken? streamedToken;
+      var streams = 0;
+      late final _ModelClient client;
+      client = _ModelClient(
+          (_, __) async {
+            if (outcome == 'timeout' || outcome == 'stop-fallback') {
+              if (outcome == 'stop-fallback') {
+                Timer(const Duration(milliseconds: 10), cancellation.cancel);
+              }
+              await client.completionTokens.last!.whenCancel;
+              return {'success': false, 'message': '请求已取消'};
+            }
+            if (outcome == 'failure') {
+              return {'success': false, 'message': 'HTTP 503 请求失败'};
+            }
+            return _turn('decide', decision: {
+              'kind': 'question',
+              'targetId': '',
+              'reason': '已取得回退正文，等待用户确认范围',
+              'evidence': '非流式完整回应',
+              'impact': '未执行制作',
+              'options': <Map<String, dynamic>>[],
+            });
+          },
+          reportActivity: true,
+          streamOverride: (token) async* {
+            streams++;
+            streamedToken = token;
+            if (outcome == 'empty') {
+              yield ChatStreamEvent.done('');
+              return;
+            }
+            final activity = Timer.periodic(const Duration(milliseconds: 5),
+                (_) => client.activityCallback?.call());
+            final stop = outcome == 'stop'
+                ? Timer(const Duration(milliseconds: 10), cancellation.cancel)
+                : null;
+            try {
+              await token!.whenCancel;
+            } finally {
+              activity.cancel();
+              stop?.cancel();
+            }
+          });
+      final runner = WorkDiscussionRunner(
+          database: db,
+          credentials: _Credentials(),
+          eventStore: events,
+          roleTimeout: total,
+          firstByteTimeout: const Duration(milliseconds: 70),
+          gateway:
+              AiRequestGateway(store: MemoryGovernanceStore(), client: client));
+      await runner.runCollaboration(task, cancellation, apply);
+      expect(streams, 1);
+      expect(streamedToken!.isCancelled, isTrue);
+      expect(client.completionTimeouts, hasLength(outcome == 'stop' ? 0 : 1));
+      if (outcome == 'stop') return;
+      expect(client.completionTimeouts.single, lessThan(total));
+      expect(client.completionTimeouts.single, greaterThan(Duration.zero));
+      expect(client.completionEfforts, ['low']);
+      if (outcome == 'stop-fallback') {
+        expect(client.completionTokens.single!.isCancelled, isTrue);
+        return;
+      }
+      final state =
+          WorkDiscussionState.fromExecutionState(task.executionStateJson)!
+              .collaboration!;
+      expect(state.plan, isEmpty);
+      expect(state.hasBlockingDecision, isTrue);
+      final evidence = state.decisions.last['evidence'] as String;
+      if (outcome == 'success' || outcome == 'empty') {
+        expect(evidence, '非流式完整回应');
+      } else if (outcome == 'timeout') {
+        expect(evidence, contains('modelCompletionTimeout'));
+        expect(client.completionTokens.single!.isCancelled, isTrue);
+      }
+      expect(
+          (await events.read(task.id))
+              .events
+              .where((e) => e.title == '成员请求兼容回退'),
+          hasLength(1));
+    }, timeout: const Timeout(Duration(seconds: 30)));
+  }
+
+  test('群讨论已收到正文后保留完整总时限且不回退', () async {
+    final client = _ModelClient((_, __) async => throw StateError('不应回退'),
+        streamOverride: (_) async* {
+      yield ChatStreamEvent.token('{');
+      await Future<void>.delayed(const Duration(milliseconds: 80));
+      yield ChatStreamEvent.done(_turn('decide', decision: {
+        'kind': 'question',
+        'targetId': '',
+        'reason': '等待用户确认范围',
+        'evidence': '已取得完整正文',
+        'impact': '未制作',
+        'options': [],
+      })['message'] as String);
+    });
+    await WorkDiscussionRunner(
+            database: db,
+            credentials: _Credentials(),
+            eventStore: events,
+            firstByteTimeout: const Duration(milliseconds: 30),
+            roleTimeout: const Duration(milliseconds: 400),
+            gateway: AiRequestGateway(
+                store: MemoryGovernanceStore(), client: client))
+        .runCollaboration(task, WorkTaskCancellation(), apply);
+    expect(client.completionTimeouts, isEmpty);
+    expect(_pendingDecisions().single['evidence'], '已取得完整正文');
+  }, timeout: const Timeout(Duration(seconds: 30)));
 
   test('重复合法空转发言不能清除此前协议失败计数', () async {
     var requests = 0;

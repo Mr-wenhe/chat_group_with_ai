@@ -1,5 +1,4 @@
 import 'package:chat_group/core/models/ai_character.dart';
-import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/core/models/character_skill.dart';
 import 'package:chat_group/features/agentic/tool_request.dart';
 import 'package:chat_group/features/work_mode/work_mode_policy.dart';
@@ -66,68 +65,43 @@ void main() {
       expect(WorkModePolicy.workModeHint, contains('工作模式'));
     });
 
-    test('keeps owned work conversations out of ordinary chat', () {
-      final runningTask = AgentTask(
-        groupId: 'group-a',
-        characterId: 'worker',
-        userRequest: '生成 HTML 页面',
-        status: AgentTaskStatus.paused,
-        workModeTask: true,
-      );
-      expect(
-        WorkModePolicy.shouldRouteRequest(
-          enabled: false,
-          request: '你好',
-          ownedTask: runningTask,
-        ),
-        isTrue,
-      );
+    test('continuation wording uses one shared predicate', () {
+      for (final text in ['继续', '请继续。', '重试', '接着处理', '恢复任务']) {
+        expect(WorkModePolicy.looksLikeWorkContinuation(text), isTrue,
+            reason: text);
+      }
+      for (final text in ['继续写一份报告', '帮我看看这个文件', '']) {
+        expect(WorkModePolicy.looksLikeWorkContinuation(text), isFalse,
+            reason: text);
+      }
+    });
 
-      final completedTask = AgentTask(
-        groupId: 'group-a',
-        characterId: 'worker',
-        userRequest: '生成 HTML 页面',
-        status: AgentTaskStatus.completed,
-        workModeTask: true,
-      );
+    test('closed-mode hint points a running task at the task panel', () {
+      expect(WorkModePolicy.chatHintFor(hasActiveTask: false),
+          WorkModePolicy.workModeHint);
       expect(
-        WorkModePolicy.shouldRouteRequest(
-          enabled: false,
-          request: '请优化当前 HTML 页面',
-          ownedTask: completedTask,
-        ),
-        isTrue,
-      );
+          WorkModePolicy.chatHintFor(hasActiveTask: true), contains('任务面板'));
+    });
+
+    test('mode off never routes new input to any historical task', () {
+      // 判据只剩开关：请求文本、附件、历史任务都不再参与。这里仍逐个遍历，
+      // 一是覆盖曾经影响过路由的那些维度，二是以后有人把隐式路由加回来时
+      // 这些断言会先失败。
+      for (final request in ['你好', '继续', '请修改当前文件', '']) {
+        for (final hasAttachments in [false, true]) {
+          expect(
+              WorkModePolicy.shouldRouteRequest(enabled: false),
+              isFalse,
+              reason: '$request $hasAttachments');
+          expect(
+              WorkModePolicy.shouldRouteRequest(enabled: true),
+              isTrue,
+              reason: '$request $hasAttachments');
+        }
+      }
       expect(
-        WorkModePolicy.shouldRouteRequest(
-          enabled: false,
-          request: '继续',
-          ownedTask: completedTask,
-        ),
-        isTrue,
-      );
-      expect(
-        WorkModePolicy.shouldRouteRequest(
-          enabled: false,
-          request: '谢谢',
-          ownedTask: completedTask,
-        ),
-        isFalse,
-      );
-      expect(
-        WorkModePolicy.shouldRouteRequest(
-          enabled: false,
-          request: '生成 HTML 页面',
-        ),
-        isFalse,
-      );
-      expect(
-        WorkModePolicy.shouldRouteRequest(
-          enabled: false,
-          request: '继续',
-        ),
-        isFalse,
-      );
+          WorkModePolicy.shouldRouteRequest(enabled: false),
+          isFalse);
     });
 
     test('selects mentioned capable worker before the first capable worker',

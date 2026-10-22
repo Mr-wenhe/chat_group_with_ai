@@ -32,6 +32,7 @@ class EmptyReplyChatApi extends ScriptedChatApi {
     int? maxRetries,
     CancelToken? cancelToken,
     bool allowReasoningContentFallback = false,
+    String? promptCacheKey,
   }) async {
     replyCalls.add(messages);
     return {'success': true, 'message': ''};
@@ -52,6 +53,7 @@ class EmptyReplyChatApi extends ScriptedChatApi {
     bool finishOnTerminalFrame = false,
     String? reasoningEffort,
     void Function()? onResponseActivity,
+    String? promptCacheKey,
   }) async* {
     replyCalls.add(messages);
     yield ChatStreamEvent.done('');

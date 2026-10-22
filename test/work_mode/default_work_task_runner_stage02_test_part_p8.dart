@@ -294,7 +294,7 @@ void _registerP8RunnerTests(Directory Function() hive,
 
       expect(gateway.staleSessionRefReachedModel, isTrue);
       expect(openedRefs, hasLength(2));
-      expect(closedRefs, openedRefs);
+      expect(closedRefs, openedRefs, reason: task.lastError);
       expect(browserCalls.map((call) => call['operation']).toList(),
           ['close', 'open', 'close']);
       expect(task.status, AgentTaskStatus.paused);
@@ -760,6 +760,7 @@ class _BrowserSessionRecoveryGateway extends AiRequestGateway {
       {required String apiKey,
       required ApiProvider provider,
       ApiProtocol apiProtocol = ApiProtocol.defaultValue,
+      String? promptCacheKey,
       String? customBaseUrl,
       required String model,
       required List<Map<String, dynamic>> messages,

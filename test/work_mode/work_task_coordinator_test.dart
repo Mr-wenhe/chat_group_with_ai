@@ -3756,6 +3756,43 @@ void main() {
     expect(taskBox.get(task.id)?.queuedUserRequests, isEmpty);
   });
 
+  test('unrelated follow-up does not redeliver old artifacts', () async {
+    final task = _task(id: 'social-follow-up', conversationId: 'dm-social')
+      ..status = AgentTaskStatus.completed
+      ..lastArtifactPaths = [
+        '/workspace/ludo-game.html',
+        '/workspace/fix_ludo.py'
+      ];
+    await taskBox.put(task.id, task);
+    await coordinator.enqueueFollowUp(task.id, '你确定不认识？');
+    expect(taskBox.get(task.id)!.lastArtifactPaths, isEmpty);
+    runner.complete(task.id);
+  });
+
+  test('explicit continuation preserves old artifact checkpoint', () async {
+    final task =
+        _task(id: 'continue-old-artifact', conversationId: 'dm-continue')
+          ..status = AgentTaskStatus.completed
+          ..lastArtifactPaths = ['/workspace/report.md'];
+    await taskBox.put(task.id, task);
+    await coordinator.enqueueFollowUp(task.id, '继续');
+    expect(taskBox.get(task.id)!.lastArtifactPaths, ['/workspace/report.md']);
+    runner.complete(task.id);
+  });
+
+  test('resend request preserves old artifact checkpoint', () async {
+    final task =
+        _task(id: 'resend-old-artifact', conversationId: 'dm-resend')
+          ..status = AgentTaskStatus.completed
+          ..lastArtifactPaths = ['/workspace/report.md'];
+    await taskBox.put(task.id, task);
+    await coordinator.enqueueFollowUp(task.id, '重新发送报告');
+    // 重发已有产物是"投递上一轮成果"，不是无关闲聊，必须保留产物路径让 runner
+    // 找到要重发的对象。
+    expect(taskBox.get(task.id)!.lastArtifactPaths, ['/workspace/report.md']);
+    runner.complete(task.id);
+  });
+
   test('records an explicit revision target without enabling collision rename',
       () async {
     final task =
@@ -4695,6 +4732,29 @@ void main() {
       isFalse,
       reason: '作为输入来源的目录不能被误判为新任务的输出目录。',
     );
+  });
+
+  test('document requests leave completed tasks but preserve active ownership',
+      () async {
+    const request = '读取 /workspace/chat_group 这个项目，然后结合 github '
+        '相关的开源项目进行对比，给我一份详细的文档';
+    for (final conversationId in ['group-new-report', 'dm:report-owner']) {
+      final task = _task(id: conversationId, conversationId: conversationId)
+        ..status = AgentTaskStatus.completed
+        ..lastArtifactPaths = ['/workspace/飞行棋.html'];
+      await taskBox.put(task.id, task);
+      expect(
+          coordinator.shouldRouteNewTaskForFollowUp(task.id, request), isTrue);
+      expect(
+        coordinator.shouldRouteNewTaskForFollowUp(task.id, '修改当前文件'),
+        isFalse,
+      );
+      task.status = AgentTaskStatus.runningTool;
+      task.queuedUserRequests = ['补充旧任务'];
+      await taskBox.put(task.id, task);
+      expect(
+          coordinator.shouldRouteNewTaskForFollowUp(task.id, request), isFalse);
+    }
   });
 
   test('continuing a stopped task keeps its follow-ups for the resumed run',
@@ -7142,13 +7202,14 @@ void main() {
         collaborationPhase: 'forming');
     WorkTaskRequirementsConfirmation.requireForCurrentRequest(task);
     await taskBox.put(task.id, task);
-    final before = WorkDiscussionState.fromExecutionState(
-        task.executionStateJson)!.collaboration!;
+    final before =
+        WorkDiscussionState.fromExecutionState(task.executionStateJson)!
+            .collaboration!;
     await coordinator.selectDiscussionExecutor(task.id, characterId: 'engine');
     await _settle();
     final stored = taskBox.get(task.id)!;
-    final after = WorkDiscussionState.fromExecutionState(
-        stored.executionStateJson)!;
+    final after =
+        WorkDiscussionState.fromExecutionState(stored.executionStateJson)!;
     expect(after.collaboration!.revision, before.revision + 1);
     expect(after.requestRevision, 1);
     expect(after.executorId, 'engine');

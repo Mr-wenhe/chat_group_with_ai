@@ -1,3 +1,4 @@
+import 'package:chat_group/core/streaming/reported_token_usage.dart';
 export 'search_audit_entry.dart';
 
 enum AiRequestPurpose {
@@ -285,9 +286,15 @@ class UsageLedgerEntry {
   final int cachedInputTokens;
   final int outputTokens;
   final int? estimatedCostMicros;
+
+  /// 保守预算占用；与可展示的费用估算分开，缓存写入价格未知也不能漏记。
+  final int? budgetCostMicros;
   final String? currency;
   final String? priceVersion;
   final bool exactUsage;
+
+  /// null 只用于旧账本；新请求即使没有 usage 也保存空对象来标明未知。
+  final ReportedTokenUsage? reportedUsage;
   final String status;
 
   const UsageLedgerEntry({
@@ -306,10 +313,12 @@ class UsageLedgerEntry {
     required this.cachedInputTokens,
     required this.outputTokens,
     required this.estimatedCostMicros,
+    this.budgetCostMicros,
     required this.currency,
     required this.priceVersion,
     required this.exactUsage,
     this.status = 'success',
+    this.reportedUsage,
   });
 
   factory UsageLedgerEntry.fromMap(Map<dynamic, dynamic> map) {
@@ -340,9 +349,13 @@ class UsageLedgerEntry {
       cachedInputTokens: (map['cachedInputTokens'] as num?)?.toInt() ?? 0,
       outputTokens: (map['outputTokens'] as num?)?.toInt() ?? 0,
       estimatedCostMicros: (map['estimatedCostMicros'] as num?)?.toInt(),
+      budgetCostMicros: (map['budgetCostMicros'] as num?)?.toInt(),
       currency: map['currency']?.toString(),
       priceVersion: map['priceVersion']?.toString(),
       exactUsage: map['exactUsage'] == true,
+      reportedUsage: map['reportedUsage'] is Map
+          ? ReportedTokenUsage.fromMap(map['reportedUsage'] as Map)
+          : null,
       status: map['status']?.toString() ?? 'success',
     );
   }
@@ -363,9 +376,11 @@ class UsageLedgerEntry {
         'cachedInputTokens': cachedInputTokens,
         'outputTokens': outputTokens,
         'estimatedCostMicros': estimatedCostMicros,
+        'budgetCostMicros': budgetCostMicros,
         'currency': currency,
         'priceVersion': priceVersion,
         'exactUsage': exactUsage,
+        if (reportedUsage != null) 'reportedUsage': reportedUsage!.toMap(),
         'status': status,
       };
 }
@@ -419,6 +434,7 @@ class AiRequestDiagnostic {
   final int? estimatedCostMicros;
   final String? currency;
   final bool? exactUsage;
+  final ReportedTokenUsage? reportedUsage;
   final String status;
   final String? failureType;
 
@@ -445,6 +461,7 @@ class AiRequestDiagnostic {
     required this.estimatedCostMicros,
     required this.currency,
     this.exactUsage,
+    this.reportedUsage,
     required this.status,
     required this.failureType,
     this.failureDetail,
@@ -473,6 +490,9 @@ class AiRequestDiagnostic {
       estimatedCostMicros: (map['estimatedCostMicros'] as num?)?.toInt(),
       currency: map['currency']?.toString(),
       exactUsage: map['exactUsage'] is bool ? map['exactUsage'] as bool : null,
+      reportedUsage: map['reportedUsage'] is Map
+          ? ReportedTokenUsage.fromMap(map['reportedUsage'] as Map)
+          : null,
       status: map['status']?.toString() ?? 'unknown',
       failureType: map['failureType']?.toString(),
       failureDetail: _nonEmptyText(map['failureDetail']),
@@ -496,6 +516,7 @@ class AiRequestDiagnostic {
         'estimatedCostMicros': estimatedCostMicros,
         'currency': currency,
         'exactUsage': exactUsage,
+        if (reportedUsage != null) 'reportedUsage': reportedUsage!.toMap(),
         'status': status,
         'failureType': failureType,
         'failureDetail': failureDetail,
@@ -515,6 +536,7 @@ class AiRequestDiagnostic {
         'tokens=${inputTokens ?? '-'}+${outputTokens ?? '-'}',
         'exactUsage=${exactUsage ?? '-'}',
         'cachedTokens=${cachedInputTokens ?? '-'}',
+        'reportedUsage=${reportedUsage?.toMap() ?? 'legacy'}',
         'costMicros=${estimatedCostMicros ?? '-'}',
         'currency=${currency ?? '-'}',
         'status=$status',

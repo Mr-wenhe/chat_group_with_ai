@@ -1,4 +1,5 @@
 import '../../core/models/message.dart';
+import '../direct_chat/direct_chat_session.dart';
 import 'group_shared_context.dart';
 
 /// 一次普通回复请求里**必须完整保留**的内容。
@@ -40,6 +41,9 @@ class ChatReplyPromptGuard {
   /// 本轮最新一条对话的正文。多模态内容是列表，按对象同一性比对。
   final Object? latestTurn;
 
+  /// 续聊调度指令前已发送的 AI 原文；调度指令不能替它占据保护名额。
+  final Object? continuationContext;
+
   final List<String> documentContexts;
 
   const ChatReplyPromptGuard({
@@ -47,6 +51,7 @@ class ChatReplyPromptGuard {
     required this.personaPrompt,
     required this.latestTurn,
     this.currentUserTurn,
+    this.continuationContext,
     this.documentContexts = const [],
   });
 
@@ -68,10 +73,19 @@ class ChatReplyPromptGuard {
       latestTurn = messages[index]['content'];
       break;
     }
+    Object? continuationContext;
+    if (latestTurn == DirectChatSession.continuationInstruction) {
+      for (final message in messages.reversed) {
+        if (message['role'] != 'assistant') continue;
+        continuationContext = message['content'];
+        break;
+      }
+    }
     return ChatReplyPromptGuard(
       sharedContext: sharedContext,
       personaPrompt: personaPrompt,
       latestTurn: latestTurn,
+      continuationContext: continuationContext,
       currentUserTurn: currentUserTurn,
       documentContexts: messages
           .where((message) => message['role'] == 'system')
@@ -97,6 +111,16 @@ class ChatReplyPromptGuard {
     return null;
   }
 
+  /// 压缩旧历史时保留当前一轮的原文，避免把已回复的输入再次当作待回答。
+  static List<Message> currentExchange(List<Message> messages) {
+    for (var index = messages.length - 1; index >= 0; index--) {
+      if (messages[index].senderType == Message.senderTypeUser) {
+        return messages.sublist(index);
+      }
+    }
+    return messages.isEmpty ? const [] : [messages.last];
+  }
+
   /// 裁剪时的保护判据：这些条目只在其它内容都让位之后才被动。
   bool isRequired(Map<String, dynamic> message) {
     if (GroupSharedContext.carriesBlock(message)) return true;
@@ -109,6 +133,7 @@ class ChatReplyPromptGuard {
     if (documentContexts.contains(content)) return true;
     if (message['role'] == 'system') return false;
     if (_carries(content, currentUserTurn)) return true;
+    if (_carries(content, continuationContext)) return true;
     return _carries(content, latestTurn);
   }
 
@@ -129,6 +154,7 @@ class ChatReplyPromptGuard {
     // "用户的要求被丢了"说成"接话上下文被丢了"。
     if (_turnMissing(messages, currentUserTurn)) return '本轮真人输入';
     if (_turnMissing(messages, latestTurn)) return '本轮最新一条对话';
+    if (_turnMissing(messages, continuationContext)) return '续聊前已发送的回复';
     if (documentContexts.any((content) =>
         !messages.any((message) => message['content'] == content))) {
       return '附件正文资料';

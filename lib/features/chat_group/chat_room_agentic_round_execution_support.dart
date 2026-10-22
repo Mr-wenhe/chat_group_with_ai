@@ -19,6 +19,7 @@ extension _ChatRoomAgenticRoundExecutionSupport on _ChatRoomPageState {
     final autoRunGuard =
         isAutoChat ? _conversationController.beginAutoGuard() : null;
     if (normalRunGuard == null && autoRunGuard == null) return;
+    if (!isAutoChat) _activeUserReplyMessageId = currentUserMessage?.id;
 
     // 整轮共用一个代际号：中途离开本群（哪怕立刻回来）会让它作废，循环据此收手，
     // 而不是接着往下一位发言者走。
@@ -73,8 +74,15 @@ extension _ChatRoomAgenticRoundExecutionSupport on _ChatRoomPageState {
     } finally {
       // Completion is deliberately outside _setUiState: page deactivation
       // must not strand the controller in a generating phase.
-      normalRunGuard?.finish();
-      autoRunGuard?.finish();
+      try {
+        if (!isAutoChat) {
+          await _finishPendingUserReply(currentUserMessage, roundGeneration);
+        }
+      } finally {
+        if (!isAutoChat) _activeUserReplyMessageId = null;
+        normalRunGuard?.finish();
+        autoRunGuard?.finish();
+      }
       if (!isAutoChat) _consecutiveRound = 0;
       // A silent/short-circuited round can return from the try block before
       // reaching the normal tail. Drain here as well so queued user input is

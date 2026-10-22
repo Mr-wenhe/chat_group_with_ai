@@ -1,3 +1,5 @@
+import 'reported_token_usage.dart';
+import '../models/api_protocol.dart';
 import 'dart:async';
 import 'dart:convert';
 
@@ -31,43 +33,54 @@ class BoundedSseLineTransformer
         assert(maxWireBytes > 0);
 
   @override
-  Stream<List<int>> bind(Stream<List<int>> stream) async* {
+  Stream<List<int>> bind(Stream<List<int>> stream) {
     final line = <int>[];
     var wireBytes = 0;
     var pendingCarriageReturn = false;
-    await for (final chunk in stream) {
-      if (chunk.length > maxWireBytes - wireBytes) {
-        throw const SseInputLimitException('SSE 响应超过安全大小限制');
-      }
-      wireBytes += chunk.length;
-      for (final byte in chunk) {
-        if (pendingCarriageReturn) {
-          // CRLF is one line ending; a lone CR is also a valid SSE delimiter.
-          yield List<int>.from(line);
-          line.clear();
-          pendingCarriageReturn = false;
-          if (byte == 0x0a) continue;
+    var failed = false;
+    // A synchronous transformer propagates cancellation while waiting for a trailer.
+    // An async* splitter can keep cancel() waiting on an upstream that never closes.
+    return stream
+        .transform(StreamTransformer<List<int>, List<int>>.fromHandlers(
+      handleData: (chunk, sink) {
+        if (failed) return;
+        if (chunk.length > maxWireBytes - wireBytes) {
+          failed = true;
+          sink.addError(const SseInputLimitException('SSE 响应超过安全大小限制'));
+          return;
         }
-        if (byte == 0x0d) {
-          pendingCarriageReturn = true;
-          continue;
+        wireBytes += chunk.length;
+        for (final byte in chunk) {
+          if (pendingCarriageReturn) {
+            sink.add(List<int>.from(line));
+            line.clear();
+            pendingCarriageReturn = false;
+            if (byte == 0x0a) continue;
+          }
+          if (byte == 0x0d) {
+            pendingCarriageReturn = true;
+            continue;
+          }
+          if (byte == 0x0a) {
+            sink.add(List<int>.from(line));
+            line.clear();
+            continue;
+          }
+          if (line.length >= maxLineBytes) {
+            failed = true;
+            sink.addError(const SseInputLimitException('SSE 数据帧超过安全大小限制'));
+            return;
+          }
+          line.add(byte);
         }
-        if (byte == 0x0a) {
-          yield List<int>.from(line);
-          line.clear();
-          continue;
+      },
+      handleDone: (sink) {
+        if (!failed && (pendingCarriageReturn || line.isNotEmpty)) {
+          sink.add(List<int>.from(line));
         }
-        if (line.length >= maxLineBytes) {
-          throw const SseInputLimitException('SSE 数据帧超过安全大小限制');
-        }
-        line.add(byte);
-      }
-    }
-    if (pendingCarriageReturn) {
-      yield List<int>.from(line);
-      line.clear();
-    }
-    if (line.isNotEmpty) yield List<int>.from(line);
+        sink.close();
+      },
+    ));
   }
 }
 
@@ -98,9 +111,7 @@ class SseParser {
   String _buffer = '';
   String _fullContent = '';
   String _fullReasoningContent = '';
-  int _promptTokens = 0;
-  int _completionTokens = 0;
-  int _cachedTokens = 0;
+  ReportedTokenUsage _usage = const ReportedTokenUsage();
   bool _terminated = false;
   bool _truncated = false;
   bool hasTerminalFrame = false;
@@ -188,30 +199,26 @@ class SseParser {
 
     try {
       final json = jsonDecode(payload) as Map<String, dynamic>;
+      // Usage frames are request totals; compatible providers may repeat them.
+      final usage = json['usage'];
+      if (usage is Map<String, dynamic>) {
+        _usage = _usage.merge(ReportedTokenUsage.fromWire(
+            usage, ApiProtocol.openAiChatCompletions));
+      }
       // Detect provider error responses that lack choices (e.g. {"error":{...}}).
       if (json['error'] != null && json['choices'] == null) {
         final errMsg = (json['error'] is Map)
             ? (json['error'] as Map)['message']?.toString() ?? 'API 错误'
             : json['error'].toString();
         _terminated = true;
-        return ChatStreamEvent.error('API 返回错误: $errMsg');
-      }
-      // Usage frames are request totals; compatible providers may repeat them.
-      final usage = json['usage'];
-      if (usage is Map<String, dynamic>) {
-        _promptTokens = usage['prompt_tokens'] as int? ?? _promptTokens;
-        _completionTokens =
-            usage['completion_tokens'] as int? ?? _completionTokens;
-        if (usage.containsKey('prompt_tokens_details') ||
-            usage.containsKey('input_tokens_details') ||
-            usage.containsKey('cached_tokens') ||
-            usage.containsKey('prompt_cache_hit_tokens') ||
-            usage.containsKey('cache_read_input_tokens')) {
-          _cachedTokens = _extractCachedTokens(usage);
-        }
+        return ChatStreamEvent.error('API 返回错误: $errMsg').withUsage(_usage);
       }
       final choices = json['choices'];
-      if (choices is! List || choices.isEmpty) return null;
+      if (choices is! List || choices.isEmpty) {
+        return usage is Map
+            ? ChatStreamEvent.token('').withUsage(_usage)
+            : null;
+      }
       final firstChoice = choices[0];
       if (firstChoice is! Map<String, dynamic>) return null;
       // 截断判定必须放在正文分支之前：带正文的块会在下面提前 return，而
@@ -286,21 +293,24 @@ class SseParser {
             : allowReasoningContentFallback
                 ? _fullReasoningContent
                 : '',
-        promptTokens: _promptTokens,
-        completionTokens: _completionTokens,
-        cachedTokens: _cachedTokens,
+        promptTokens: _usage.inputTokens,
+        completionTokens: _usage.outputTokens,
+        cachedTokens: _usage.cachedTokens,
+        cacheWriteTokens: _usage.cacheWriteTokens,
+        reasoningTokens: _usage.reasoningTokens,
         truncated: _truncated,
       );
 
-  int get promptTokens => _promptTokens;
-  int get completionTokens => _completionTokens;
-  int get cachedTokens => _cachedTokens;
+  int? get promptTokens => _usage.inputTokens;
+  int? get completionTokens => _usage.outputTokens;
+  int? get cachedTokens => _usage.cachedTokens;
 
   /// 当前累计的完整内容长度（用于调试）。
   int get fullContentLength => _fullContent.length;
 
   /// 解析器是否已终止（遇到 [DONE]、错误或超限）。
   bool get terminated => _terminated;
+  ReportedTokenUsage get usage => _usage;
 
   void reset() {
     _buffer = '';
@@ -310,28 +320,9 @@ class SseParser {
     _fullReasoningContentBytes = 0;
     _bufferBytes = 0;
     _wireBytes = 0;
-    _promptTokens = 0;
-    _completionTokens = 0;
-    _cachedTokens = 0;
+    _usage = const ReportedTokenUsage();
     _terminated = false;
     _truncated = false;
     hasTerminalFrame = false;
-  }
-
-  int _extractCachedTokens(Map<String, dynamic> usage) {
-    var total = 0;
-    final promptDetails = usage['prompt_tokens_details'];
-    if (promptDetails is Map) {
-      total += (promptDetails['cached_tokens'] as int? ?? 0);
-    }
-    final inputDetails = usage['input_tokens_details'];
-    if (inputDetails is Map) {
-      total += (inputDetails['cached_tokens'] as int? ?? 0);
-      total += (inputDetails['cache_read'] as int? ?? 0);
-    }
-    total += (usage['cached_tokens'] as int? ?? 0);
-    total += (usage['prompt_cache_hit_tokens'] as int? ?? 0);
-    total += (usage['cache_read_input_tokens'] as int? ?? 0);
-    return total;
   }
 }

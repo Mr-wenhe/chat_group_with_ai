@@ -120,7 +120,12 @@ extension _ChatApiServiceProtocolSupport on ChatApiService {
     bool structuredJson = false,
     bool stepPlanLowReasoning = false,
     String? reasoningEffort,
+    String? promptCacheKey,
   }) {
+    final step5Effort = model.trim().toLowerCase() == 'step-5-preview' &&
+            const {'low', 'medium', 'high'}.contains(reasoningEffort)
+        ? reasoningEffort
+        : null;
     return switch (apiProtocol) {
       ApiProtocol.anthropicMessages => _anthropicRequestBody(
           model: model,
@@ -128,14 +133,15 @@ extension _ChatApiServiceProtocolSupport on ChatApiService {
           temperature: temperature,
           maxTokens: maxTokens,
           streaming: streaming,
+          promptCacheKey: promptCacheKey,
+          reasoningEffort: step5Effort,
         ),
       ApiProtocol.openAiChatCompletions => <String, dynamic>{
           'model': model,
           'messages': messages,
+          if (promptCacheKey != null) 'prompt_cache_key': promptCacheKey,
           'temperature': temperature,
-          if (model.trim().toLowerCase() == 'step-5-preview' &&
-              const {'low', 'medium', 'high'}.contains(reasoningEffort))
-            'reasoning_effort': reasoningEffort,
+          if (step5Effort != null) 'reasoning_effort': step5Effort,
           if (maxTokens > 0) 'max_tokens': maxTokens,
           if (streaming) 'stream': true,
           if (streaming) 'stream_options': {'include_usage': true},
@@ -152,6 +158,7 @@ extension _ChatApiServiceProtocolSupport on ChatApiService {
       ApiProtocol.openAiResponses => <String, dynamic>{
           'model': model,
           'input': messages,
+          if (promptCacheKey != null) 'prompt_cache_key': promptCacheKey,
           'temperature': temperature,
           if (maxTokens > 0) 'max_output_tokens': maxTokens,
           'stream': streaming,
@@ -195,6 +202,8 @@ extension _ChatApiServiceProtocolSupport on ChatApiService {
     required double temperature,
     required int maxTokens,
     required bool streaming,
+    String? promptCacheKey,
+    String? reasoningEffort,
   }) {
     final systemParts = <String>[];
     final conversation = <Map<String, dynamic>>[];
@@ -213,12 +222,42 @@ extension _ChatApiServiceProtocolSupport on ChatApiService {
     }
     return <String, dynamic>{
       'model': model,
+      // Step 5 也可能被配成 Messages 协议走兼容中转：`output_config.effort`
+      // 是 Messages 侧的推理档位字段，由中转翻译，不能只发给 OpenAI 通道。
+      if (reasoningEffort != null) 'output_config': {'effort': reasoningEffort},
       'messages': conversation,
-      if (systemParts.isNotEmpty) 'system': systemParts.join('\n\n'),
+      if (systemParts.isNotEmpty)
+        'system': promptCacheKey == null
+            ? systemParts.join('\n\n')
+            : _cachedSystemBlocks(systemParts),
       'temperature': temperature,
       'max_tokens': maxTokens > 0 ? maxTokens : 1024,
       'stream': streaming,
     };
+  }
+
+  List<Map<String, dynamic>> _cachedSystemBlocks(List<String> parts) {
+    final first = parts.first;
+    final boundary = first.indexOf(AgentPromptBuilder.dynamicContextMarker);
+    // 动态边界就在最前面时没有稳定前缀；空 text block 会被上游判为无效请求，
+    // 所以回退成不带 cache_control 的普通分段，而不是发一个空的缓存块。
+    if (boundary == 0) {
+      return [
+        {'type': 'text', 'text': first},
+        for (final text in parts.skip(1)) {'type': 'text', 'text': text},
+      ];
+    }
+    // Only the stable first system prefix is cached; dynamic task data stays after it.
+    final stable = boundary < 0 ? first : first.substring(0, boundary);
+    return [
+      {
+        'type': 'text',
+        'text': stable,
+        'cache_control': {'type': 'ephemeral'}
+      },
+      if (boundary > 0) {'type': 'text', 'text': first.substring(boundary)},
+      for (final text in parts.skip(1)) {'type': 'text', 'text': text},
+    ];
   }
 
   Map<String, dynamic> _geminiRequestBody({
@@ -375,30 +414,7 @@ extension _ChatApiServiceProtocolSupport on ChatApiService {
       _ => data['usage'],
     };
     if (usage is! Map) return null;
-    final prompt = protocol == ApiProtocol.anthropicMessages
-        ? _anthropicInputTokens(usage, _intValue)
-        : _intValue(protocol == ApiProtocol.geminiGenerateContent
-            ? usage['promptTokenCount']
-            : usage['input_tokens'] ?? usage['prompt_tokens']);
-    final completion = _intValue(
-      protocol == ApiProtocol.geminiGenerateContent
-          ? usage['candidatesTokenCount']
-          : usage['output_tokens'] ?? usage['completion_tokens'],
-    );
-    final cached = _intValue(
-      protocol == ApiProtocol.geminiGenerateContent
-          ? usage['cachedContentTokenCount']
-          : usage['cache_read_input_tokens'] ??
-              usage['cached_tokens'] ??
-              (usage['prompt_tokens_details'] is Map
-                  ? (usage['prompt_tokens_details'] as Map)['cached_tokens']
-                  : null),
-    );
-    return <String, dynamic>{
-      if (prompt != null) 'promptTokens': prompt,
-      if (completion != null) 'completionTokens': completion,
-      if (cached != null) 'cachedTokens': cached,
-    };
+    return ReportedTokenUsage.fromWire(usage, protocol).toMap();
   }
 
   String? _responseModel(Map<String, dynamic> data, ApiProtocol protocol) {
@@ -441,11 +457,8 @@ extension _ChatApiServiceProtocolSupport on ChatApiService {
           ];
   }
 
-  int? _intValue(Object? value) {
-    if (value is num) return value.toInt();
-    if (value is String) return int.tryParse(value.trim());
-    return null;
-  }
+  int? _intValue(Object? value) =>
+      value is num ? value.toInt() : int.tryParse('$value');
 }
 
 /// Small SSE decoder for native protocols whose event payloads do not follow
@@ -456,11 +469,10 @@ class _ProtocolStreamParser {
   final StringBuffer _content = StringBuffer();
   String? _eventName;
   String? _model;
-  int? _promptTokens;
-  int? _completionTokens;
-  int? _cachedTokens;
+  ReportedTokenUsage _usage = const ReportedTokenUsage();
   final Map<String, dynamic> _anthropicInputUsage = {};
   bool terminated = false;
+  ReportedTokenUsage get usage => _usage;
   bool hasTerminalFrame = false;
   bool _truncated = false;
 
@@ -484,6 +496,10 @@ class _ProtocolStreamParser {
     if (decoded is! Map) return _error('流式响应格式无效');
     final payload = Map<String, dynamic>.from(decoded);
     if (payload['error'] != null || _eventName == 'error') {
+      if (payload['usage'] is Map) {
+        _usage = _usage.merge(
+            ReportedTokenUsage.fromWire(payload['usage'] as Map, protocol));
+      }
       return _error('上游模型返回错误');
     }
     return switch (protocol) {
@@ -500,9 +516,12 @@ class _ProtocolStreamParser {
       type: ChatStreamEventType.done,
       content: _content.toString(),
       model: _model,
-      promptTokens: _promptTokens,
-      completionTokens: _completionTokens,
-      cachedTokens: _cachedTokens,
+      promptTokens: _usage.inputTokens,
+      completionTokens: _usage.outputTokens,
+      cachedTokens: _usage.cachedTokens,
+      cacheWriteTokens: _usage.cacheWriteTokens,
+      reasoningTokens: _usage.reasoningTokens,
+      uncachedInputTokens: _usage.uncachedInputTokens,
       truncated: _truncated,
     );
   }
@@ -513,19 +532,12 @@ class _ProtocolStreamParser {
     final usage = payload['usage'] ??
         (message is Map<String, dynamic> ? message['usage'] : null);
     if (usage is Map) {
-      for (final key in const [
-        'input_tokens',
-        'cache_creation_input_tokens',
-        'cache_read_input_tokens'
-      ]) {
-        if (usage.containsKey(key)) _anthropicInputUsage[key] = usage[key];
-      }
-      _promptTokens = _anthropicInputTokens(_anthropicInputUsage, _intValue) ??
-          _promptTokens;
-      _completionTokens =
-          _intValue(usage['output_tokens']) ?? _completionTokens;
-      _cachedTokens =
-          _intValue(usage['cache_read_input_tokens']) ?? _cachedTokens;
+      final reported = Map<String, dynamic>.from(usage);
+      // message_start.output_tokens is an initial snapshot, not the final billable output.
+      if (type == 'message_start') reported.remove('output_tokens');
+      _anthropicInputUsage.addAll(reported);
+      _usage = _usage.merge(ReportedTokenUsage.fromWire(
+          _anthropicInputUsage, ApiProtocol.anthropicMessages));
     }
     _model ??= _string(message is Map ? message['model'] : payload['model']);
     if (type == 'content_block_delta') {
@@ -537,7 +549,9 @@ class _ProtocolStreamParser {
       return _token(text);
     }
     if (type == 'message_stop') return doneEvent();
-    return _clearEvent();
+    return _usage.hasValues
+        ? ChatStreamEvent.token('').withUsage(_usage)
+        : _clearEvent();
   }
 
   ChatStreamEvent? _responses(Map<String, dynamic> payload) {
@@ -560,8 +574,7 @@ class _ProtocolStreamParser {
         _model ??= _string(response['model']);
         final usage = response['usage'];
         if (usage is Map) {
-          _promptTokens ??= _intValue(usage['input_tokens']);
-          _completionTokens ??= _intValue(usage['output_tokens']);
+          _usage = _usage.merge(ReportedTokenUsage.fromWire(usage, protocol));
         }
         if (_content.isEmpty) {
           final text = _messageText(response['output_text']).isNotEmpty
@@ -573,6 +586,11 @@ class _ProtocolStreamParser {
       return doneEvent();
     }
     if (type == 'response.failed' || type == 'response.incomplete') {
+      final response = payload['response'];
+      if (response is Map && response['usage'] is Map) {
+        _usage = _usage.merge(
+            ReportedTokenUsage.fromWire(response['usage'] as Map, protocol));
+      }
       return _error('上游模型返回错误');
     }
     return _clearEvent();
@@ -582,9 +600,7 @@ class _ProtocolStreamParser {
     _model ??= _string(payload['modelVersion']);
     final usage = payload['usageMetadata'];
     if (usage is Map) {
-      _promptTokens ??= _intValue(usage['promptTokenCount']);
-      _completionTokens ??= _intValue(usage['candidatesTokenCount']);
-      _cachedTokens ??= _intValue(usage['cachedContentTokenCount']);
+      _usage = _usage.merge(ReportedTokenUsage.fromWire(usage, protocol));
     }
     final candidates = payload['candidates'];
     if (candidates is List &&
@@ -626,17 +642,11 @@ class _ProtocolStreamParser {
 
   ChatStreamEvent _error(String message) {
     terminated = true;
-    return ChatStreamEvent.error(message);
+    return ChatStreamEvent.error(message).withUsage(_usage);
   }
 
   ChatStreamEvent? _clearEvent() {
     _eventName = null;
-    return null;
-  }
-
-  int? _intValue(Object? value) {
-    if (value is num) return value.toInt();
-    if (value is String) return int.tryParse(value.trim());
     return null;
   }
 
@@ -655,13 +665,4 @@ class _ProtocolStreamParser {
     }
     return '';
   }
-}
-
-// Anthropic reports cache reads/writes outside input_tokens, unlike OpenAI.
-int? _anthropicInputTokens(Map usage, int? Function(Object?) read) {
-  final input = read(usage['input_tokens']);
-  if (input == null) return null;
-  final created = read(usage['cache_creation_input_tokens']) ?? 0;
-  final cached = read(usage['cache_read_input_tokens']) ?? 0;
-  return input < 0 || created < 0 || cached < 0 ? -1 : input + created + cached;
 }

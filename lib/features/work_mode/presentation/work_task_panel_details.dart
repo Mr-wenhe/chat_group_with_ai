@@ -97,6 +97,13 @@ class _TaskDetailsState extends State<_TaskDetails> {
   /// 上半区与「执行动态」之间的固定间距。
   static const double _sectionGap = 14.0;
 
+  /// 实报用量的缓存结果与它对应的账本签名。
+  ///
+  /// 汇总要遍历整个设备账本（含诊断），而详情区每次 setState 都会重建；
+  /// 不缓存时一次 build 里就要扫两遍，长任务账本上千条时明显掉帧。
+  WorkTaskUsageSummary? _usageSummary;
+  String _usageSignature = '';
+
   /// 「执行动态」标题行的固定高度（文字实际约 24，留一点余量）。
   static const double _timelineHeaderHeight = 28.0;
 
@@ -148,17 +155,37 @@ class _TaskDetailsState extends State<_TaskDetails> {
     return '$count 个';
   }
 
-  String _taskUsageLabel(List<UsageLedgerEntry> entries) {
-    final countedEntries = entries
-        .where((entry) => !widget.outOfBoundsUsageEntries.contains(entry))
-        .toList(growable: false);
-    final tokens = countedEntries.fold<int>(
-      0,
-      (total, entry) => total + entry.inputTokens + entry.outputTokens,
+  /// 账本与诊断都是追加写的，所以"长度 + 末条标识"足以判断汇总是否过期；
+  /// 诊断列表有容量上限会滚动淘汰，因此必须带上末条 requestId。
+  String get _usageSummarySignature {
+    final entries = widget.usageEntries;
+    final diagnostics = widget.usageDiagnostics;
+    return '${widget.task.id}|${entries.length}|'
+        '${entries.isEmpty ? '' : entries.last.requestId}|'
+        '${diagnostics.length}|'
+        '${diagnostics.isEmpty ? '' : diagnostics.last.requestId}';
+  }
+
+  WorkTaskUsageSummary get _reportedTaskUsage {
+    final signature = _usageSummarySignature;
+    final cached = _usageSummary;
+    if (cached != null && signature == _usageSignature) {
+      return cached;
+    }
+    final computed = WorkTaskUsageSummary.forTask(
+      widget.task.id,
+      widget.usageEntries,
+      widget.usageDiagnostics,
     );
-    final excluded = entries.length - countedEntries.length;
-    final excludedLabel = excluded == 0 ? '' : ' · 异常 $excluded 条';
-    return '用量 ${_formatTaskTokenCount(tokens)} Token$excludedLabel';
+    _usageSummary = computed;
+    _usageSignature = signature;
+    return computed;
+  }
+
+  String _taskUsageLabel(WorkTaskUsageSummary usage) {
+    final total = usage.input.tokens + usage.output.tokens;
+    if (usage.input.requests == 0 && usage.output.requests == 0) return '用量未知';
+    return '实报 ${_formatTaskTokenCount(total)} Token${usage.incomplete ? '（部分）' : ''}';
   }
 
   Future<void> _showTaskUsageDetails() {
@@ -208,6 +235,10 @@ class _TaskDetailsState extends State<_TaskDetails> {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
+                WorkTaskUsageCard(
+                    summary: _reportedTaskUsage,
+                    unavailable: widget.usageUnavailable),
+                const Text('以下为原账本记录（含预算估算和历史口径，不等于实报合计）：'),
                 if (widget.usageUnavailable)
                   const Text('当前设备账本不可用，未显示估算总量。')
                 else if (allEntries.isEmpty)
@@ -218,7 +249,7 @@ class _TaskDetailsState extends State<_TaskDetails> {
                     ' · 输出 ${total.outputTokens} Token · ${total.requestCount} 次记录',
                   ),
                   const SizedBox(height: 8),
-                  Text(costs.isEmpty ? '费用未知或无可计价记录' : costs),
+                  Text(costs.isEmpty ? '费用未知或无可计价记录' : '费用估算（非账单）：$costs'),
                   const SizedBox(height: 4),
                   Text(
                     '估算用量 $estimatedUsage · 未知用量 $unknownUsage · 价格未知 $unknownPrices',
@@ -361,9 +392,9 @@ class _TaskDetailsState extends State<_TaskDetails> {
             .toDouble();
     return LayoutBuilder(
       builder: (context, constraints) {
-        final usageLabel = widget.usageUnavailable
-            ? '用量不可用'
-            : _taskUsageLabel(_taskUsageEntries);
+        final reportedUsage = _reportedTaskUsage;
+        final usageLabel =
+            widget.usageUnavailable ? '用量不可用' : _taskUsageLabel(reportedUsage);
         // Keep the live execution viewport fully inside the panel. Previously
         // it was nested in the summary scroll view, so its lower scrollbar
         // could be clipped by the outer viewport and become unclickable.
@@ -376,7 +407,7 @@ class _TaskDetailsState extends State<_TaskDetails> {
         // 剩下的高度全部让给「执行动态」，所以默认就像"执行动态占满整屏"。
         // 窗口矮到连两条单行动态都放不下（minTimelineRegionHeight 判定）时
         // 整块收起执行动态，全力保住上半区。
-        const minTimelineRegionHeight =
+        const baseTimelineRegionHeight =
             _timelineHeaderHeight + _timelineHeaderGap + _minTimelineListHeight;
         // 上半区不渲染时不必为它预留高度，阈值只剩「执行动态」自己那份。
         final summaryRegionReserve =
@@ -395,6 +426,14 @@ class _TaskDetailsState extends State<_TaskDetails> {
             : 0.0;
         final remainingHeight =
             availableHeight - discussionHeaderHeight - discussionBodyHeight;
+        final hasRecordedUsage = _taskUsageEntries.isNotEmpty ||
+            _taskUsageDiagnostics.isNotEmpty ||
+            widget.usageUnavailable;
+        final usageMaxHeight = hasRecordedUsage
+            ? (remainingHeight * 0.25).clamp(0.0, 96.0).toDouble()
+            : 0.0;
+        final minTimelineRegionHeight =
+            baseTimelineRegionHeight + usageMaxHeight;
         final showTimeline =
             remainingHeight >= summaryRegionReserve + minTimelineRegionHeight;
         // summaryRegionHeight 是上半区（含顶部开关行）能占的最大高度。
@@ -811,6 +850,17 @@ class _TaskDetailsState extends State<_TaskDetails> {
                     ],
                   ),
                 ),
+                if (hasRecordedUsage)
+                  ConstrainedBox(
+                    constraints: BoxConstraints(maxHeight: usageMaxHeight),
+                    child: SingleChildScrollView(
+                      child: WorkTaskUsageCard(
+                        key: const Key('work-task-usage-summary'),
+                        summary: reportedUsage,
+                        unavailable: widget.usageUnavailable,
+                      ),
+                    ),
+                  ),
                 const SizedBox(height: _timelineHeaderGap),
                 // 保持 SizedBox > _TaskEventTimeline 这一层级不变，只调高度数值，
                 // 避免展开/折叠时重建时间线的 State（事件流不重放历史）。
@@ -896,6 +946,7 @@ class _CurrentWorkProgressCard extends StatelessWidget {
     final discussionCanProgress = !task.groupId.startsWith('dm:') &&
         task.status == AgentTaskStatus.paused &&
         !task.resumeRequired &&
+        !WorkTaskCompletionChoice.paused(task) &&
         userAction == null &&
         (const {'forming', 'clarifying'}.contains(state.phase) ||
             !state.planReady) &&
@@ -930,7 +981,8 @@ class _CurrentWorkProgressCard extends StatelessWidget {
                   );
     final workItem =
         state.workItems.where((item) => item['status'] != 'done').firstOrNull;
-    final ownerId = activeDiscussion || const {'forming', 'clarifying'}.contains(state.phase)
+    final ownerId = activeDiscussion ||
+            const {'forming', 'clarifying'}.contains(state.phase)
         ? state.coordinatorId
         : workItem?['ownerId'] as String? ?? state.coordinatorId;
     final owner =
@@ -963,7 +1015,7 @@ class _CurrentWorkProgressCard extends StatelessWidget {
         ? '执行动态读取失败'
         : progressEvent?.title ?? latestAction?.title ?? '尚无新的阶段事件';
     final deferredDiscussion = task.status == AgentTaskStatus.paused &&
-        task.resumeRequired &&
+        (task.resumeRequired || WorkTaskCompletionChoice.paused(task)) &&
         userAction == null &&
         !state.hasBlockingDecision;
     final next = task.isUserStopped

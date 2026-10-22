@@ -834,9 +834,13 @@ class _V2DiscussionSession {
     task.executionStateJson = jsonEncode(result.executionState);
     // A no-op phase update persists the technical guard through the same sink.
     await _commit('coordinator', state.coordinatorId, {'phase': state.phase});
-    if (!result.stalled) return false;
-    await _decision('dispute', '', '${result.reason} 请补充处理条件。',
-        result.executionState[WorkProgressGuard.jsonKey]['attempts'].join('；'));
+    if (!result.stalled || failure) return false;
+    await _decision('member', state.coordinatorId,
+        '${result.reason} 任务已暂停，不会继续自动重试。', '成员重复讨论，尚未形成可采纳的新方案或取得新的有效证据。',
+        options: _memberFailureControls(),
+        impact:
+            '无需填写内部字段。可选择保留原成员重试；若再次失败，请先在成员设置中更换模型，再选择已调整配置重试。原需求、执行人和已有产物保持不变。',
+        router: true);
     return true;
   }
 

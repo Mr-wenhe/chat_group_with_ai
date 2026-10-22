@@ -1,3 +1,4 @@
+import 'work_task_attachment_context.dart';
 import 'work_contract_change.dart';
 import 'dart:async';
 import 'dart:convert';
@@ -105,6 +106,12 @@ class _DiscussionMember {
 
   bool get available => config != null && provider != null && apiKey != null;
 }
+
+/// 校验器用固定短语回传"制作执行者不唯一"的失败原因。
+///
+/// 抛出点与用户话术分类点必须引用同一常量：第二次写中文字面量时，改文案
+/// 就会让分类静默失配，用户看到的又是原始技术错误。
+const String _discussionSoleExecutorMarker = '唯一执行者';
 
 /// Runs the S3 public discussion rounds inside the existing task coordinator.
 /// It only asks models for bounded, structured public contributions; tools and

@@ -13,49 +13,15 @@ extension _WorkDiscussionGroupStream on WorkDiscussionRunner {
     var activityCount = 0;
     DateTime? lastActivityAt;
     final startedAt = DateTime.now();
+    final elapsed = Stopwatch()..start();
+    final streamToken = CancelToken();
+    unawaited(token.whenCancel.then((_) => streamToken.cancel()));
     Future<void>? activityWrite;
     final stalled = Completer<Map<String, dynamic>>();
-    final timer = firstByteTimeout < timeout
-        ? Timer(firstByteTimeout, () {
-            if (activitySeen || token.isCancelled) return;
-            stalled.complete({
-              'success': false,
-              'message':
-                  '成员请求 ${firstByteTimeout.inSeconds} 秒未收到正文或生成活动，已停止本次请求；没有采纳状态',
-              'failureCode': 'modelFirstByteStall',
-              'receivedCharacters': 0
-            });
-            token.cancel('成员正文首字节停滞');
-          })
-        : null;
-    try {
-      await _recordDiagnostic(task,
-          '当前模型 ${member.config!.modelName} 使用流式接收；无响应活动时限 ${firstByteTimeout.inSeconds} 秒，总时限 ${timeout.inSeconds} 秒。部分输出不作为正式方案。',
-          title: '群讨论请求通道已确认', kind: WorkTaskEventKind.planning);
-      return await Future.any([
-        stalled.future,
-        _completeGroupStream(
-            task, member, messages, timeout, token, runBoundary, (count) {
-          received = count;
-          if (count > 0) timer?.cancel();
-        }, () {
-          if (token.isCancelled) return;
-          activityCount++;
-          lastActivityAt = DateTime.now();
-          if (activitySeen) return;
-          activitySeen = true;
-          timer?.cancel();
-          activityWrite = _recordDiagnostic(task,
-              '已收到模型生成活动，撤销首字节停滞计时；正文仍需完整返回并通过校验，300秒总时限保持不变。这不代表方案或测试取得进展，你无需操作。',
-              title: '模型已有响应活动', kind: WorkTaskEventKind.planning);
-        }),
-      ]).timeout(timeout, onTimeout: () {
-        token.cancel('成员请求达到总时限');
-        return {
+    Map<String, dynamic> failure(String code, String message) => {
           'success': false,
-          'message':
-              '${activitySeen ? '已收到模型生成活动，但' : ''}成员请求 ${timeout.inSeconds} 秒内仅收到 $received 个正文字符，未取得完整响应，未采纳状态',
-          'failureCode': 'modelCompletionTimeout',
+          'message': message,
+          'failureCode': code,
           'responseActivitySeen': activitySeen,
           'responseActivityCount': activityCount,
           if (lastActivityAt != null)
@@ -63,9 +29,74 @@ extension _WorkDiscussionGroupStream on WorkDiscussionRunner {
                 lastActivityAt!.difference(startedAt).inMilliseconds,
           'receivedCharacters': received
         };
-      });
+    Map<String, dynamic> deadline() {
+      token.cancel('成员请求达到总时限');
+      return failure('modelCompletionTimeout',
+          '成员请求 ${timeout.inSeconds} 秒内仅收到 $received 个正文字符，未取得完整响应，未采纳状态');
+    }
+
+    final timer = firstByteTimeout < timeout
+        ? Timer(firstByteTimeout, () {
+            if (received > 0 || token.isCancelled) return;
+            stalled.complete(failure('modelFirstByteStall',
+                '成员请求 ${firstByteTimeout.inSeconds} 秒未收到正文，未采纳状态'));
+            streamToken.cancel('成员正文首字节停滞');
+          })
+        : null;
+    try {
+      await _recordDiagnostic(task,
+          '当前模型 ${member.config!.modelName} 使用流式接收；首段正文时限 ${firstByteTimeout.inSeconds} 秒，总时限 ${timeout.inSeconds} 秒。推理活动不代表正文，部分输出不作为正式方案。',
+          title: '群讨论请求通道已确认', kind: WorkTaskEventKind.planning);
+      final response = await Future.any([
+        stalled.future,
+        _completeGroupStream(
+            task, member, messages, timeout, streamToken, runBoundary, (count) {
+          received = count;
+          if (count > 0) timer?.cancel();
+        }, () {
+          if (token.isCancelled || streamToken.isCancelled) return;
+          activityCount++;
+          lastActivityAt = DateTime.now();
+          if (activitySeen) return;
+          activitySeen = true;
+          activityWrite = _recordDiagnostic(
+              task, '已收到模型生成活动，仍在等待最终正文；首段正文与总时限保持不变。这不代表方案或测试取得进展，你无需操作。',
+              title: '模型已有响应活动', kind: WorkTaskEventKind.planning);
+        }),
+      ]).timeout(timeout, onTimeout: deadline);
+      if (!const {'modelFirstByteStall', 'emptyResponse'}
+              .contains(response['failureCode']) ||
+          token.isCancelled) {
+        return response;
+      }
+      timer?.cancel();
+      streamToken.cancel();
+      // Cancel only the stalled transport; its replacement shares the original deadline.
+      await _recordDiagnostic(
+          task,
+          '流式请求没有取得最终正文，已停止该通道；仅回退一次非流式请求，共用原总时限，你无需操作。'
+          '依据：failureCode=${response['failureCode']}；receivedCharacters=$received；'
+          'responseActivityCount=$activityCount。',
+          title: '成员请求兼容回退',
+          kind: WorkTaskEventKind.planning);
+      final remaining = timeout - elapsed.elapsed;
+      if (remaining <= Duration.zero) return deadline();
+      if (token.isCancelled) return response;
+      return await _complete(
+              character: member.character,
+              config: member.config!,
+              apiKey: member.apiKey!,
+              provider: member.provider!,
+              taskId: task.id,
+              runBoundary: runBoundary,
+              conversationId: task.groupId,
+              messages: messages,
+              timeout: remaining,
+              cancelToken: token)
+          .timeout(remaining, onTimeout: deadline);
     } finally {
       timer?.cancel();
+      streamToken.cancel();
       await activityWrite;
     }
   }
@@ -93,6 +124,7 @@ extension _WorkDiscussionGroupStream on WorkDiscussionRunner {
       apiKey: member.apiKey!,
       provider: member.provider!,
       apiProtocol: member.config!.protocol,
+      promptCacheKey: member.config!.workPromptCacheKey(member.character.id),
       customBaseUrl:
           WorkDiscussionRunner.structuredDiscussionBaseUrlFor(member.config!),
       model: member.config!.modelName,
@@ -171,23 +203,6 @@ extension _WorkDiscussionGroupStream on WorkDiscussionRunner {
         // A completed response must not wait for a provider to close its stream.
         break;
       }
-    }
-    if (completed &&
-        result['failureCode'] == 'emptyResponse' &&
-        !token.isCancelled) {
-      await _recordDiagnostic(task, '流式通道完整结束但正文为空，兼容回退一次非流式请求；总时限与校验保持不变。',
-          title: '成员请求兼容回退', kind: WorkTaskEventKind.planning);
-      return _complete(
-          character: member.character,
-          config: member.config!,
-          apiKey: member.apiKey!,
-          provider: member.provider!,
-          taskId: task.id,
-          runBoundary: runBoundary,
-          conversationId: task.groupId,
-          messages: messages,
-          timeout: timeout,
-          cancelToken: token);
     }
     return completed
         ? result

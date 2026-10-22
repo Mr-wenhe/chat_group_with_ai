@@ -802,7 +802,7 @@ extension _V2DiscussionActions on _V2DiscussionSession {
           WorkDiscussionState.fromExecutionState(task.executionStateJson)!
               .explicitlyPinnedExecutorId;
       if (makers.length != 1 || executor != null && makers.single != executor) {
-        throw StateError('本轮制作必须由唯一执行者负责，并保持用户指定的执行者。');
+        throw StateError('本轮制作必须由$_discussionSoleExecutorMarker负责，并保持用户指定的执行者。');
       }
       final maker = makers.single as String;
       final responsibility =

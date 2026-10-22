@@ -1,6 +1,8 @@
 import 'dart:async';
+import 'package:chat_group/core/streaming/reported_token_usage.dart';
 import 'dart:convert';
 import 'dart:typed_data';
+import 'package:chat_group/features/agentic/agent_prompt_builder.dart';
 import 'package:chat_group/core/models/api_provider.dart';
 import 'package:chat_group/core/models/api_protocol.dart';
 import 'package:chat_group/core/retry_handler.dart';
@@ -25,6 +27,8 @@ class ChatApiService {
   static const int defaultMaxResponseBytes = 4 * 1024 * 1024;
   static const int maxSseLineBytes = 512 * 1024;
   static const int maxSseWireBytes = 8 * 1024 * 1024;
+  // Some relays keep connections open after finish_reason; briefly drain the usage trailer.
+  static const Duration usageTrailerGrace = Duration(milliseconds: 500);
 
   /// 失败原因摘要的长度上限（字符）。诊断只留够定位问题的开头，正文不进审计。
   static const int failureDetailMaxLength = 180;
@@ -62,6 +66,7 @@ class ChatApiService {
     int maxRetries = RetryHandler.defaultMaxRetries,
     CancelToken? cancelToken,
     bool allowReasoningContentFallback = false,
+    String? promptCacheKey,
   }) async {
     if (kIsWeb) {
       return {
@@ -74,6 +79,7 @@ class ChatApiService {
         apiKey: apiKey,
         provider: provider,
         apiProtocol: apiProtocol,
+        promptCacheKey: promptCacheKey,
         customBaseUrl: customBaseUrl,
         model: model,
         messages: messages,
@@ -112,6 +118,7 @@ class ChatApiService {
     bool structuredJson = false,
     bool allowReasoningContentFallback = false,
     required int maxResponseBytes,
+    String? promptCacheKey,
   }) async {
     if (kIsWeb) {
       return {
@@ -127,6 +134,7 @@ class ChatApiService {
         apiKey: apiKey,
         provider: provider,
         apiProtocol: apiProtocol,
+        promptCacheKey: promptCacheKey,
         customBaseUrl: customBaseUrl,
         model: model,
         messages: messages,
@@ -243,6 +251,7 @@ class ChatApiService {
     bool structuredJson = false,
     bool stepPlanLowReasoning = false,
     bool allowReasoningContentFallback = false,
+    String? promptCacheKey,
   }) async {
     if (kIsWeb) {
       return {
@@ -271,6 +280,7 @@ class ChatApiService {
       final response = await _dio.post(
         url,
         data: _requestBody(
+          promptCacheKey: promptCacheKey,
           apiProtocol: apiProtocol,
           model: modelName,
           messages: messages,
@@ -319,6 +329,7 @@ class ChatApiService {
             'failureCode': 'emptyResponse',
             'retryable': true,
             'emptyCompletionDetail': _emptyCompletionDetail(data, apiProtocol),
+            ...?_usageFields(data, apiProtocol),
           };
         }
         final usage = _usageFields(data, apiProtocol);
@@ -340,6 +351,7 @@ class ChatApiService {
           'message': _safeHttpErrorMessage(response.statusCode),
           'requestPath': _requestPath(url),
           'requestModel': modelName,
+          ...?_usageFields(_asJsonMap(responseData) ?? {}, apiProtocol),
           if (providerError != null) 'providerError': providerError,
           if (retryAfter != null) 'retryAfterMs': retryAfter.inMilliseconds,
         };
@@ -428,11 +440,13 @@ class ChatApiService {
     String? reasoningEffort,
     void Function()? onResponseActivity,
     void Function(ChatStreamEvent event)? onEvent,
+    String? promptCacheKey,
   }) {
     return _sendChatMessageStreamedInternal(
       apiKey: apiKey,
       provider: provider,
       apiProtocol: apiProtocol,
+      promptCacheKey: promptCacheKey,
       customBaseUrl: customBaseUrl,
       model: model,
       messages: messages,
@@ -469,11 +483,13 @@ class ChatApiService {
     String? reasoningEffort,
     void Function()? onResponseActivity,
     void Function(ChatStreamEvent event)? onEvent,
+    String? promptCacheKey,
   }) {
     return _sendChatMessageStreamedInternal(
       apiKey: apiKey,
       provider: provider,
       apiProtocol: apiProtocol,
+      promptCacheKey: promptCacheKey,
       customBaseUrl: customBaseUrl,
       model: model,
       messages: messages,
@@ -507,6 +523,7 @@ class ChatApiService {
     String? reasoningEffort,
     void Function()? onResponseActivity,
     void Function(ChatStreamEvent event)? onEvent,
+    String? promptCacheKey,
   }) async {
     if (kIsWeb) {
       return {
@@ -522,6 +539,7 @@ class ChatApiService {
             apiKey: apiKey,
             provider: provider,
             apiProtocol: apiProtocol,
+            promptCacheKey: promptCacheKey,
             customBaseUrl: customBaseUrl,
             model: model,
             messages: messages,
@@ -543,6 +561,7 @@ class ChatApiService {
           apiKey: apiKey,
           provider: provider,
           apiProtocol: apiProtocol,
+          promptCacheKey: promptCacheKey,
           customBaseUrl: customBaseUrl,
           model: model,
           messages: messages,
@@ -628,11 +647,13 @@ class ChatApiService {
     bool finishOnTerminalFrame = false,
     String? reasoningEffort,
     void Function()? onResponseActivity,
+    String? promptCacheKey,
   }) {
     return _streamChatMessageInternal(
       apiKey: apiKey,
       provider: provider,
       apiProtocol: apiProtocol,
+      promptCacheKey: promptCacheKey,
       customBaseUrl: customBaseUrl,
       model: model,
       messages: messages,
@@ -662,6 +683,7 @@ class ChatApiService {
     bool finishOnTerminalFrame = false,
     String? reasoningEffort,
     void Function()? onResponseActivity,
+    String? promptCacheKey,
   }) async* {
     if (kIsWeb) {
       yield ChatStreamEvent.error(_webNetworkUnsupportedMessage,
@@ -692,6 +714,7 @@ class ChatApiService {
       'Accept': 'text/event-stream',
     };
     final data = _requestBody(
+      promptCacheKey: promptCacheKey,
       apiProtocol: apiProtocol,
       model: modelName,
       reasoningEffort: reasoningEffort,
@@ -715,6 +738,7 @@ class ChatApiService {
         : _ProtocolStreamParser(apiProtocol,
             onResponseActivity: onResponseActivity,
             separateThoughts: finishOnTerminalFrame);
+    ReportedTokenUsage currentUsage() => protocolParser?.usage ?? parser.usage;
     try {
       final response = await _dio.post<ResponseBody>(
         url,
@@ -754,38 +778,66 @@ class ChatApiService {
           .map(utf8.decode);
 
       // 逐行交给 SseParser，把产出的事件透传给调用方。
-      await for (final line in stream) {
-        if (apiProtocol == ApiProtocol.openAiChatCompletions &&
-            RegExp(r'^data:\s*\[DONE\]\s*$').hasMatch(line.trim())) {
-          // 仅当解析器未被终止（错误/超限）时才产生 done 事件，
-          // 避免错误后服务端仍然发送 [DONE] 导致误判为成功。
-          if (!parser.terminated) {
-            yield parser.doneEvent();
+      final lines = StreamIterator<String>(stream);
+      DateTime? trailerDeadline;
+      try {
+        while (true) {
+          final next = lines.moveNext();
+          bool hasNext;
+          if (trailerDeadline == null) {
+            hasNext = await next;
+          } else {
+            final remaining = trailerDeadline.difference(DateTime.now());
+            if (remaining <= Duration.zero) break;
+            try {
+              hasNext = await next.timeout(remaining);
+            } on TimeoutException {
+              break;
+            }
           }
-          return;
+          if (!hasNext) break;
+          final line = lines.current;
+          if (apiProtocol == ApiProtocol.openAiChatCompletions &&
+              RegExp(r'^data:\s*\[DONE\]\s*$').hasMatch(line.trim())) {
+            // 仅当解析器未被终止（错误/超限）时才产生 done 事件，
+            // 避免错误后服务端仍然发送 [DONE] 导致误判为成功。
+            if (!parser.terminated) {
+              yield parser.doneEvent();
+            }
+            return;
+          }
+          final event = apiProtocol == ApiProtocol.openAiChatCompletions
+              ? parser.ingestLine(line)
+              : protocolParser!.ingestLine(line);
+          if (event != null) {
+            yield event.type == ChatStreamEventType.error
+                ? ChatStreamEvent.error(
+                    _safeStreamErrorMessage(event.message),
+                    retryAfter: event.retryAfter,
+                    sanitized: true,
+                  ).withUsage(currentUsage())
+                : event.withUsage(currentUsage());
+            if (parser.terminated || protocolParser?.terminated == true) return;
+          }
+          if (finishOnTerminalFrame &&
+              (trailerDeadline != null ||
+                  (apiProtocol == ApiProtocol.openAiChatCompletions
+                      ? parser.hasTerminalFrame
+                      : protocolParser!.hasTerminalFrame))) {
+            if (currentUsage().complete) {
+              yield apiProtocol == ApiProtocol.openAiChatCompletions
+                  ? parser.doneEvent()
+                  : protocolParser!.doneEvent();
+              return;
+            }
+            trailerDeadline ??= DateTime.now().add(usageTrailerGrace);
+          }
         }
-        final event = apiProtocol == ApiProtocol.openAiChatCompletions
-            ? parser.ingestLine(line)
-            : protocolParser!.ingestLine(line);
-        if (event != null) {
-          yield event.type == ChatStreamEventType.error
-              ? ChatStreamEvent.error(
-                  _safeStreamErrorMessage(event.message),
-                  retryAfter: event.retryAfter,
-                  sanitized: true,
-                )
-              : event;
-          if (parser.terminated || protocolParser?.terminated == true) return;
-        }
-        if (finishOnTerminalFrame &&
-            (apiProtocol == ApiProtocol.openAiChatCompletions
-                ? parser.hasTerminalFrame
-                : protocolParser!.hasTerminalFrame)) {
-          yield apiProtocol == ApiProtocol.openAiChatCompletions
-              ? parser.doneEvent()
-              : protocolParser!.doneEvent();
-          return;
-        }
+      } finally {
+        // 不 await：moveNext 超时中断时那个 future 仍在飞，若上游 socket 卡住，
+        // cancel() 自己也会挂起；那样 finally 永远不返回，调用方的 await for
+        // 就再也收不到流关闭。取消只需要发起，不需要等它完成。
+        unawaited(lines.cancel());
       }
       // 流正常结束，仅当解析器未被终止（非 [DONE] 路径）时产出 done 事件，
       // 避免把 error/超限终止误报为成功。
@@ -795,20 +847,21 @@ class ChatApiService {
         yield protocolParser.doneEvent();
       }
     } on SseInputLimitException {
-      yield ChatStreamEvent.error('流式响应超过安全大小限制', sanitized: true);
+      yield ChatStreamEvent.error('流式响应超过安全大小限制', sanitized: true)
+          .withUsage(currentUsage());
     } on DioException catch (e) {
       yield ChatStreamEvent.error(
         _dioErrorMessage(e),
         retryAfter: _retryAfterFromHeaders(e.response?.headers),
         sanitized: true,
         failureDetail: _failureDetail(e),
-      );
+      ).withUsage(currentUsage());
     } catch (e) {
       yield ChatStreamEvent.error(
         '请求失败',
         sanitized: true,
         failureDetail: _failureDetail(e),
-      );
+      ).withUsage(currentUsage());
     }
   }
 }

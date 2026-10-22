@@ -70,6 +70,7 @@ class _StrictDecisionGateway extends AiRequestGateway {
     String? reasoningEffort,
     void Function()? onResponseActivity,
     void Function(ChatStreamEvent event)? onEvent,
+    String? promptCacheKey,
   }) async {
     calls++;
     if (decisions.isEmpty) {

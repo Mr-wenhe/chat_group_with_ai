@@ -48,6 +48,7 @@ class _S8ExecutionGateway extends AiRequestGateway {
     String? reasoningEffort,
     void Function()? onResponseActivity,
     void Function(ChatStreamEvent event)? onEvent,
+    String? promptCacheKey,
   }) async {
     calls++;
     final work = task?.call();

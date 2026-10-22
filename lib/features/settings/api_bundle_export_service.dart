@@ -134,6 +134,7 @@ class ApiBundleExportService {
         'modelName': config.modelName,
         'customBaseUrl': config.customBaseUrl,
         'apiProtocol': config.apiProtocol,
+        'enableWorkPromptCaching': config.enableWorkPromptCaching,
         'apiKey': apiKey,
         if (config.id == defaultConfigId) 'makeDefault': true,
       });
@@ -174,7 +175,8 @@ class ApiBundleExportService {
       'apiKey': apiKey,
       'ttsResourceId': config.ttsResourceId,
       'asrResourceId': config.asrResourceId,
-      if (config.defaultVoiceId != null) 'defaultVoiceId': config.defaultVoiceId,
+      if (config.defaultVoiceId != null)
+        'defaultVoiceId': config.defaultVoiceId,
     };
   }
 

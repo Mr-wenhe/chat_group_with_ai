@@ -20,10 +20,10 @@ const String voiceKey = 'voice-export-SENTINEL-bb';
 const String imageKey = 'image-export-SENTINEL-cc';
 const String searchKey = 'tvly-export-SENTINEL-dd';
 
-ApiBundle seededBundle() => ApiBundle(
+ApiBundle seededBundle() => const ApiBundle(
       label: '源机器',
       issuedAt: '2026-10-15T00:00:00Z',
-      chat: const [
+      chat: [
         ApiBundleChatEntry(
           id: 'cfg-1',
           name: '主力对话',
@@ -33,15 +33,16 @@ ApiBundle seededBundle() => ApiBundle(
           protocol: 'openAiChatCompletions',
           apiKey: chatKey,
           setDefault: true,
+          enableWorkPromptCaching: true,
         ),
       ],
-      voice: const ApiBundleVoiceEntry(
+      voice: ApiBundleVoiceEntry(
         apiKey: voiceKey,
         ttsResourceId: 'seed-tts-1.0',
         asrResourceId: 'volc.bigasr.sauc.duration',
         defaultVoiceId: '',
       ),
-      image: const ApiBundleImageEntry(
+      image: ApiBundleImageEntry(
         apiKey: imageKey,
         baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
         model: 'glm-image',
@@ -49,7 +50,7 @@ ApiBundle seededBundle() => ApiBundle(
         quality: '',
         disableWatermark: true,
       ),
-      search: const [
+      search: [
         ApiBundleSearchEntry(
           id: 'tavily-main',
           name: 'Tavily',
@@ -60,7 +61,7 @@ ApiBundle seededBundle() => ApiBundle(
           isDefault: true,
         ),
       ],
-      issues: const [],
+      issues: [],
     );
 
 void main() {
@@ -165,6 +166,7 @@ void main() {
     final restored = db.apiConfigBox.get('cfg-1');
     expect(restored, isNotNull);
     expect(restored!.hasCredential, isTrue);
+    expect(restored.enableWorkPromptCaching, isTrue);
     expect((await CredentialRepository().read('cfg-1')).value, chatKey);
   });
 
@@ -239,20 +241,17 @@ void main() {
 
     expect(shown.contains(zhipuKey), isFalse);
     expect(
-      result.included
-          .firstWhere((e) => e.title == '智谱原生搜索')
-          .fingerprint
-          .length,
+      result.included.firstWhere((e) => e.title == '智谱原生搜索').fingerprint.length,
       8,
     );
   });
 
   test('未配过的服务不会凭空出现在导出清单里', () async {
     // 只配聊天。
-    await importer().apply(ApiBundle(
+    await importer().apply(const ApiBundle(
       label: '',
       issuedAt: '',
-      chat: const [
+      chat: [
         ApiBundleChatEntry(
           id: '',
           name: '只有聊天',
@@ -266,8 +265,8 @@ void main() {
       ],
       voice: null,
       image: null,
-      search: const [],
-      issues: const [],
+      search: [],
+      issues: [],
     ));
 
     final result = await exporter().export();

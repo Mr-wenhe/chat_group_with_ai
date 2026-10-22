@@ -170,3 +170,7 @@ final uiAttachmentDataUriCache = AttachmentDataUriCache(
   maxEntries: 24,
   maxBytes: 20 * 1024 * 1024,
 );
+
+/// Conservative per-image input reservation; Base64 is transport, not text tokens.
+/// Actual model usage remains authoritative.
+const int estimatedImageInputTokens = 4096;

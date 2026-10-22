@@ -70,6 +70,7 @@ class _PlannerClient extends ChatApiService {
     int? maxRetries,
     CancelToken? cancelToken,
     bool allowReasoningContentFallback = false,
+    String? promptCacheKey,
   }) async {
     sendCount++;
     receivedCancelToken = cancelToken;
@@ -118,6 +119,7 @@ class _PlannerClient extends ChatApiService {
     bool structuredJson = false,
     bool allowReasoningContentFallback = false,
     required int maxResponseBytes,
+    String? promptCacheKey,
   }) {
     receivedMaxResponseBytes = maxResponseBytes;
     _responseLimitForNextCall = maxResponseBytes;
@@ -151,6 +153,7 @@ class _PlannerClient extends ChatApiService {
     bool finishOnTerminalFrame = false,
     String? reasoningEffort,
     void Function()? onResponseActivity,
+    String? promptCacheKey,
   }) async* {
     yield ChatStreamEvent.done('');
   }

@@ -138,6 +138,13 @@ extension _V2DiscussionRequests on _V2DiscussionSession {
   /// 审查请求必须同时带上这份已验摘要的候选，不能让成员从有界聊天预览猜方案。
   Future<Map<String, dynamic>?> _collaborationForPrompt() async {
     final collaboration = state.toPromptJson();
+    // 检查点可能损坏或来自未知 schema（此时 fromExecutionState 返回 null）。
+    // 那种情况下就是"没有指定执行人"，不是可以让流程崩掉的异常：漏传这一项
+    // 只会让协议少一条约束，而崩溃会让整轮讨论连错误文案都拿不到。
+    final pinnedState =
+        WorkDiscussionState.fromExecutionState(task.executionStateJson);
+    final executorId = pinnedState?.explicitlyPinnedExecutorId;
+    if (executorId != null) collaboration['explicitExecutorId'] = executorId;
     // 场景的版本由运行时生成；提案参考不混入禁止模型填写的字段。
     collaboration['usageAssignments'] = [
       for (final assignment in state.usageAssignments)
@@ -285,6 +292,22 @@ extension _V2DiscussionRequests on _V2DiscussionSession {
             lastValidationError = _resolutionValidationError(
                 repairOriginal.resolutions, member.character.id);
             return repairOriginal;
+          }
+        }
+        if (!repairUsed &&
+            state.isAutonomous &&
+            parsed.action == 'propose' &&
+            parsed.proposal != null &&
+            finalText is String) {
+          try {
+            _validateProposal(parsed.proposal!);
+          } on StateError catch (error) {
+            // 状态校验失败也给模型一次修复机会，不能让用户补内部字段。
+            repairUsed = true;
+            lastValidationError = sanitizeWorkTaskError(error);
+            messages = _protocolRepairMessages(member, finalText, collaboration,
+                _resolutionEvidenceForPrompt(member.character.id));
+            continue;
           }
         }
         final resolutionError =
@@ -510,13 +533,24 @@ extension _V2DiscussionRequests on _V2DiscussionSession {
         '另有 $hiddenDifferentModel 个可用候选因本次决策的选项数量上限未列出。',
     ];
     final rejected = rejection.isNotEmpty;
-    final evidence = rejected
-        ? boundedDiscussionText(rejection,
-            maximum: WorkDiscussionRunner.invalidFinalPreviewCharacters)
-        : lastValidationError.isEmpty
-            ? '未产出可解析的 v2 JSON 正文。'
-            : boundedDiscussionText(lastValidationError,
-                maximum: WorkDiscussionRunner.invalidFinalPreviewCharacters);
+    final technicalError =
+        rejection.isNotEmpty ? rejection : lastValidationError;
+    final userExplanation =
+        technicalError.contains(WorkCollaborationState.usageAssignmentsField)
+            ? '模型未按要求提供完整的逐成员使用与验收安排，自动修复后仍未通过。无需你填写内部字段。'
+            : technicalError.contains(_discussionSoleExecutorMarker)
+                ? '模型提出的制作分工与当前执行人规则冲突，自动修复后仍未通过。无需重新指定已确认的执行人。'
+                : '';
+    final evidence = userExplanation.isNotEmpty
+        ? userExplanation
+        : rejected
+            ? boundedDiscussionText(rejection,
+                maximum: WorkDiscussionRunner.invalidFinalPreviewCharacters)
+            : lastValidationError.isEmpty
+                ? '未产出可解析的 v2 JSON 正文。'
+                : boundedDiscussionText(lastValidationError,
+                    maximum:
+                        WorkDiscussionRunner.invalidFinalPreviewCharacters);
     final rejectionLabel = rejection.startsWith('解决项未被采纳：')
         ? '解决项'
         : switch (action) {
@@ -646,7 +680,8 @@ extension _V2DiscussionRequests on _V2DiscussionSession {
       {
         'role': 'system',
         'content': '只修复指定 proposal 字段，返回只含该字段的 JSON 对象；不得返回完整提案。'
-            '保留原有 ID、负责人、依赖、验收条件和场景语义；仅移除运行时字段或修正协议格式。'
+            '保留原有 ID、负责人、依赖、验收条件和场景语义；已有内容仅移除运行时字段或修正协议格式。'
+            '指定字段缺失时，可按给定方案和已有场景补齐待审建议；这不代表场景已执行或验收已通过。'
             '不新增需求、授权、事实、测试结果或签字。缺少必要内容时如实返回 null，不能编造。\n'
             '$rules\n以上只说明字段结构；本次仅返回 {"$field":修复后的数组}，不返回 schemaVersion、action 或 proposal 等外层字段。'
       },
@@ -656,7 +691,13 @@ extension _V2DiscussionRequests on _V2DiscussionSession {
           'field': field,
           'protocolError': lastValidationError,
           'value': proposal[field],
+          if (collaboration['explicitExecutorId'] != null)
+            'explicitExecutorId': collaboration['explicitExecutorId'],
           if (field == 'usageAssignments') ...{
+            'scope': proposal['scope'],
+            'plan': proposal['plan'],
+            'artifactContract': proposal['artifactContract'],
+            'workItems': proposal['workItems'],
             'currentAssignments': collaboration['usageAssignments'],
             'acceptances': proposal['acceptances'],
             'participantRoster': _participantRoster(),
@@ -678,6 +719,7 @@ extension _V2DiscussionRequests on _V2DiscussionSession {
               '${AgentPromptBuilder.replyGuidance}\n'
               '逐项修复 protocolError 指出的字段；若错误在 issues，每项只能保留 id、kind、target、problem、evidenceRef、retestCondition，'
               '非空文本应简洁（建议不超过 512 字符），evidenceRef 只能用真实证据键或空字符串。\n'
+              '若错误涉及唯一制作执行者，保留用户指定的执行者；仅修正制作工作项的 ownerId，独立审核仍安排在 acceptances 和 usageAssignments，不改变需求或伪造审核结果。\n'
               '若错误在 resolutions，逐项核对 resolutions[index].id 与 resolutions[index].evidenceRef：只可复制 availableResolutionEvidence 中的精确 ref，并满足该问题的证据要求；无匹配证据时删除该 resolution、保持问题开放，不能声称已解决或自行造证据。\n'
               '若 protocolError 指向 artifactContract.verificationCommands，只允许在 executable 与每个 argument 字符串完全不变时，把 JSON 字符串或对象规范化为仅含 executable 和 arguments 的标准 JSON 字符串；对象必须严格只有这两个字段，不能增删参数或放宽验证基线，无法保真时 proposal=null。\n'
               '原回应字符串值内的半角双引号必须转义为 \\" 或改用「」，不得把它们原样留在字符串里破坏 JSON 语法。'

@@ -1,3 +1,4 @@
+import 'package:chat_group/core/models/attachment_data_uri.dart';
 import 'package:chat_group/core/models/api_provider.dart';
 import 'package:chat_group/features/ai_governance/ai_governance_models.dart';
 import 'package:chat_group/features/ai_governance/ai_governance_store.dart';
@@ -267,7 +268,7 @@ class AiRequestGuard {
     AiRequestPurpose? originPurpose,
   }) {
     return entries.where((entry) {
-      if (entry.currency != 'USD' || entry.estimatedCostMicros == null) {
+      if (entry.currency != 'USD' || _budgetCost(entry) == null) {
         return false;
       }
       final local = entry.timestamp.toLocal();
@@ -287,7 +288,24 @@ class AiRequestGuard {
         return false;
       }
       return true;
-    }).fold(0, (sum, entry) => sum + entry.estimatedCostMicros!);
+    }).fold(0, (sum, entry) => sum + _budgetCost(entry)!);
+  }
+
+  int? _budgetCost(UsageLedgerEntry entry) {
+    if (entry.budgetCostMicros != null) return entry.budgetCostMicros;
+    if (entry.estimatedCostMicros != null) return entry.estimatedCostMicros;
+    final usage = entry.reportedUsage;
+    if (usage == null || !usage.valid || !usage.complete) return null;
+    final providers = ApiProvider.values.where((p) => p.name == entry.provider);
+    if (providers.isEmpty) return null;
+    final price = capability(providers.first, entry.model).price;
+    if (price == null || price.currency != entry.currency) return null;
+    // 预算按普通输入价计缓存读取，写入另预留一份输入价；这是预算策略，不是账单。
+    return price.estimateMicros(
+      inputTokens: usage.inputTokens! + (usage.cacheWriteTokens ?? 0),
+      cachedInputTokens: 0,
+      outputTokens: usage.outputTokens!,
+    );
   }
 
   static int estimateTokens(List<Map<String, dynamic>> messages) {
@@ -297,6 +315,7 @@ class AiRequestGuard {
         return value.fold(0, (sum, item) => sum + characters(item));
       }
       if (value is Map) {
+        if (value['type'] == 'image_url') return estimatedImageInputTokens * 4;
         return value.entries.fold(
           0,
           (sum, item) => sum + characters(item.key) + characters(item.value),

@@ -77,7 +77,14 @@ class WorkProgressGuard {
 
   static const String jsonKey = 'v2ProgressGuard';
   static const int repeatedFailureLimit = 3;
-  static const int noProgressResultLimit = 8;
+
+  /// 连续多少个"没有带来新证据"的观察就判停滞。
+  ///
+  /// 计数是**合计**口径：工具结果无新指纹、以及 failure 观察都走同一个
+  /// `noProgressCount`（失败本身也没产出新证据），所以真实含义是"失败或空转
+  /// 合计 3 次"。取值 3 是用户 2026-10-22 的决定（原值 8 会让模型反复读同一批
+  /// 文件时长时间空转）；同一失败另由 [repeatedFailureLimit] 单独归类。
+  static const int noProgressResultLimit = 3;
   // ponytail: 128 fingerprints fit the existing checkpoint list boundary; an
   // indexed evidence store is needed for tasks revisiting more than 128 results.
   static const int _historyLimit = 128;

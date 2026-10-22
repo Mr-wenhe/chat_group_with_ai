@@ -3,6 +3,12 @@ import 'package:chat_group/core/models/ai_character.dart';
 class DirectChatSession {
   static const String prefix = 'dm:';
 
+  /// 仅发送给模型的调度指令，不作为真人消息保存或写入记忆。
+  static const String continuationInstruction = '【应用续聊指令，不是真人新消息】'
+      '用户还没有新回复。请接着你上面已经发出的消息，继续发送下一条私聊。'
+      '只补充新内容或推进话题，不要重新回答最后一条用户输入，不要重复开场、结论或问题。'
+      '不要替用户回答，也不要把自己的问题当作用户提出的问题。';
+
   static String conversationIdFor(String characterId) => '$prefix$characterId';
 
   static bool isDirectConversationId(String conversationId) {
@@ -31,7 +37,7 @@ class DirectChatSession {
   }) {
     return '【一对一私聊上下文】\n'
         '你正在和真人用户叫「$ownerName」的人一对一私聊。'
-        '请自然回应对方当前消息，像真实私信一样有来有回。'
+        '像真实私信一样自然交谈，有来有回。'
         '不要替别人发言，不要说自己是 AI，不要带自己的名字前缀。';
   }
 

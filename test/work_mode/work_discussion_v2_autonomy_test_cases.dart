@@ -28,6 +28,91 @@ Map<String, dynamic> _autonomousProposal(Map<String, dynamic> state) => {
     };
 
 void _registerAutonomousDiscussionTests() {
+  for (final failure in [
+    'missing-usage',
+    'split-makers',
+    'unrepairable-makers'
+  ]) {
+    test('自主方案内部错误有界修复且不要求用户补字段：$failure', () async {
+      task.executionStateJson = jsonEncode({
+        ...jsonDecode(task.executionStateJson) as Map,
+        'autonomyUpgradePending': true,
+      });
+      var repairs = 0;
+      var invalidTurns = 0;
+      final errors = <String>[];
+      await modelRunner((member, context) async {
+        final repairing = context.containsKey('protocolError');
+        if (repairing) {
+          repairs++;
+          errors.add(context['protocolError'] as String);
+          if (context['field'] == 'usageAssignments') {
+            final state = {
+              'autonomyPolicy': {
+                'participantIds': (context['participantRoster'] as List)
+                    .map((m) => (m as Map)['memberId'])
+                    .toList(),
+              }
+            };
+            return {
+              'success': true,
+              'message': jsonEncode({
+                'usageAssignments':
+                    _autonomousProposal(state)['usageAssignments'],
+              })
+            };
+          }
+        }
+        final state = context['collaboration'] as Map<String, dynamic>;
+        if (context['turnFocus']?['rulingSubjectId'] != null) {
+          return _turn('decide', decision: {
+            'kind': 'ruling',
+            'targetId': task.id,
+            'reason': '全员审阅后按修正方案推进',
+            'evidence': '当前成员意见已收齐',
+            'impact': '保持原需求与执行人',
+            'options': [],
+          });
+        }
+        if ((state['plan'] as String).isNotEmpty) {
+          return _turn('approve', approval: approval(state));
+        }
+        final next = _autonomousProposal(state);
+        if (!repairing || failure == 'unrepairable-makers') {
+          invalidTurns++;
+          if (failure == 'missing-usage') {
+            next.remove('usageAssignments');
+          } else {
+            (next['workItems'] as List).add({
+              'id': 'wrong-review',
+              'ownerId': 'qa',
+              'dependencies': <String>[],
+            });
+          }
+        }
+        return _turn('propose', proposal: next);
+      }).runCollaboration(task, WorkTaskCancellation(), apply);
+      final state =
+          WorkDiscussionState.fromExecutionState(task.executionStateJson)!
+              .collaboration!;
+      expect(repairs, greaterThan(0));
+      if (failure == 'unrepairable-makers') {
+        expect(invalidTurns, lessThanOrEqualTo(4));
+        expect(state.plan, isEmpty);
+        final decision = state.decisions.last;
+        expect(decision['kind'], 'member');
+        expect(decision['options'], isNotEmpty);
+        expect(decision['evidence'], contains('无需重新指定'));
+        expect(decision['reason'], isNot(contains('请补充处理条件')));
+      } else {
+        expect(state.planReady, isTrue, reason: jsonEncode(state.toJson()));
+        expect(state.hasBlockingDecision, isFalse);
+        expect(state.workItems.map((item) => item['ownerId']).toSet(), {'dev'});
+        expect(state.usageAssignments, isNotEmpty);
+      }
+    }, timeout: const Timeout(Duration(seconds: 30)));
+  }
+
   test('非自主任务的提案反对仍等待用户裁决', () async {
     await modelRunner((member, context) async {
       final state = context['collaboration'] as Map<String, dynamic>;
@@ -390,9 +475,69 @@ void _registerAutonomousDiscussionTests() {
     }
   });
 
+  test('自主提案结构示例与首轮、修复协议一致，审核不占制作工作项', () {
+    for (final autonomous in [false, true]) {
+      final prompts = [
+        for (final stage in WorkDiscussionStage.values)
+          WorkDiscussionV2Turn.protocolFor('',
+              stage: stage, autonomous: autonomous),
+        WorkDiscussionV2Turn.repairProtocolFor('', autonomous: autonomous),
+      ];
+      for (final prompt in prompts) {
+        expect(
+            prompt.contains(
+                'acceptances:[{id,method,requiredCapability}],usageAssignments:['),
+            autonomous);
+        if (autonomous) {
+          expect(prompt, contains('collaboration.explicitExecutorId'));
+          expect(prompt, contains('独立审核与测试安排在 acceptances 和 usageAssignments'));
+        }
+      }
+    }
+  });
+
+  test('指定执行者在首次请求与完整协议修复中保持可见', () async {
+    final shell =
+        WorkDiscussionState.fromExecutionState(task.executionStateJson)!;
+    task.executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
+        '',
+        shell.copyWith(deliverableContract: {
+          ...shell.deliverableContract!,
+          'explicitExecutorId': 'dev',
+        }));
+    final contexts = <Map<String, dynamic>>[];
+    await modelRunner((member, context) async {
+      contexts.add(context);
+      if (context.containsKey('originalFinal')) {
+        return _turn('decide', decision: {
+          'kind': 'question',
+          'targetId': '',
+          'reason': '结束隔离夹具',
+          'evidence': '已检查执行者授权上下文',
+          'impact': '不制作文件',
+          'options': [],
+        });
+      }
+      return {'success': true, 'message': '{broken'};
+    }).runCollaboration(task, WorkTaskCancellation(), apply);
+    expect(contexts, hasLength(2));
+    expect(contexts.last, contains('originalFinal'));
+    for (final context in contexts) {
+      expect(context['collaboration']['explicitExecutorId'], 'dev');
+    }
+  }, timeout: const Timeout(Duration(seconds: 30)));
+
   test('自主提案遗漏场景的修复请求带齐自主协议和参与者名册', () async {
     // `autonomyRules` 要求按名册的 memberId 对齐参与者，而修复请求也嵌入这份
     // 规则；名册只出现在首轮上下文里时，修复器只能拿显示名去凑 memberId。
+    final shell =
+        WorkDiscussionState.fromExecutionState(task.executionStateJson)!;
+    task.executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
+        '',
+        shell.copyWith(deliverableContract: {
+          ...shell.deliverableContract!,
+          'explicitExecutorId': 'dev',
+        }));
     task.executionStateJson = jsonEncode({
       ...jsonDecode(task.executionStateJson) as Map,
       'autonomyUpgradePending': true,
@@ -428,6 +573,12 @@ void _registerAutonomousDiscussionTests() {
         repairs.first['protocolError'], contains('proposal.usageAssignments'));
     expect(repairInstructions.single,
         contains(WorkDiscussionProtocolText.autonomyRules));
+    expect(repairInstructions.single, contains('指定字段缺失时'));
+    expect(repairs.first['scope'], isNotEmpty);
+    expect(repairs.first['plan'], isNotEmpty);
+    expect(repairs.first['artifactContract'], isA<Map>());
+    expect(repairs.first['workItems'], isNotEmpty);
+    expect(repairs.first['explicitExecutorId'], 'dev');
     final roster = repairs.first['participantRoster'];
     expect(roster, isA<List>(),
         reason: '修复器与首轮请求看到的名册必须是同一份，缺了它模型只能拿显示名凑 memberId');

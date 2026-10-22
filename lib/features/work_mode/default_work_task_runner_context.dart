@@ -325,57 +325,15 @@ extension _DefaultWorkTaskRunnerContext on DefaultWorkTaskRunner {
     );
   }
 
-  Future<String> _requestWithAttachmentContext(AgentTask task) async {
-    final sourceId = _attachmentMessageId(task.executionStateJson);
-    Message? source;
-    if (sourceId != null) {
-      final candidate = database.messageBox.get(sourceId);
-      if (candidate != null &&
-          candidate.groupId == task.groupId &&
-          candidate.senderType == 'user' &&
-          candidate.media?.isNotEmpty == true) {
-        source = candidate;
-      }
-    }
-    if (source == null) {
-      final candidates = database.messageBox.values
-          .where((message) =>
-              message.groupId == task.groupId &&
-              message.senderType == 'user' &&
-              message.content.trim() == task.userRequest.trim())
-          .toList()
-        ..sort((left, right) => right.timestamp.compareTo(left.timestamp));
-      source = candidates.isEmpty ? null : candidates.first;
-    }
-    if (source == null &&
-        task.userRequest.trim() == WorkModePolicy.attachmentOnlyRequest) {
-      // Attachment-only follow-ups use an internal label because the durable
-      // queue cannot store an empty request. Resolve that label to the newest
-      // user attachment without changing the original message content.
-      final messages = database.messageBox.values
-          .where((message) =>
-              message.groupId == task.groupId &&
-              message.senderType == 'user' &&
-              message.media?.isNotEmpty == true)
-          .toList()
-        ..sort((left, right) => right.timestamp.compareTo(left.timestamp));
-      source = messages.isEmpty ? null : messages.first;
-    }
-    return AgentAttachmentContext.enhanceCurrentRequest(
-      userRequest: WorkDiscussionState.currentRequestScope(task),
-      media: source?.media,
-    );
-  }
-
-  String? _attachmentMessageId(String rawExecutionState) {
-    try {
-      final decoded = jsonDecode(rawExecutionState);
-      final value = decoded is Map ? decoded['attachmentMessageId'] : null;
-      return value is String && value.trim().isNotEmpty ? value.trim() : null;
-    } on Object {
-      return null;
-    }
-  }
+  Future<String> _requestWithAttachmentContext(AgentTask task) =>
+      AgentAttachmentContext.enhanceCurrentRequest(
+        userRequest: WorkDiscussionState.currentRequestScope(task),
+        media: WorkTaskAttachmentContext.attachments(
+          task,
+          database.messageBox.values,
+          characterId: task.characterId,
+        ),
+      );
 
   Set<String> _attachmentPathsForTask(AgentTask task) {
     final metadata = _decodeMap(task.executionStateJson);

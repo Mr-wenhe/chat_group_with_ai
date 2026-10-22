@@ -140,6 +140,8 @@ import 'package:hive/hive.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:pasteboard/pasteboard.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:uuid/uuid.dart';
+import 'package:chat_group/features/chat_group/pending_chat_reply_store.dart';
 import 'package:chat_group/features/realtime/realtime_client.dart';
 import 'package:chat_group/features/realtime/realtime_group_service.dart';
 import 'package:chat_group/features/realtime/realtime_protocol.dart';
@@ -171,6 +173,7 @@ part 'chat_room_speaker_picker_support.dart';
 part 'chat_room_page_build_support.dart';
 part 'chat_room_task_action_support.dart';
 part 'chat_room_voice_support.dart';
+part 'chat_room_pending_reply_support.dart';
 
 /// 空闲自动聊天（idle auto-chat）的对外可见状态，用于顶部状态条展示。
 ///

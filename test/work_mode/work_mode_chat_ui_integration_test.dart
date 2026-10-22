@@ -1,3 +1,6 @@
+import '../helpers/capturing_chat_api_service.dart';
+import 'package:chat_group/features/ai_governance/ai_governance_store.dart';
+import 'package:chat_group/features/work_mode/work_task_usage_summary.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -213,7 +216,7 @@ class _MemoryDatabaseService extends DatabaseService {
   Box<RelationshipEvent> get relationshipEventBox => _relationshipEvents;
 }
 
-class _RouteApi extends ChatApiService {
+class _RouteApi extends CapturingChatApiService {
   int calls = 0;
 
   @override
@@ -238,13 +241,17 @@ class _RouteApi extends ChatApiService {
     bool userInitiated = false,
     void Function(ChatStreamEvent event)? onEvent,
     required int maxResponseBytes,
+    String? promptCacheKey,
   }) async {
     calls++;
     return {
       'success': true,
+      'promptTokens': 100,
+      'completionTokens': 20,
+      'cachedTokens': 40,
       'message': jsonEncode({
         'characterId': 'ui-worker',
-        'publicReason': '该角色负责执行当前工作指令。',
+        'reason': '该角色负责执行当前工作指令。',
         'confidence': 0.95,
         'needsHandoff': false,
       }),
@@ -285,6 +292,7 @@ class _UiWorkGateway extends AiRequestGateway {
     String? reasoningEffort,
     void Function()? onResponseActivity,
     void Function(ChatStreamEvent event)? onEvent,
+    String? promptCacheKey,
   }) async {
     calls++;
     final decision = calls == 1
@@ -414,297 +422,354 @@ void main() {
     }
   });
 
-  testWidgets(
-      'chat input creates v2 group task; DM retains folder authorization and read execution',
-      (tester) async {
-    const groupId = 'ui-work-group';
-    final config = ApiConfig(
-      id: 'ui-config',
-      name: 'UI test config',
-      provider: ApiProvider.deepseek.name,
-      modelName: 'deepseek-chat',
-      hasCredential: true,
-    );
-    final character = AICharacter(
-      id: 'ui-worker',
-      name: '开发角色',
-      avatar: 'D',
-      age: 30,
-      role: '开发工程师',
-      personalityTags: const [],
-      systemPrompt: '负责执行工作任务',
-      apiKey: '',
-      apiProvider: ApiProvider.deepseek.name,
-      modelName: 'deepseek-chat',
-      apiConfigId: config.id,
-      toolPermissions: const [ToolPermission.workspaceRead],
-    );
-    await tester.runAsync(() async {
-      await database.apiConfigBox.put(config.id, config);
-      await database.aiCharacterBox.put(character.id, character);
-      await database.chatGroupBox.put(
-        groupId,
-        ChatGroup(
-          id: groupId,
-          name: '工作入口测试群',
-          theme: '工作模式测试',
-          aiCharacterIds: [character.id],
-        ),
+  for (final useModelRouter in [false, true]) {
+    testWidgets(
+        'chat input creates v2 group task; DM retains folder authorization and read execution router=$useModelRouter',
+        (tester) async {
+      const groupId = 'ui-work-group';
+      final config = ApiConfig(
+        id: 'ui-config',
+        name: 'UI test config',
+        provider: ApiProvider.deepseek.name,
+        modelName: 'deepseek-chat',
+        hasCredential: true,
       );
-    });
+      final character = AICharacter(
+        id: 'ui-worker',
+        name: '开发角色',
+        avatar: 'D',
+        age: 30,
+        role: '开发工程师',
+        personalityTags: const [],
+        systemPrompt: '负责执行工作任务',
+        apiKey: '',
+        apiProvider: ApiProvider.deepseek.name,
+        modelName: 'deepseek-chat',
+        apiConfigId: config.id,
+        toolPermissions: const [ToolPermission.workspaceRead],
+      );
+      await tester.runAsync(() async {
+        await database.apiConfigBox.put(config.id, config);
+        await database.aiCharacterBox.put(character.id, character);
+        if (useModelRouter) {
+          await database.aiCharacterBox.put(
+              'ui-worker-two',
+              AICharacter(
+                id: 'ui-worker-two',
+                name: '另一开发',
+                avatar: 'D',
+                age: 30,
+                apiKey: '',
+                role: '开发工程师',
+                personalityTags: const [],
+                systemPrompt: '负责执行工作任务',
+                apiProvider: ApiProvider.deepseek.name,
+                modelName: 'deepseek-chat',
+                apiConfigId: config.id,
+                toolPermissions: const [ToolPermission.workspaceRead],
+              ));
+        }
+        await database.chatGroupBox.put(
+          groupId,
+          ChatGroup(
+            id: groupId,
+            name: '工作入口测试群',
+            theme: '工作模式测试',
+            aiCharacterIds: [character.id, if (useModelRouter) 'ui-worker-two'],
+          ),
+        );
+      });
 
-    final grants = WorkFolderGrantService(
-      box: database.appSettingsBox,
-      directoryValidator: (_) async => true,
-      writeDirectoryValidator: (_) async => true,
-      isWindows: false,
-    );
-    await tester.runAsync(() => grants.load());
-    var pickerCalls = 0;
-    final pathPolicy =
-        WorkspacePathPolicy(grantService: grants, isWindows: false);
-    final files = WorkspaceFileService(pathPolicy: pathPolicy);
-    final snapshots = WorkSnapshotService(
-      appSupportDirectory: Directory('${hiveDirectory.path}/snapshots'),
-      pathPolicy: pathPolicy,
-      eventStore: eventStore,
-    );
-    final mutations = WorkspaceMutationService(
-      pathPolicy: pathPolicy,
-      snapshotPort: snapshots,
-      eventStore: eventStore,
-    );
-    final workspaceService = WorkModeWorkspaceService(
-      db: database,
-      grantService: grants,
-    );
-    final gateway = _UiWorkGateway();
-    final runner = DefaultWorkTaskRunner(
-      database: database,
-      eventStore: eventStore,
-      credentials: _Credentials(),
-      gateway: gateway,
-      workspaceService: workspaceService,
-      folderGrantService: grants,
-      workspaceFileService: files,
-      mutationService: mutations,
-      resourceLockManager: WorkResourceLockManager(isWindows: false),
-    );
-    coordinator = WorkTaskCoordinator(
-      taskBox: database.agentTaskBox,
-      eventStore: eventStore,
-      runner: runner,
-      folderGrantService: grants,
-      folderPicker: ([String? _]) async {
-        pickerCalls++;
-        return pickerCalls == 1 ? null : authorizedDirectory.path;
-      },
-      requireFolderGrant: true,
-      resourceLockManager: WorkResourceLockManager(isWindows: false),
-      userActionNotifier: WorkTaskActionMessageService(
+      final grants = WorkFolderGrantService(
+        box: database.appSettingsBox,
+        directoryValidator: (_) async => true,
+        writeDirectoryValidator: (_) async => true,
+        isWindows: false,
+      );
+      await tester.runAsync(() => grants.load());
+      var pickerCalls = 0;
+      final pathPolicy =
+          WorkspacePathPolicy(grantService: grants, isWindows: false);
+      final files = WorkspaceFileService(pathPolicy: pathPolicy);
+      final snapshots = WorkSnapshotService(
+        appSupportDirectory: Directory('${hiveDirectory.path}/snapshots'),
+        pathPolicy: pathPolicy,
+        eventStore: eventStore,
+      );
+      final mutations = WorkspaceMutationService(
+        pathPolicy: pathPolicy,
+        snapshotPort: snapshots,
+        eventStore: eventStore,
+      );
+      final workspaceService = WorkModeWorkspaceService(
+        db: database,
+        grantService: grants,
+      );
+      final gateway = _UiWorkGateway();
+      final runner = DefaultWorkTaskRunner(
         database: database,
+        eventStore: eventStore,
         credentials: _Credentials(),
-      ).notify,
-    );
-    final routeApi = _RouteApi();
+        gateway: gateway,
+        workspaceService: workspaceService,
+        folderGrantService: grants,
+        workspaceFileService: files,
+        mutationService: mutations,
+        resourceLockManager: WorkResourceLockManager(isWindows: false),
+      );
+      coordinator = WorkTaskCoordinator(
+        taskBox: database.agentTaskBox,
+        eventStore: eventStore,
+        runner: runner,
+        folderGrantService: grants,
+        folderPicker: ([String? _]) async {
+          pickerCalls++;
+          return pickerCalls == 1 ? null : authorizedDirectory.path;
+        },
+        requireFolderGrant: true,
+        resourceLockManager: WorkResourceLockManager(isWindows: false),
+        userActionNotifier: WorkTaskActionMessageService(
+          database: database,
+          credentials: _Credentials(),
+        ).notify,
+      );
+      final routeApi = _RouteApi();
 
-    await tester.pumpWidget(
-      ProviderScope(
-        overrides: [
-          databaseServiceProvider.overrideWithValue(database),
-          workTaskEventStoreProvider.overrideWithValue(eventStore),
-          workTaskCoordinatorProvider.overrideWithValue(coordinator),
-        ],
-        child: MaterialApp(
-          home: WorkTaskOverlayHost(
-            coordinator: coordinator,
-            eventStore: eventStore,
-            child: ChatRoomPage(
-              groupId: groupId,
-              chatApi: routeApi,
-              credentialResolver: _Credentials(),
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            databaseServiceProvider.overrideWithValue(database),
+            workTaskEventStoreProvider.overrideWithValue(eventStore),
+            workTaskCoordinatorProvider.overrideWithValue(coordinator),
+          ],
+          child: MaterialApp(
+            scrollBehavior: const MaterialScrollBehavior().copyWith(overscroll: false),
+            home: WorkTaskOverlayHost(
+              coordinator: coordinator,
+              eventStore: eventStore,
+              child: ChatRoomPage(
+                groupId: groupId,
+                chatApi: routeApi,
+                credentialResolver: _Credentials(),
+              ),
             ),
           ),
         ),
-      ),
-    );
-    await _pumpUntil(tester, find.byType(TextField));
-    await tester.tap(find.byKey(const Key('work-mode-toggle')));
-    await tester.runAsync(
-      () => Future<void>.delayed(const Duration(milliseconds: 50)),
-    );
-    await tester.pump();
-    expect(
-      find.byTooltip('工作模式已开启 · 敏感操作需确认'),
-      findsOneWidget,
-    );
-    // An unmentioned role still enters the discussion path, but a group whose
-    // only member is the sole qualified candidate now gets its executor from
-    // S1 by qualification instead of from a model-ranked candidate list. The
-    // durable discussion state below is completed manually either way; what
-    // matters here is that the owner is already decided.
-    await tester.enterText(find.byType(TextField), '读取工作目录');
-    await tester.pump();
-    await tester.tap(find.byTooltip('发送'));
-
-    await tester.runAsync(() async {
-      for (var attempt = 0;
-          attempt < 120 && database.agentTaskBox.isEmpty;
-          attempt++) {
-        await Future<void>.delayed(const Duration(milliseconds: 25));
-      }
-    });
-    await tester.pump();
-    final pendingTask = database.agentTaskBox.values.single;
-    final pendingDiscussion =
-        WorkDiscussionState.fromExecutionState(pendingTask.executionStateJson);
-    if (pendingDiscussion == null) {
-      fail('expected a persisted discussion state');
-    }
-    expect(pendingDiscussion.schemaVersion, 2);
-    expect(pendingDiscussion.collaboration?.taskId, pendingTask.id);
-    expect(pendingDiscussion.collaboration?.requestMessageId, isNotEmpty);
-    expect(pendingDiscussion.collaboration?.approvals, isEmpty);
-    expect(
-      pendingDiscussion.executorId,
-      character.id,
-      reason: '群里只有这一位本职合格者：执行人由资格直接指定，不留"待推举"的中间态',
-    );
-    expect(gateway.calls, 0);
-    final confirmButton = find.text('确认本版需求');
-    await tester.ensureVisible(confirmButton);
-    await tester.pump();
-    expect(confirmButton, findsOneWidget);
-    await tester.tap(confirmButton);
-    await tester.runAsync(
-      () => Future<void>.delayed(const Duration(milliseconds: 100)),
-    );
-    await tester.pump();
-    expect(
-      database.messageBox.values.any((message) =>
-          message.groupId == groupId &&
-          message.content == '✅【需求已确认】当前需求版本 1 已接受，群讨论开始收敛方案。'),
-      isTrue,
-      reason: '群聊按钮确认与输入确认必须发布相同的阶段结果',
-    );
-    expect(
-      WorkTaskRequirementsConfirmation.hasMarker(
-        coordinator.taskById(pendingTask.id)!.executionStateJson,
-      ),
-      isFalse,
-    );
-    await tester.runAsync(() async {
-      await expectLater(
-          coordinator.updateDiscussionState(
-              pendingTask.id,
-              pendingDiscussion.copyWith(
-                  understandingPercent: 100, phase: WorkDiscussionPhase.ready)),
-          throwsStateError);
-      await coordinator.stop(pendingTask.id);
-      // Independently retain the existing DM authorization/UI contract. Group
-      // production now needs real per-member v2 updates (covered by P7/P8).
-      await coordinator.submit(AgentTask(
-          id: 'ui-dm-read',
-          groupId: 'dm:ui-worker',
-          characterId: 'ui-worker',
-          userRequest: '读取工作目录',
-          workModeTask: true,
-          requestedPermissions: const [ToolPermission.workspaceRead]));
-    });
-    await tester.pump();
-    WorkTaskOverlayController.shared.openTask('ui-dm-read');
-    await tester.pump();
-    await _pumpUntil(tester, find.byKey(const Key('work-task-add-folder')));
-    for (var attempt = 0; attempt < 20; attempt++) {
-      final tasks = database.agentTaskBox.values;
-      final waitingForInitialPicker = tasks.any(
-        (task) => task.status == AgentTaskStatus.paused,
       );
-      if (pickerCalls >= 1 && waitingForInitialPicker) break;
-      await tester.pump(const Duration(milliseconds: 50));
+      await _pumpUntil(tester, find.byType(TextField));
+      await tester.tap(find.byKey(const Key('work-mode-toggle')));
       await tester.runAsync(
-        () => Future<void>.delayed(const Duration(milliseconds: 10)),
+        () => Future<void>.delayed(const Duration(milliseconds: 50)),
       );
-    }
+      await tester.pump();
+      expect(
+        find.byTooltip('工作模式已开启 · 敏感操作需确认'),
+        findsOneWidget,
+      );
+      // An unmentioned role still enters the discussion path, but a group whose
+      // only member is the sole qualified candidate now gets its executor from
+      // S1 by qualification instead of from a model-ranked candidate list. The
+      // durable discussion state below is completed manually either way; what
+      // matters here is that the owner is already decided.
+      await tester.enterText(find.byType(TextField), '读取工作目录');
+      await tester.pump();
+      await tester.tap(find.byTooltip('发送'));
 
-    await tester.runAsync(() async {
-      await tester.tap(find.byKey(const Key('work-task-add-folder')));
-      await Future<void>.delayed(const Duration(milliseconds: 50));
-    });
-    await _pumpUntil(
-      tester,
-      find.byKey(const Key('work-folder-grant-consent-confirm')),
-    );
-    await tester.runAsync(() async {
-      await tester.tap(
+      await tester.runAsync(() async {
+        for (var attempt = 0;
+            attempt < 120 && database.agentTaskBox.isEmpty;
+            attempt++) {
+          await Future<void>.delayed(const Duration(milliseconds: 25));
+        }
+      });
+      await tester.pump();
+      final pendingTask = database.agentTaskBox.values.single;
+      final pendingDiscussion = WorkDiscussionState.fromExecutionState(
+          pendingTask.executionStateJson);
+      if (pendingDiscussion == null) {
+        fail('expected a persisted discussion state');
+      }
+      expect(pendingDiscussion.schemaVersion, 2);
+      expect(pendingDiscussion.collaboration?.taskId, pendingTask.id);
+      expect(pendingDiscussion.collaboration?.requestMessageId, isNotEmpty);
+      expect(pendingDiscussion.collaboration?.approvals, isEmpty);
+      expect(
+        pendingDiscussion.executorId,
+        useModelRouter ? null : character.id,
+        reason: '唯一合格者直接指定；多位合格者仅推荐候选，执行人仍由讨论确认',
+      );
+      expect(gateway.calls, 0);
+      final confirmButton = find.text('确认本版需求');
+      await tester.ensureVisible(confirmButton);
+      await tester.pump();
+      expect(confirmButton, findsOneWidget);
+      await tester.tap(confirmButton);
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 100)),
+      );
+      await tester.pump();
+      expect(
+        database.messageBox.values.any((message) =>
+            message.groupId == groupId &&
+            message.content == '✅【需求已确认】当前需求版本 1 已接受，群讨论开始收敛方案。'),
+        isTrue,
+        reason: '群聊按钮确认与输入确认必须发布相同的阶段结果',
+      );
+      expect(
+        WorkTaskRequirementsConfirmation.hasMarker(
+          coordinator.taskById(pendingTask.id)!.executionStateJson,
+        ),
+        isFalse,
+      );
+      // A paused task must not consume a new ordinary message after toggle-off.
+      final taskCountBeforeChat = database.agentTaskBox.length;
+      await tester.tap(find.byKey(const Key('work-mode-toggle')));
+      await tester.pump();
+      expect(find.byTooltip('工作模式已关闭'), findsOneWidget);
+      await tester.enterText(find.byType(TextField), '@开发角色 哈喽');
+      await tester.pump();
+      await tester.runAsync(() async {
+        await tester.tap(find.byTooltip('发送'));
+        await Future<void>.delayed(const Duration(milliseconds: 250));
+      });
+      await tester.pump();
+      expect(database.agentTaskBox.length, taskCountBeforeChat);
+      expect(coordinator.taskById(pendingTask.id)!.queuedUserRequests, isEmpty);
+      expect(
+          database.messageBox.values
+              .lastWhere((m) => m.senderType == 'user')
+              .isWorkMode,
+          isFalse);
+      expect(routeApi.streamCount, greaterThan(0));
+      await tester.runAsync(() async {
+        await expectLater(
+            coordinator.updateDiscussionState(
+                pendingTask.id,
+                pendingDiscussion.copyWith(
+                    understandingPercent: 100,
+                    phase: WorkDiscussionPhase.ready)),
+            throwsStateError);
+        await coordinator.stop(pendingTask.id);
+        // Independently retain the existing DM authorization/UI contract. Group
+        // production now needs real per-member v2 updates (covered by P7/P8).
+        await coordinator.submit(AgentTask(
+            id: 'ui-dm-read',
+            groupId: 'dm:ui-worker',
+            characterId: 'ui-worker',
+            userRequest: '读取工作目录',
+            workModeTask: true,
+            requestedPermissions: const [ToolPermission.workspaceRead]));
+      });
+      await tester.pump();
+      WorkTaskOverlayController.shared.openTask('ui-dm-read');
+      await tester.pump();
+      await _pumpUntil(tester, find.byKey(const Key('work-task-add-folder')));
+      for (var attempt = 0; attempt < 20; attempt++) {
+        final tasks = database.agentTaskBox.values;
+        final waitingForInitialPicker = tasks.any(
+          (task) => task.status == AgentTaskStatus.paused,
+        );
+        if (pickerCalls >= 1 && waitingForInitialPicker) break;
+        await tester.pump(const Duration(milliseconds: 50));
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 10)),
+        );
+      }
+
+      await tester.runAsync(() async {
+        await tester.tap(find.byKey(const Key('work-task-add-folder')));
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+      });
+      await _pumpUntil(
+        tester,
         find.byKey(const Key('work-folder-grant-consent-confirm')),
       );
-      await Future<void>.delayed(const Duration(milliseconds: 500));
-    });
-    await tester.pump();
-    final completedTask = (await tester.runAsync(
-      () => _waitForTask(
-        database,
-        'ui-dm-read',
-        (task) => task.status == AgentTaskStatus.completed,
-      ),
-    ))!;
-    expect(completedTask.userRequest, '读取工作目录');
-    expect(completedTask.characterId, 'ui-worker');
-    expect(completedTask.lastError, isEmpty);
-    expect(
-      completedTask.completedOperations,
-      anyElement(contains('workspace.list')),
-    );
-    // 唯一本职合格者不咨询选人模型：这次输入没有歧义，问一次只会多一次请求和
-    // 一份失败面（模型输出被截断/空完成都曾让这条路更慢）。
-    expect(routeApi.calls, 0);
-    expect(pickerCalls, 2);
-    expect(gateway.calls, 2);
-
-    await tester.tap(find.byKey(const Key('work-task-collapse')));
-    await tester.pump();
-    await tester.drag(find.byType(ListView).first, const Offset(0, -2000));
-    await tester.pump();
-
-    // The model's final response is a chat message even when the task only
-    // read files. The work panel remains the progress/status surface; the
-    // conversation must contain the user-visible conclusion.
-    expect(
-      database.messageBox.values.any(
-        (message) => message.content == '已通过聊天入口读取并核对授权目录。',
-      ),
-      isTrue,
-    );
-
-    final externalMessage = Message(
-      groupId: groupId,
-      senderId: character.id,
-      senderType: 'ai',
-      content: '教师节贺卡已完成。',
-      media: [
-        MediaAttachment(
-          type: 'file',
-          localPath: '${hiveDirectory.path}/teacher-card.html',
-          fileName: 'teacher-card.html',
-          fileSize: 24,
-          mimeType: 'text/html',
+      await tester.runAsync(() async {
+        await tester.tap(
+          find.byKey(const Key('work-folder-grant-consent-confirm')),
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 500));
+      });
+      await tester.pump();
+      final completedTask = (await tester.runAsync(
+        () => _waitForTask(
+          database,
+          'ui-dm-read',
+          (task) => task.status == AgentTaskStatus.completed,
         ),
-      ],
-    );
-    // DefaultWorkTaskRunner persists public messages outside the page.
-    await tester.runAsync(
-      () => database.messageBox.put(externalMessage.id, externalMessage),
-    );
-    await tester.pump();
-    expect(find.text('教师节贺卡已完成。'), findsOneWidget);
-    expect(find.text('teacher-card.html'), findsOneWidget);
+      ))!;
+      expect(completedTask.userRequest, '读取工作目录');
+      expect(completedTask.characterId, 'ui-worker');
+      expect(completedTask.lastError, isEmpty);
+      expect(
+        completedTask.completedOperations,
+        anyElement(contains('workspace.list')),
+      );
+      // 唯一本职合格者不咨询选人模型：这次输入没有歧义，问一次只会多一次请求和
+      // 一份失败面（模型输出被截断/空完成都曾让这条路更慢）。
+      expect(routeApi.calls, useModelRouter ? 1 : 0);
+      if (useModelRouter) {
+        final store = AiGovernanceStore.forDatabase(database);
+        final routingUsage = store.ledgerEntries
+            .where((e) => e.reportedUsage?.inputTokens == 100)
+            .toList();
+        expect(routingUsage, hasLength(1));
+        expect(routingUsage.single.taskId, pendingTask.id);
+        expect(routingUsage.single.characterId,
+            isIn(['ui-worker', 'ui-worker-two']));
+        final summary = WorkTaskUsageSummary.forTask(
+            pendingTask.id, store.ledgerEntries, store.diagnostics);
+        expect(summary.input.tokens, 100);
+        expect(summary.output.tokens, 20);
+        expect(summary.cached.tokens, 40);
+      }
+      expect(pickerCalls, 2);
+      expect(gateway.calls, 2);
 
-    await tester.pumpWidget(const SizedBox.shrink());
-    await tester.pump();
-    await tester.runAsync(() async {
-      await coordinator.dispose();
-      await eventStore.close();
-    });
-  }, timeout: const Timeout(Duration(seconds: 20)));
+      await tester.tap(find.byKey(const Key('work-task-collapse')));
+      await tester.pump();
+      await tester.drag(find.byType(ListView).first, const Offset(0, -2000));
+      await tester.pump();
+
+      // The model's final response is a chat message even when the task only
+      // read files. The work panel remains the progress/status surface; the
+      // conversation must contain the user-visible conclusion.
+      expect(
+        database.messageBox.values.any(
+          (message) => message.content == '已通过聊天入口读取并核对授权目录。',
+        ),
+        isTrue,
+      );
+
+      final externalMessage = Message(
+        groupId: groupId,
+        senderId: character.id,
+        senderType: 'ai',
+        content: '教师节贺卡已完成。',
+        media: [
+          MediaAttachment(
+            type: 'file',
+            localPath: '${hiveDirectory.path}/teacher-card.html',
+            fileName: 'teacher-card.html',
+            fileSize: 24,
+            mimeType: 'text/html',
+          ),
+        ],
+      );
+      // DefaultWorkTaskRunner persists public messages outside the page.
+      await tester.runAsync(
+        () => database.messageBox.put(externalMessage.id, externalMessage),
+      );
+      await tester.pump();
+      expect(find.text('教师节贺卡已完成。'), findsOneWidget);
+      expect(find.text('teacher-card.html'), findsOneWidget);
+
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+      await tester.runAsync(() async {
+        await coordinator.dispose();
+        await eventStore.close();
+      });
+    }, timeout: const Timeout(Duration(seconds: 20)));
+  }
 }

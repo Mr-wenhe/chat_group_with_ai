@@ -83,6 +83,7 @@ void main() {
     }
     expect(state[WorkProgressGuard.jsonKey]['lastProgressAt'],
         now.add(const Duration(minutes: 96)).millisecondsSinceEpoch);
+    expect(WorkProgressGuard.noProgressResultLimit, 3);
     for (var index = 0;
         index < WorkProgressGuard.noProgressResultLimit;
         index++) {

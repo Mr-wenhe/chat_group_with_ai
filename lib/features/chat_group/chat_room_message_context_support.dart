@@ -434,6 +434,11 @@ extension _ChatRoomMessageContextSupport on _ChatRoomPageState {
       _hasRestrictedHistory = true;
     }
     await _repository.persistNewMessage(message);
+    final activeMessageId = _activeUserReplyMessageId;
+    if (message.senderType == 'ai' && activeMessageId != null) {
+      // A partial group round has already answered; navigation must not replay it.
+      await _pendingReplyStore.remove(activeMessageId);
+    }
     if (isNewMessage) _relayToRoomIfNeeded(message);
     if (message.senderType == 'ai' || message.senderType == 'system') {
       await _markCurrentConversationRead(throughMessage: message);

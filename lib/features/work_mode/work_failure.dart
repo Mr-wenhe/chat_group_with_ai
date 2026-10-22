@@ -988,7 +988,8 @@ class WorkFailure {
         normalized.contains('access denied')) {
       return WorkFailureType.permissionDenied;
     }
-    if (normalizedCode == 'useractionrequired' ||
+    if (normalizedCode == 'visionmodelrequired' ||
+        normalizedCode == 'useractionrequired' ||
         normalizedCode == 'userjudgmentrequired' ||
         normalizedCode == 'clarificationrequired' ||
         normalizedCode == 'loginrequired' ||

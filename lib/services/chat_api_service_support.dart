@@ -17,12 +17,11 @@ extension _ChatApiServiceSupport on ChatApiService {
     String? reasoningEffort,
     void Function()? onResponseActivity,
     void Function(ChatStreamEvent event)? onEvent,
+    String? promptCacheKey,
   }) async {
     String content = '';
     var truncated = false;
-    int? promptTokens;
-    int? completionTokens;
-    int? cachedTokens;
+    var usage = const ReportedTokenUsage();
     try {
       // Keep the legacy public stream as the extension point for existing
       // clients/tests. The internal path is used only for structured agent
@@ -32,6 +31,7 @@ extension _ChatApiServiceSupport on ChatApiService {
               apiKey: apiKey,
               provider: provider,
               apiProtocol: apiProtocol,
+              promptCacheKey: promptCacheKey,
               customBaseUrl: customBaseUrl,
               model: model,
               messages: messages,
@@ -48,6 +48,7 @@ extension _ChatApiServiceSupport on ChatApiService {
               apiKey: apiKey,
               provider: provider,
               apiProtocol: apiProtocol,
+              promptCacheKey: promptCacheKey,
               customBaseUrl: customBaseUrl,
               model: model,
               messages: messages,
@@ -61,6 +62,7 @@ extension _ChatApiServiceSupport on ChatApiService {
             );
       completionLoop:
       await for (final event in responseStream) {
+        usage = usage.merge(event.usage);
         onEvent?.call(event);
         switch (event.type) {
           case ChatStreamEventType.token:
@@ -69,9 +71,6 @@ extension _ChatApiServiceSupport on ChatApiService {
           case ChatStreamEventType.done:
             if ((event.content ?? '').isNotEmpty) content = event.content!;
             if (event.truncated) truncated = true;
-            promptTokens = event.promptTokens;
-            completionTokens = event.completionTokens;
-            cachedTokens = event.cachedTokens;
             if (finishOnTerminalFrame) break completionLoop;
             break;
           case ChatStreamEventType.error:
@@ -82,6 +81,7 @@ extension _ChatApiServiceSupport on ChatApiService {
             final statusCode = _streamStatusCode(event.message);
             final retryAfter = event.retryAfter;
             return {
+              ...usage.toMap(),
               'success': false,
               'message': event.sanitized
                   ? (event.message ?? '流式请求失败')
@@ -97,6 +97,7 @@ extension _ChatApiServiceSupport on ChatApiService {
       final statusCode = e.response?.statusCode;
       final retryAfter = _retryAfterFromHeaders(e.response?.headers);
       return {
+        ...usage.toMap(),
         'success': false,
         'message': _dioErrorMessage(e),
         'failureDetail': _failureDetail(e),
@@ -105,6 +106,7 @@ extension _ChatApiServiceSupport on ChatApiService {
       };
     } catch (e) {
       return {
+        ...usage.toMap(),
         'success': false,
         'message': '流式请求失败',
         'failureDetail': _failureDetail(e),
@@ -113,10 +115,11 @@ extension _ChatApiServiceSupport on ChatApiService {
     if (content.trim().isEmpty) {
       // 部分 OpenAI 兼容服务的 SSE 通道只返回 [DONE]，但同一
       // 请求的非流式通道可正常返回内容；立即回退一次避免任务误报。
-      return _sendChatMessageOnce(
+      final fallback = await _sendChatMessageOnce(
         apiKey: apiKey,
         provider: provider,
         apiProtocol: apiProtocol,
+        promptCacheKey: promptCacheKey,
         customBaseUrl: customBaseUrl,
         model: model,
         messages: messages,
@@ -132,6 +135,13 @@ extension _ChatApiServiceSupport on ChatApiService {
         ),
         maxResponseBytes: ChatApiService.defaultMaxResponseBytes,
       );
+      return {
+        ...fallback,
+        'usageAttempts': [
+          {...usage.toMap(), 'success': false, 'message': '模型返回了空内容'},
+          fallback,
+        ]
+      };
     }
     return {
       'success': true,
@@ -140,9 +150,7 @@ extension _ChatApiServiceSupport on ChatApiService {
       // 请求时给出的输出上限。`truncated` 只有 OpenAI 兼容解析器会产出（看
       // finish_reason），带上这个值，调用方就能跨协议判断"输出是否被用尽"。
       if (maxTokens > 0) 'requestedMaxTokens': maxTokens,
-      if (promptTokens != null) 'promptTokens': promptTokens,
-      if (completionTokens != null) 'completionTokens': completionTokens,
-      if (cachedTokens != null) 'cachedTokens': cachedTokens,
+      ...usage.toMap(),
     };
   }
 
