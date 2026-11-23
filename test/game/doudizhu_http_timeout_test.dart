@@ -68,7 +68,9 @@ void main() {
     final chunks = <String>[
       '{"choices":[{"message":{"content":"',
       '{"actionId":"b0"}',
-      for (var index = 0; index < 100; index++) filler,
+      // 数据量必须远大于任何平台的内核发送/接收缓冲，否则取消后对端
+      // 内核可能把整条流吸收完，无法从服务端侧判断取消是否生效。
+      for (var index = 0; index < 1000; index++) filler,
       '"}}]}',
     ];
     unawaited(server.forEach((request) async {
@@ -129,15 +131,21 @@ void main() {
       expect(hard.calls, 0); // 叫分由原阈值策略兜底，无需出牌引擎。
       expect(sent, lessThan(chunks.length));
       expect(sent, greaterThan(0));
-      // The kernel can still drain bytes that were queued before Dio closed
-      // the socket. Let that bounded send buffer drain before checking that
-      // the server cannot continue streaming indefinitely.
-      await Future<void>.delayed(const Duration(seconds: 1));
-      final sentAfterSocketDrain = sent;
-      await Future<void>.delayed(const Duration(milliseconds: 220));
-      expect(sent, sentAfterSocketDrain);
+      // 取消后已排队的字节仍可能被对端内核吸收一段时间，各平台缓冲差异
+      // 很大（Linux 可达数 MB，macOS 明显更小），按固定时间断言会随平台
+      // 与机器负载抖动。数据量已远大于任何内核缓冲，发送计数最终必然停止
+      // 增长：要么 socket 已关闭，要么发送缓冲已满、写入被阻塞。
+      final drainDeadline = DateTime.now().add(const Duration(seconds: 12));
+      var previousSent = -1;
+      while (DateTime.now().isBefore(drainDeadline)) {
+        previousSent = sent;
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+        if (sent == previousSent) break;
+      }
+      expect(sent, previousSent, reason: '取消后服务端仍能无限发送');
+      expect(sent, lessThan(chunks.length), reason: '取消后服务端仍把整条流发完');
     } finally {
       await server.close(force: true);
     }
-  }, timeout: const Timeout(Duration(seconds: 5)));
+  }, timeout: const Timeout(Duration(seconds: 20)));
 }

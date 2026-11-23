@@ -1152,7 +1152,11 @@ void _registerDiscussionHistoryRegressions() {
       'workspaceRead',
       if (Platform.isMacOS || Platform.isWindows) ...['web.search', 'web.read'],
     ]);
-    expect(capabilities['registeredInvestigationAdapter'], isTrue);
+    // 自动联网只在桌面平台接线（WebWorkerClient.isSupported），Linux CI
+    // 上这个能力必须如实为 false，与上方 effectiveTools 的平台分支一致。
+    expect(
+        capabilities['registeredInvestigationAdapter'],
+        Platform.isMacOS || Platform.isWindows);
     expect(capabilities['modelCapabilityKnown'], isA<bool>());
     expect(capabilities['supportsVision'], isA<bool>());
     expect(qaMessages!.first['content'], contains('上下文仅供判断'));
