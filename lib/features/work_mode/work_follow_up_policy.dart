@@ -452,7 +452,9 @@ class WorkFollowUpPolicy {
     final withoutManner = request.replaceAll(_mannerWording, '');
     return RegExp(
       r'(修改|修复|改写|改成|调整|更新|替换|覆盖|修订|改|'
-      r'fix|modify|edit|revise|update|change|rewrite|patch)',
+      r'\b(?:fix(?:es|ed|ing)?|modify(?:ing)?|modified|'
+      r'edit(?:s|ed|ing)?|revis(?:e|es|ed|ing)|updat(?:e|es|ed|ing)|'
+      r'chang(?:e|es|ed|ing)|rewrit(?:e|es|ing)|rewrote|patch(?:es|ed|ing)?)\b)',
       caseSensitive: false,
     ).hasMatch(withoutManner);
   }

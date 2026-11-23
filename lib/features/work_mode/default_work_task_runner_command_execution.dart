@@ -34,12 +34,24 @@ extension _DefaultWorkTaskRunnerCommandExecution on DefaultWorkTaskRunner {
     );
     final plan = policy.changePlan;
     final checkpoint = _decodeMap(task.executionStateJson);
+    // 批准可以来自两处：这一次运行的一次性决定（指纹完全匹配），或本任务
+    // 已批准的路径范围。后者是"同一处再运行一次"的常态——只认前者会让
+    // scope 已经覆盖的命令仍在 preflight 阶段重新要一次审批。
     final approvalGranted = plan != null &&
         !policy.isReadOnly &&
-        _approvalDecision(task.executionStateJson)?.permitsExecution == true &&
-        checkpoint['approvalCapability'] == WorkApprovalCapability.mutation &&
-        checkpoint['approvalOperationFingerprint'] ==
-            WorkApprovalFingerprint.mutation(call: invocation.call, plan: plan);
+        (((_approvalDecision(task.executionStateJson)?.permitsExecution ==
+                        true &&
+                    checkpoint['approvalCapability'] ==
+                        WorkApprovalCapability.mutation &&
+                    checkpoint['approvalOperationFingerprint'] ==
+                        WorkApprovalFingerprint.mutation(
+                          call: invocation.call,
+                          plan: plan,
+                        )) ||
+            WorkChangePolicy.commandCoveredByApprovedScope(
+              plan: plan,
+              scope: _approvalScope(task.executionStateJson),
+            )));
     final runner = commandRunner ??
         WorkCommandRunner(
           policy: commandPolicy,

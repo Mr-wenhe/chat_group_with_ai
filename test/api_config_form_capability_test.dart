@@ -91,6 +91,52 @@ void main() {
         isFalse);
   });
 
+  testWidgets('客户端身份默认「客户端默认」，不发送 UA 覆盖', (tester) async {
+    await pumpPage(tester,
+        config: ApiConfig(name: 'relay', provider: 'custom'));
+    expect(find.text('客户端默认'), findsOneWidget);
+    expect(find.byKey(const Key('api-config-user-agent')), findsNothing);
+  });
+
+  testWidgets('已存预设值回填 Claude CLI', (tester) async {
+    await pumpPage(
+      tester,
+      config: ApiConfig(
+        name: 'relay',
+        provider: 'custom',
+        userAgent: 'claude-cli/2.0.0 (external, cli)',
+      ),
+    );
+    expect(find.text('Claude CLI（claude-cli/…）'), findsOneWidget);
+    expect(find.byKey(const Key('api-config-user-agent')), findsNothing);
+  });
+
+  testWidgets('选「自定义…」后出现输入框', (tester) async {
+    await pumpPage(
+      tester,
+      config: ApiConfig(name: 'relay', provider: 'custom'),
+    );
+    expect(find.byKey(const Key('api-config-user-agent')), findsNothing);
+
+    await tester.tap(find.byKey(const Key('api-config-user-agent-preset')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('自定义…').last);
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('api-config-user-agent')), findsOneWidget);
+  });
+
+  testWidgets('自定义 UA 回填文本框', (tester) async {
+    await pumpPage(
+      tester,
+      config: ApiConfig(
+        name: 'relay',
+        provider: 'custom',
+        userAgent: 'my-client/1.0',
+      ),
+    );
+    expect(fieldText(tester, 'api-config-user-agent'), 'my-client/1.0');
+  });
+
   testWidgets('新建时选 Oray：预填地址与 Anthropic 协议，模型仍留空', (tester) async {
     await pumpPage(tester);
 

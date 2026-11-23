@@ -6,6 +6,7 @@ extension _ChatApiServiceSupport on ChatApiService {
     required ApiProvider provider,
     required ApiProtocol apiProtocol,
     String? customBaseUrl,
+    String? userAgent,
     required String model,
     required List<Map<String, dynamic>> messages,
     required double temperature,
@@ -19,9 +20,58 @@ extension _ChatApiServiceSupport on ChatApiService {
     void Function(ChatStreamEvent event)? onEvent,
     String? promptCacheKey,
   }) async {
+    final transportFailures = <Map<String, dynamic>>[];
+    Map<String, dynamic> withAttempts(Map<String, dynamic> result) =>
+        transportFailures.isEmpty
+            ? result
+            : {
+                ...result,
+                'usageAttempts': [...transportFailures, result],
+              };
     String content = '';
+    var useDefaultTemperature = false;
     var truncated = false;
     var usage = const ReportedTokenUsage();
+
+    /// 空完成时改走非流式通道再问一次。
+    ///
+    /// 部分 OpenAI 兼容服务的 SSE 通道只返回 `[DONE]`、或被推理模型把输出预算
+    /// 全花在思考上，但同一请求的非流式通道可正常返回内容。这条回退必须在
+    /// 「error 事件」和「流结束仍无正文」两处都生效：上层网关会把空完成转成
+    /// 带 `emptyCompletion` 标记的 error，只在函数末尾判断就会漏掉。
+    Future<Map<String, dynamic>> fallbackToNonStreaming(
+      ReportedTokenUsage streamedUsage,
+    ) async {
+      final fallback = await _sendChatMessageOnce(
+        apiKey: apiKey,
+        provider: provider,
+        apiProtocol: apiProtocol,
+        promptCacheKey: promptCacheKey,
+        customBaseUrl: customBaseUrl,
+        userAgent: userAgent,
+        model: model,
+        messages: messages,
+        temperature: temperature,
+        maxTokens: maxTokens,
+        receiveTimeout: receiveTimeout,
+        cancelToken: cancelToken,
+        structuredJson: structuredJson,
+        useDefaultTemperature: useDefaultTemperature,
+        reasoningEffort: reasoningEffort,
+        stepPlanLowReasoning: _isStepPlanEndpoint(
+          provider: provider,
+          customBaseUrl: customBaseUrl,
+        ),
+        maxResponseBytes: ChatApiService.defaultMaxResponseBytes,
+      );
+      return withAttempts({
+        ...fallback,
+        'usageAttempts': [
+          {...streamedUsage.toMap(), 'success': false, 'message': '模型返回了空内容'},
+          fallback,
+        ]
+      });
+    }
     try {
       // Keep the legacy public stream as the extension point for existing
       // clients/tests. The internal path is used only for structured agent
@@ -33,6 +83,7 @@ extension _ChatApiServiceSupport on ChatApiService {
               apiProtocol: apiProtocol,
               promptCacheKey: promptCacheKey,
               customBaseUrl: customBaseUrl,
+              userAgent: userAgent,
               model: model,
               messages: messages,
               temperature: temperature,
@@ -50,6 +101,7 @@ extension _ChatApiServiceSupport on ChatApiService {
               apiProtocol: apiProtocol,
               promptCacheKey: promptCacheKey,
               customBaseUrl: customBaseUrl,
+              userAgent: userAgent,
               model: model,
               messages: messages,
               temperature: temperature,
@@ -62,6 +114,19 @@ extension _ChatApiServiceSupport on ChatApiService {
             );
       completionLoop:
       await for (final event in responseStream) {
+        final failure = event.transportFailure;
+        if (failure != null) {
+          useDefaultTemperature = true;
+          transportFailures.add({
+            ...failure.usage.toMap(),
+            'success': false,
+            'message': failure.message,
+            'statusCode': _streamStatusCode(failure.message),
+            if (failure.failureDetail != null)
+              'failureDetail': failure.failureDetail,
+          });
+          continue;
+        }
         usage = usage.merge(event.usage);
         onEvent?.call(event);
         switch (event.type) {
@@ -74,13 +139,19 @@ extension _ChatApiServiceSupport on ChatApiService {
             if (finishOnTerminalFrame) break completionLoop;
             break;
           case ChatStreamEventType.error:
+            // 空完成不是普通失败：先给非流式通道一次机会，别把可重试的协议
+            // 偶发直接报成任务失败（群讨论的空完成重发也靠这条回退之外的上层
+            // 判断，两处都必须能看到 emptyCompletion 标记）。
+            if (event.emptyCompletion) {
+              return fallbackToNonStreaming(usage);
+            }
             // 已由 ChatApiService 分类/脱敏的消息原样透传，否则「连接超时」
             // 会被再洗成「流式请求失败」，isTransientResult 与 WorkFailure
             // 就再也看不出这次失败能否重试。未标记的消息可能仍含供应商正文
             // （自定义 streamChatMessage 实现直接 yield 的情况），保留一次脱敏。
             final statusCode = _streamStatusCode(event.message);
             final retryAfter = event.retryAfter;
-            return {
+            return withAttempts({
               ...usage.toMap(),
               'success': false,
               'message': event.sanitized
@@ -90,60 +161,34 @@ extension _ChatApiServiceSupport on ChatApiService {
               if (retryAfter != null) 'retryAfterMs': retryAfter.inMilliseconds,
               if (event.failureDetail != null)
                 'failureDetail': event.failureDetail,
-            };
+            });
         }
       }
     } on DioException catch (e) {
       final statusCode = e.response?.statusCode;
       final retryAfter = _retryAfterFromHeaders(e.response?.headers);
-      return {
+      return withAttempts({
         ...usage.toMap(),
         'success': false,
         'message': _dioErrorMessage(e),
         'failureDetail': _failureDetail(e),
         if (statusCode != null) 'statusCode': statusCode,
         if (retryAfter != null) 'retryAfterMs': retryAfter.inMilliseconds,
-      };
+      });
     } catch (e) {
-      return {
+      return withAttempts({
         ...usage.toMap(),
         'success': false,
         'message': '流式请求失败',
         'failureDetail': _failureDetail(e),
-      };
+      });
     }
     if (content.trim().isEmpty) {
-      // 部分 OpenAI 兼容服务的 SSE 通道只返回 [DONE]，但同一
-      // 请求的非流式通道可正常返回内容；立即回退一次避免任务误报。
-      final fallback = await _sendChatMessageOnce(
-        apiKey: apiKey,
-        provider: provider,
-        apiProtocol: apiProtocol,
-        promptCacheKey: promptCacheKey,
-        customBaseUrl: customBaseUrl,
-        model: model,
-        messages: messages,
-        temperature: temperature,
-        maxTokens: maxTokens,
-        receiveTimeout: receiveTimeout,
-        cancelToken: cancelToken,
-        structuredJson: structuredJson,
-        reasoningEffort: reasoningEffort,
-        stepPlanLowReasoning: _isStepPlanEndpoint(
-          provider: provider,
-          customBaseUrl: customBaseUrl,
-        ),
-        maxResponseBytes: ChatApiService.defaultMaxResponseBytes,
-      );
-      return {
-        ...fallback,
-        'usageAttempts': [
-          {...usage.toMap(), 'success': false, 'message': '模型返回了空内容'},
-          fallback,
-        ]
-      };
+      // 流走完了却没有正文字符（有的通道连 [DONE] 的 content 都空）：与非流式
+      // 通道的回退共用同一条路径，避免两处各写一份「空内容」话术。
+      return fallbackToNonStreaming(usage);
     }
-    return {
+    return withAttempts({
       'success': true,
       'message': content,
       if (truncated) 'truncated': true,
@@ -151,15 +196,60 @@ extension _ChatApiServiceSupport on ChatApiService {
       // finish_reason），带上这个值，调用方就能跨协议判断"输出是否被用尽"。
       if (maxTokens > 0) 'requestedMaxTokens': maxTokens,
       ...usage.toMap(),
-    };
+    });
   }
 
-  String _safeHttpErrorMessage(int? statusCode) => switch (statusCode) {
+  String _safeHttpErrorMessage(int? statusCode, {String? providerError}) =>
+      switch (statusCode) {
+        401
+            when providerError
+                    ?.toLowerCase()
+                    .contains('unauthorized client detected') ??
+                false =>
+          'HTTP 401：服务端拒绝当前客户端；请向服务商确认此 Key 是否允许第三方客户端调用当前接口。',
         null => '请求失败',
         final int code when _isRedirectStatus(code) =>
           _redirectBlockedMessage(code),
         _ => 'HTTP $statusCode 请求失败',
       };
+
+  /// Preserve explicit caller size limits while bounding error-body read time.
+  Future<Map<String, dynamic>?> _readStreamErrorBody(ResponseBody? body,
+      {int? maxResponseBytes}) async {
+    if (body == null) return null;
+    final chunks = StreamIterator<Uint8List>(body.stream);
+    final stopwatch = Stopwatch()..start();
+    try {
+      final bytes = BytesBuilder(copy: false);
+      while (true) {
+        final remaining =
+            ChatApiService._httpErrorReadTimeout - stopwatch.elapsed;
+        if (remaining <= Duration.zero) return null;
+        if (!await chunks.moveNext().timeout(remaining)) break;
+        final chunk = chunks.current;
+        if (bytes.length + chunk.length >
+            (maxResponseBytes ?? ChatApiService._maxHttpErrorBytes)) {
+          if (maxResponseBytes != null) {
+            throw const _ChatResponseTooLargeException();
+          }
+          return null;
+        }
+        bytes.add(chunk);
+      }
+      return _asJsonMap(
+          jsonDecode(utf8.decode(bytes.takeBytes(), allowMalformed: true)));
+    } on _ChatResponseTooLargeException {
+      rethrow;
+    } on DioException catch (error) {
+      if (CancelToken.isCancel(error)) rethrow;
+      return null;
+    } on Object {
+      return null;
+    } finally {
+      // Cancelling a stalled socket must not extend the read deadline.
+      unawaited(chunks.cancel());
+    }
+  }
 
   /// 把异常折成「异常类型 + 脱敏后有界的正文摘要」，只供诊断归因使用。
   ///

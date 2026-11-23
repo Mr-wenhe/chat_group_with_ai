@@ -36,6 +36,11 @@ import 'package:chat_group/features/work_mode/work_public_update_stream.dart';
 import 'package:chat_group/features/work_mode/agent_decision.dart';
 import 'package:chat_group/features/agentic/tool_request.dart';
 import 'package:chat_group/features/work_mode/work_tool_registry.dart';
+import 'package:chat_group/features/work_mode/work_agent_loop.dart';
+import 'package:chat_group/features/work_mode/work_discussion_investigation.dart';
+import 'package:chat_group/features/work_mode/work_web_tools.dart';
+import 'package:chat_group/features/web_search/desktop/desktop_web_service.dart';
+import 'package:chat_group/features/web_search/desktop/web_worker_client.dart';
 import 'package:chat_group/features/work_mode/work_role_router.dart';
 import 'package:chat_group/features/work_mode/work_folder_grant_service.dart';
 import 'package:chat_group/features/work_mode/work_mode_directory_service.dart';
@@ -265,73 +270,85 @@ void main() {
   setUp(_openFixture);
   tearDown(_closeFixture);
 
-  test('协调者返修正式方案时收到全部未决口径问题清单', () async {
-    await modelRunner(confirm)
-        .runCollaboration(task, WorkTaskCancellation(), apply);
-    final shell =
-        WorkDiscussionState.fromExecutionState(task.executionStateJson)!;
-    final before = shell.collaboration!;
-    final raw = before.toJson()
-      ..['phase'] = 'clarifying'
-      ..['revision'] = before.revision + 1
-      ..['verificationRevision'] = before.verificationRevision + 1
-      ..['issues'] = [
-        ...before.issues,
-        for (final entry in const [
-          ('plan-count-gap', 'A-02 步数不匹配', '逐项重算固定骰点路径'),
-          ('plan-assertion-gap', '步骤合并多个断言', '每步只保留一条断言'),
-        ])
-          {
-            'id': entry.$1,
-            'sourceId': 'qa',
-            'kind': 'defect',
-            'status': 'open',
-            'target': 'plan',
-            'problem': entry.$2,
-            'evidenceRef': 'review-${entry.$1}',
-            'resolution': '',
-            'resolutionRef': '',
-            'retestCondition': entry.$3,
-            'requestRevision': before.requestRevision - 1,
+  for (final issueIsCurrent in [false, true]) {
+    for (final issueTarget
+        in issueIsCurrent ? ['plan', 'artifactContract.location'] : ['plan']) {
+      test('协调者返修正式方案时收到全部未决口径问题清单：当前版本=$issueIsCurrent，目标=$issueTarget',
+          () async {
+        await modelRunner(confirm)
+            .runCollaboration(task, WorkTaskCancellation(), apply);
+        final shell =
+            WorkDiscussionState.fromExecutionState(task.executionStateJson)!;
+        final before = shell.collaboration!;
+        final raw = before.toJson()
+          ..['phase'] = 'clarifying'
+          ..['revision'] = before.revision + 1
+          ..['verificationRevision'] = before.verificationRevision + 1
+          ..['issues'] = [
+            ...before.issues,
+            for (final entry in const [
+              ('plan-count-gap', 'A-02 步数不匹配', '逐项重算固定骰点路径'),
+              ('plan-assertion-gap', '步骤合并多个断言', '每步只保留一条断言'),
+            ])
+              {
+                'id': entry.$1,
+                'sourceId': 'qa',
+                'kind': 'defect',
+                'status': 'open',
+                'target': issueTarget,
+                'problem': entry.$2,
+                'evidenceRef': 'review-${entry.$1}',
+                'resolution': '',
+                'resolutionRef': '',
+                'retestCondition': entry.$3,
+                'requestRevision':
+                    before.requestRevision - (issueIsCurrent ? 0 : 1),
+              }
+          ];
+        final updated = WorkCollaborationState.tryParse(raw)!;
+        task.executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
+          task.executionStateJson,
+          shell.copyWith(collaboration: updated),
+          expectedCollaborationRevision: before.revision,
+        );
+
+        final turns = <({String memberId, Map<String, dynamic> focus})>[];
+        await modelRunner((member, context) async {
+          turns.add((
+            memberId: member.id,
+            focus: Map<String, dynamic>.from(context['turnFocus'] as Map),
+          ));
+          if (!issueIsCurrent && turns.length == 1) {
+            return _turn('respond', text: '正式方案仍有缺口，请协调者集中修订。');
           }
-      ];
-    final updated = WorkCollaborationState.tryParse(raw)!;
-    task.executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
-      task.executionStateJson,
-      shell.copyWith(collaboration: updated),
-      expectedCollaborationRevision: before.revision,
-    );
+          return _turn('decide', decision: {
+            'kind': 'question',
+            'targetId': '',
+            'reason': '隔离夹具停止后续讨论',
+            'evidence': '已核对返修清单',
+            'impact': '不执行制作',
+            'options': <Map<String, dynamic>>[],
+          });
+        }).runCollaboration(task, WorkTaskCancellation(), apply);
 
-    final turns = <({String memberId, Map<String, dynamic> focus})>[];
-    await modelRunner((member, context) async {
-      turns.add((
-        memberId: member.id,
-        focus: Map<String, dynamic>.from(context['turnFocus'] as Map),
-      ));
-      if (turns.length == 1) {
-        return _turn('respond', text: '正式方案仍有缺口，请协调者集中修订。');
-      }
-      return _turn('decide', decision: {
-        'kind': 'question',
-        'targetId': '',
-        'reason': '隔离夹具停止后续讨论',
-        'evidence': '已核对返修清单',
-        'impact': '不执行制作',
-        'options': <Map<String, dynamic>>[],
-      });
-    }).runCollaboration(task, WorkTaskCancellation(), apply);
-
-    expect(turns.map((turn) => turn.memberId).take(2),
-        ['qa', before.coordinatorId]);
-    final checklist =
-        (turns.last.focus['formalPlanRevisionChecklist'] as List).cast<Map>();
-    expect(checklist.map((issue) => issue['id']),
-        ['plan-count-gap', 'plan-assertion-gap']);
-    expect(
-        checklist.map((issue) => issue['problem']), ['A-02 步数不匹配', '步骤合并多个断言']);
-    expect(checklist.map((issue) => issue['retestCondition']),
-        ['逐项重算固定骰点路径', '每步只保留一条断言']);
-  }, timeout: const Timeout(Duration(seconds: 30)));
+        expect(
+            turns.map((turn) => turn.memberId).take(2),
+            issueIsCurrent
+                ? [before.coordinatorId]
+                : ['qa', before.coordinatorId]);
+        expect(turns.last.focus['stage'], 'prepareProposal');
+        final checklist =
+            (turns.last.focus['formalPlanRevisionChecklist'] as List)
+                .cast<Map>();
+        expect(checklist.map((issue) => issue['id']),
+            ['plan-count-gap', 'plan-assertion-gap']);
+        expect(checklist.map((issue) => issue['problem']),
+            ['A-02 步数不匹配', '步骤合并多个断言']);
+        expect(checklist.map((issue) => issue['retestCondition']),
+            ['逐项重算固定骰点路径', '每步只保留一条断言']);
+      }, timeout: const Timeout(Duration(seconds: 30)));
+    }
+  }
 
   for (final scenario in ['granted', 'revoked', 'defect', 'other-task']) {
     test('目录授权证据来自当前授权服务且不代替执行证据：$scenario', () async {
@@ -1162,6 +1179,126 @@ void main() {
   }
 
   _registerDocumentInvestigationTest();
+  test('群查证从用户链接读取公开来源并生成真实调查凭据', () async {
+    task.userRequest += ' 参考 https://example.com/public-note.txt';
+    final checkpoint = jsonDecode(task.executionStateJson) as Map;
+    checkpoint[WorkDiscussionState.jsonKey]['collaboration']['scope'] =
+        task.userRequest;
+    task.executionStateJson = jsonEncode(checkpoint);
+    await db.agentTaskBox.put(task.id, task);
+    final worker = _NetworkEvidenceWorker();
+    final service = DesktopWebService(worker);
+    final loop = WorkAgentLoop(
+      model: (_) => throw StateError('查证动作不应请求执行模型'),
+      registry: WorkToolRegistry(definitions: webInvestigationTools(service)),
+      eventStore: events,
+    );
+    var requested = false;
+    var resolved = false;
+    final sourceMaps = <Object?>[];
+    final effectiveToolLists = <Object?>[];
+    final productionToolLists = <Object?>[];
+    final evidenceBodies = <String>[];
+    final deniedDownloads = <WorkToolResultStatus>[];
+    final discussion = modelRunner((member, context) async {
+      final current =
+          Map<String, dynamic>.from(context['collaboration'] as Map);
+      sourceMaps.add((context['publicWeb'] as Map)['sources']);
+      effectiveToolLists.add(context['effectiveTools']);
+      productionToolLists.add((context['publicWeb'] as Map)['productionTools']);
+      if ((current['issues'] as List).isEmpty && !requested) {
+        return _turn('respond', issues: [
+          {
+            'id': 'public-reference',
+            'kind': 'defect',
+            'target': '来源核查',
+            'problem': '需要核对公开资料正文',
+            'evidenceRef': '',
+            'retestCondition': '实际读取用户提供的来源',
+          }
+        ]);
+      }
+      if (!requested) {
+        requested = true;
+        return _turn('investigate', issue: 'public-reference', tool: {
+          'name': 'web.read',
+          'arguments': {'sourceId': 's1'},
+        });
+      }
+      if ((current['issues'] as List)
+          .any((issue) => issue['status'] == 'open')) {
+        final evidence = context['evidence'] as Map;
+        evidenceBodies.add(jsonEncode(evidence.values.last));
+        resolved = true;
+        return _turn('respond', resolutions: [
+          {
+            'id': 'public-reference',
+            'resolution': '已读取公开正文，仅将其作为资料',
+            'evidenceRef': evidence.keys.last,
+          }
+        ]);
+      }
+      return (current['plan'] as String).isEmpty
+          ? _turn('propose', proposal: proposal(current))
+          : _turn('approve', approval: approval(current));
+    }, investigate: (task, member, call, binding, cancellation) async {
+      service.restoreSources(
+          (jsonDecode(task.executionStateJson) as Map)['webSources']);
+      final denied = await loop.investigate(
+          task,
+          const AgentToolCall(
+              name: AgentToolName.webDownload, arguments: {'sourceId': 's1'}),
+          binding,
+          cancellation);
+      deniedDownloads.add(denied.result.status);
+      return loop.investigate(task, call, binding, cancellation);
+    });
+    await discussion.runCollaboration(task, WorkTaskCancellation(), apply);
+    expect(resolved, isTrue, reason: task.lastError);
+    expect(sourceMaps,
+        everyElement({'s1': 'https://example.com/public-note.txt'}));
+    expect(effectiveToolLists,
+        everyElement(containsAll(['web.search', 'web.read'])));
+    expect(effectiveToolLists, everyElement(isNot(contains('web.download'))));
+    expect(productionToolLists, everyElement(contains('web.download')));
+    expect(worker.requests, 1);
+    expect(deniedDownloads, [WorkToolResultStatus.permissionDenied]);
+    expect(evidenceBodies.single, contains('UNTRUSTED_NETWORK_NOTE'));
+    expect(evidenceBodies.single, contains('web.read'));
+    expect(
+        (await events.read(task.id)).events.any((event) =>
+            event.safeMetadata['phase'] == 'investigation' &&
+            event.safeMetadata['tool'] == 'web.read'),
+        isTrue);
+  }, skip: !(Platform.isMacOS || Platform.isWindows));
+  test('智谱专用角色的工作讨论上下文不暴露自主联网工具', () async {
+    final restricted = db.aiCharacterBox.get('qa')!
+      ..zhipuSearchAnswerOnly = true;
+    await db.aiCharacterBox.put(restricted.id, restricted);
+    Map<String, dynamic>? restrictedContext;
+    final discussion = modelRunner((member, context) async {
+      if (member.id == restricted.id) {
+        restrictedContext = Map<String, dynamic>.from(context);
+      }
+      return confirm(member, context);
+    });
+
+    await discussion.runCollaboration(task, WorkTaskCancellation(), apply);
+
+    expect(restrictedContext, isNotNull, reason: task.lastError);
+    expect(restrictedContext!.containsKey('publicWeb'), isFalse);
+    final effectiveTools = restrictedContext!['effectiveTools'] as List;
+    expect(
+      effectiveTools.where((tool) =>
+          const {'web.search', 'web.read', 'web.download'}.contains(tool)),
+      isEmpty,
+    );
+    expect(
+      (restrictedContext!['capabilities']
+          as Map)['registeredInvestigationAdapter'],
+      isFalse,
+    );
+  }, skip: !(Platform.isMacOS || Platform.isWindows));
   _registerProgressGuardTest();
   _registerFailureBoundaryTest();
   _registerScopeBoundaryTest();

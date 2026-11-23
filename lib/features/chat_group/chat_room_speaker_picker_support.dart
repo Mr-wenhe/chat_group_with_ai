@@ -57,8 +57,10 @@ extension _ChatRoomSpeakerPickerSupport on _ChatRoomPageState {
   /// 决定下一位由谁来说；返回 null 表示这一轮到此为止。
   ///
   /// 每一步都读取**最新已确认的对话**：上一位说完再决定下一位，而不是在用户
-  /// 发送时一次锁定整轮名单。没有任何候选、页面不可见、App 不在前台时都不
-  /// 发起模型调用。
+  /// 发送时一次锁定整轮名单。没有任何候选、用户离开会话时都不发起模型调用。
+  ///
+  /// 判据是 [_roomSessionVisible] 而不是 `_roomWorkAllowed`：用户已经发出的那一轮
+  /// 要继续走完，窗口被遮挡不算离开；空闲自动聊天在更外层另有闸门。
   Future<_SelectedSpeaker?> _selectNextGroupSpeaker({
     required String? userMessage,
     required List<String>? mentionedIds,
@@ -68,7 +70,7 @@ extension _ChatRoomSpeakerPickerSupport on _ChatRoomPageState {
     required int roundGeneration,
     int? autoChatGeneration,
   }) async {
-    if (!_roomWorkAllowed) return null;
+    if (!_roomSessionVisible) return null;
     final resolved = _resolveSpeakerStep(
       mentionedIds: mentionedIds,
       alreadySpoken: alreadySpoken,
@@ -370,6 +372,7 @@ extension _ChatRoomSpeakerPickerSupport on _ChatRoomPageState {
         provider: provider,
         apiProtocol: config.protocol,
         customBaseUrl: config.customBaseUrl,
+        userAgent: config.userAgent,
         model: config.modelName,
         messages: request.messages,
         temperature: 0.2,

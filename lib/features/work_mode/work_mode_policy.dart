@@ -13,11 +13,67 @@ class WorkModePolicy {
   static bool looksLikeWorkRequest(String request) {
     final text = request.trim();
     if (text.isEmpty) return false;
+    // A negative safety constraint is not a request to use the local workspace.
+    final safeText = text
+        .replaceAll(
+          RegExp(
+            r'\b(?:do\s+not|don\x27t|never)\s+(?:(?:read|access|open|write|modify|edit|inspect|list|search|delete)(?:\s+or\s+|[\s,]+)?){1,4}(?:(?:the|any)\s+)?(?:local|workspace)(?:\s+(?:files?|folders?|directories|projects?|documents|code))?\b',
+            caseSensitive: false,
+          ),
+          ' ',
+        )
+        .replaceAll(
+          RegExp(
+            r'\b(?:do\s+not|don\x27t|never)\s+(?:(?:create|generate|write|modify|edit|rewrite|delete)(?:\s+or\s+|[\s,]+)?){1,4}\s+(?:(?:a|an|the|any|local|workspace|replacement|output|downloaded)\s+){0,2}(?:files?|folders?|directories|projects?|documents|code|scripts?)\b',
+            caseSensitive: false,
+          ),
+          ' ',
+        )
+        .replaceAll(
+          RegExp(
+            r'(?:不要|不必|禁止|绝不)\s*(?:(?:创建|生成|写入|修改|编辑|重写|删除)(?:或|、)?\s*){1,4}(?:(?:任何|该|本地|工作区|替代|输出|下载的)?\s*)?(?:文件夹|文件|目录|项目|代码|脚本|文档)',
+          ),
+          ' ',
+        )
+        .replaceAll(
+          RegExp(
+            r'(?:不要|不必|禁止|绝不)\s*(?:(?:访问|读取|查看|打开|写入|修改|删除|搜索)(?:或|、)?\s*){1,4}(?:(?:任何|该|本地|工作区|项目|的)\s*)?(?:本地|工作区)(?:的)?(?:文件夹|文件|目录|项目|代码|文档)?',
+            caseSensitive: false,
+          ),
+          ' ',
+        )
+        .trim();
+    if (safeText.isEmpty) return false;
+    // Public-source reading/downloading belongs to normal chat; local execution stays gated.
+    final urls = RegExp(r'https?://[^\s<>"\)]+', caseSensitive: false);
+    final remainder = safeText.replaceAll(urls, ' ');
+    final remote = urls.hasMatch(safeText) ||
+        RegExp(r'(联网|搜索|网页|网站|下载|\b(?:search|browse|download|fetch)\b)',
+                caseSensitive: false)
+            .hasMatch(remainder);
+    // A repository's project name alone is not evidence of local work. Remote
+    // search/read/download requests must stay in normal chat unless they also
+    // name an explicit local operation or location.
+    final local = RegExp(
+                r'(工作区|本地|桌面(?:上的?)?(?:文件|文件夹|目录|项目|代码)|文件夹|目录|命令|脚本|安装|编译|部署|写入|修改|创建|开发|修复|构建|'
+                r'\b(?:workspace|local|directory|command|script|install|compile|deploy|write|edit|create|implement|build)\b|'
+                r'\bdesktop\s+(?:files?|folders?|directories|projects?|code)\b|[A-Za-z]:[\\/])',
+                caseSensitive: false)
+            .hasMatch(remainder) ||
+        RegExp(
+                r'(?:运行|执行)\s*(?:本地)?\s*(?:命令|脚本|测试|代码|程序|项目)|'
+                r'\b(?:run|execute)\s+(?:local\s+)?(?:tests?|commands?|scripts?|code|build|applications?|programs?|server)\b',
+                caseSensitive: false)
+            .hasMatch(remainder) ||
+        RegExp(r'(?:下载|download)[\s\S]{0,300}(?:然后|再|then|and)\s*(?:运行|执行|run|execute)(?:\b|\s|$)',
+                caseSensitive: false)
+            .hasMatch(safeText);
+    if (remote && !local) return false;
     return RegExp(
       r'(写入|修改|创建|生成|读取|打开|查看|分析|审查|修复|优化|完善|改进|实现|运行|执行|测试|构建|编译|部署|提交|脚本|代码|文件|项目|目录|附件|网页|页面|UI|应用|小程序|'
       r'\b(?:read|open|inspect|analy[sz]e|review|fix|implement|write|create|generate|edit|optimi[sz]e|improve|enhance|polish|refine|beautify|run|execute|test|build|compile|deploy|commit|script|code|file|project|directory|ui|app)\b)',
       caseSensitive: false,
-    ).hasMatch(text);
+    ).hasMatch(safeText);
   }
 
   /// Only the explicit room toggle authorizes routing new chat input to work.
@@ -88,6 +144,8 @@ class WorkModePolicy {
   /// reads/searches per request once a grant has been verified; keeping this
   /// default strict preserves the old approval boundary for standalone users.
   static bool requiresApproval(AgentToolName tool) => switch (tool) {
+        AgentToolName.webSearch || AgentToolName.webRead => false,
+        AgentToolName.webDownload => true,
         AgentToolName.workspaceList ||
         AgentToolName.workspaceRead ||
         AgentToolName.workspaceSearch ||
@@ -109,6 +167,9 @@ class WorkModePolicy {
       };
 
   static String approvalSummary(ToolRequest request) => switch (request.tool) {
+        AgentToolName.webSearch => '搜索公开网络资料',
+        AgentToolName.webRead => '读取公开来源正文',
+        AgentToolName.webDownload => '下载公开来源文件到受控目录',
         AgentToolName.workspaceList => '列出目录：${request.args['path'] ?? '.'}',
         AgentToolName.workspaceRead => '读取文件：${request.args['path'] ?? ''}',
         AgentToolName.workspaceSearch => '搜索路径：${request.args['path'] ?? '.'}',

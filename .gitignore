@@ -72,6 +72,9 @@ docs/superpowers/plans/
 # Local workspace / build artifacts
 agentic_output/
 output/
+# QA 验收用的临时构建目录（build_qa_*，每个都带完整 Gradle/Flutter 产物，
+# 一次验收就能堆出十万级文件）。它们是本机验证副产物，永远不入库。
+build_qa_*/
 star.html
 test.html
 release_artifacts/

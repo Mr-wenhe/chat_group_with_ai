@@ -4,7 +4,6 @@ import 'package:chat_group/core/models/api_config.dart';
 import 'package:chat_group/features/settings/ai_speaker_picker_settings.dart';
 import 'package:chat_group/features/settings/api_key_settings_status.dart';
 import 'package:chat_group/features/web_search/data/zhipu_native_search_credential_store.dart';
-import 'package:chat_group/features/web_search/data/search_settings_store.dart';
 
 /// 从本机只读快照汇总五类凭据的状态。
 ///
@@ -26,7 +25,6 @@ ApiKeyOverview collectApiKeyOverview({
     voiceStatus(db.voiceServiceConfig),
     imageStatus(db.imageServiceConfig),
     searchStatus(
-      SearchProviderConfigStore(db: db).configs,
       zhipuNativeConfigured:
           ZhipuNativeSearchCredentialStore(db: db).hasConfiguredCredential,
     ),

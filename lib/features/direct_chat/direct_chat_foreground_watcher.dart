@@ -84,6 +84,8 @@ class _DirectChatForegroundWatcherState
       _preferredConversationId = null;
       final directResult = await DirectChatProactiveService(db: widget.db)
           .tryCreateProactiveMessage(
+        mayContinue: () =>
+            mounted && _lifecycleState == AppLifecycleState.resumed,
         preferredConversationId: _isDirectConversation(preferredConversationId)
             ? preferredConversationId
             : null,

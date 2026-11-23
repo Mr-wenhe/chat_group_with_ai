@@ -27,6 +27,9 @@ class ApiBundleLimits {
   static const int maxResourceIdLength = 200;
   static const int maxCredentialLength = 512;
 
+  /// `User-Agent` 覆盖值；正常 UA 远短于此，超长视为载荷异常。
+  static const int maxUserAgentLength = 256;
+
   /// 单个服务类别允许的条目数。超出即视为载荷异常，而不是「用户配了很多」。
   static const int maxEntriesPerSection = 32;
 }
@@ -62,6 +65,7 @@ class ApiBundleChatEntry {
     required this.apiKey,
     required this.setDefault,
     this.enableWorkPromptCaching,
+    this.userAgent,
   });
 
   /// 空串表示「没有指定 id」，由匹配规则决定新增还是覆盖。
@@ -78,6 +82,14 @@ class ApiBundleChatEntry {
   final String apiKey;
   final bool setDefault;
   final bool? enableWorkPromptCaching;
+
+  /// 空或缺失表示沿用客户端默认 UA。
+  ///
+  /// 三态语义（导入侧据此决定是否改写目标配置）：
+  /// - `null`：载荷里**没有这个字段**（旧版本导出的包），沿用目标配置原来的值；
+  /// - `''`：字段存在但为空，明确要求回到客户端默认身份（清空旧的自定义 UA）；
+  /// - 非空：覆盖为目标值。
+  final String? userAgent;
 }
 
 class ApiBundleVoiceEntry {
@@ -140,12 +152,8 @@ class ApiBundleSearchEntry {
 
 /// 「智谱原生 Web Search」的凭据。
 ///
-/// 它**不是** [ApiBundleSearchEntry] 的一种：那一条是「独立搜索 Provider」
-/// （Tavily / Brave / Gateway…），元数据与密钥都归 `SearchProviderConfigStore`
-/// 管；这一条由 `ZhipuNativeSearchCredentialStore` 单独持有，在设置页也是另外
-/// 一张卡片。曾经只导出前者，结果把「搜索服务」配成智谱原生的用户导出的包里
-/// 一条搜索凭据都没有——包能解开、导入不报错，只是静默少了整整一类，用户从
-/// 导出页与导入结果页都看不出是导出漏了还是对方没配。
+/// 由 `ZhipuNativeSearchCredentialStore` 单独持有；[ApiBundleSearchEntry]
+/// 仅保留旧独立搜索配置的包格式兼容，不能替代此凭据。
 class ApiBundleZhipuNativeSearchEntry {
   const ApiBundleZhipuNativeSearchEntry({required this.apiKey});
 
@@ -296,6 +304,16 @@ class ApiBundle {
       }
       final name =
           _readText(map['name'], maxLength: ApiBundleLimits.maxNameLength);
+      // 三态：字段缺失（旧包）保留 null，字段存在则连空串一起保留——空串是
+      // 「明确要求改回客户端默认身份」，不能被折成 null，否则导入侧会把它当成
+      // 「字段没写」而继续沿用目标机器上的旧 UA。
+      final userAgent = _readUserAgent(
+        map['userAgent'],
+        present: map.containsKey('userAgent'),
+        section: section,
+        title: title,
+        issues: issues,
+      );
       result.add(ApiBundleChatEntry(
         id: id,
         name: name.isEmpty ? provider : name,
@@ -308,6 +326,7 @@ class ApiBundle {
         enableWorkPromptCaching: map.containsKey('enableWorkPromptCaching')
             ? map['enableWorkPromptCaching'] == true
             : null,
+        userAgent: userAgent,
       ));
     }
     return result;
@@ -475,6 +494,33 @@ class ApiBundle {
         issues: issues);
     if (apiKey == null) return null;
     return ApiBundleZhipuNativeSearchEntry(apiKey: apiKey);
+  }
+
+  /// `User-Agent` 覆盖值：三态读取，见 [ApiBundleChatEntry.userAgent]。
+  ///
+  /// 超长时记一条 issue 并返回 `null`（等同"字段缺失"），也就是**保留目标配置
+  /// 原值**而不是把身份静默改成默认：静默改默认会让一条原本可用的白名单中转
+  /// 在另一台机器上直接 401，而用户看不出是被导入改掉的。这里不用 [_readText]——
+  /// 那个会静默返回空串，正好是最坏的一种"看起来像清空"。
+  static String? _readUserAgent(
+    Object? value, {
+    required bool present,
+    required String section,
+    required String title,
+    required List<ApiBundleIssue> issues,
+  }) {
+    if (!present) return null;
+    final text = value?.toString().trim() ?? '';
+    if (text.length > ApiBundleLimits.maxUserAgentLength) {
+      issues.add(ApiBundleIssue(
+        section: section,
+        title: title,
+        reason: 'userAgent 过长（上限 ${ApiBundleLimits.maxUserAgentLength} 字符），'
+            '已保留该配置原有的 User-Agent',
+      ));
+      return null;
+    }
+    return text;
   }
 
   /// 超长时返回空串而不是截断：截断会把一个坏配置**伪装成**好配置，用户看不出

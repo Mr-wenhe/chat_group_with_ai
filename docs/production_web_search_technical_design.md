@@ -1,5 +1,7 @@
 # 生产级 AI 联网搜索：技术设计、运行时提示词与分阶段实施手册
 
+> 历史方案：本文保留旧提供商与 HTTP Gateway 的设计记录，不代表当前可用入口。当前实现见 [桌面自动联网设计](desktop_autonomous_web_design.md)；验收范围见 [验收记录](desktop_web_acceptance_2026-10-23.md)。
+
 状态：Implemented（2026-08-26；本地测试与平台门禁已验证，未配置生产凭据因此未执行 live smoke）
 
 日期：2026-08-22

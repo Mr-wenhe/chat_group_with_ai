@@ -11,6 +11,14 @@ import 'package:chat_group/features/work_mode/work_discussion_state.dart';
 class WorkTaskExecutionPolicy {
   const WorkTaskExecutionPolicy._();
 
+  /// A QA label or a test workspace alone does not turn a download into a report.
+  static bool isQaReportRequest(String scope) =>
+      RegExp(r'\bqa[- ]only\b', caseSensitive: false).hasMatch(scope) ||
+      RegExp(r'测试|验证|回归|验收|\bqa\b|quality assurance|\btest(?:ing)?\b',
+              caseSensitive: false).hasMatch(scope) &&
+          RegExp(r'报告|(?:qa|test|testing)[_\s-]*report\b|\breport\b',
+                  caseSensitive: false).hasMatch(scope);
+
   static bool isValidatedV2GroupTask(AgentTask task) {
     if (!task.workModeTask ||
         !WorkDiscussionState.requiresDiscussionForConversation(task.groupId) ||

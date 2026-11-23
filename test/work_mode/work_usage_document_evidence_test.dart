@@ -4,8 +4,27 @@ import 'package:chat_group/features/work_mode/agent_decision.dart';
 import 'package:chat_group/features/work_mode/work_usage_feedback.dart';
 import 'package:chat_group/features/work_mode/work_usage_receipt.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:chat_group/features/work_mode/work_collaboration_state.dart';
 
 void main() {
+  test('new frozen usage proposals reject download mutations', () {
+    final assignment = <String, dynamic>{
+      'memberId': 'reader',
+      'scenarioId': 'read-frozen',
+      'goal': '完整读取原文',
+      'preconditions': '当前候选已冻结',
+      'stepGoals': ['逐块读取当前候选'],
+      'expectedResult': '原文完整',
+      'acceptanceIds': ['source'],
+      'requiredCapabilities': ['document.body'],
+      'resetMethod': '重新读取当前候选',
+    };
+    expect(
+        WorkCollaborationAutonomy.proposalAssignmentError(assignment), isNull);
+    assignment['requiredCapabilities'] = ['web.download', 'web.read'];
+    expect(WorkCollaborationAutonomy.proposalAssignmentError(assignment),
+        contains('冻结试用不能新增文件'));
+  });
   test('相同摘要在不同候选路径上保留独立正文使用观察', () {
     WorkUsageObservation observation(String path, String ref) =>
         WorkUsageObservation(

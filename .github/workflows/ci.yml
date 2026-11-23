@@ -25,7 +25,7 @@ jobs:
       - name: 配置 Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "22.18.0"
+          node-version: "24.14.1"
       - name: Gateway 单元与安全测试
         working-directory: gateway
         run: npm test

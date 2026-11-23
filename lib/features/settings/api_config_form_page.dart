@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:chat_group/core/bundle/api_bundle.dart';
 import 'package:chat_group/core/models/api_config.dart';
 import 'package:chat_group/core/models/api_provider.dart';
 import 'package:chat_group/core/models/api_protocol.dart';
@@ -16,6 +17,20 @@ import 'package:chat_group/services/chat_api_service.dart';
 import './model_catalog_picker.dart';
 import './providers/api_config_providers.dart';
 import './widgets/model_capability_fields.dart';
+
+/// 客户端身份预设。
+///
+/// 有的中转按 `User-Agent` 白名单放行（agentrouter 只认 `claude-cli`），与 Key
+/// 是否有效无关；默认不发送这个头，保持与普通提供商一致。
+const String _userAgentDefaultChoice = 'default';
+const String _userAgentClaudeChoice = 'claude-cli';
+const String _userAgentCustomChoice = 'custom';
+const String _claudeCliUserAgent = 'claude-cli/2.0.0 (external, cli)';
+const Map<String, String> _userAgentChoiceLabels = {
+  _userAgentDefaultChoice: '客户端默认',
+  _userAgentClaudeChoice: 'Claude CLI（claude-cli/…）',
+  _userAgentCustomChoice: '自定义…',
+};
 
 class ApiConfigFormPage extends ConsumerStatefulWidget {
   final ApiConfig? config;
@@ -36,6 +51,7 @@ class _ApiConfigFormPageState extends ConsumerState<ApiConfigFormPage> {
   late TextEditingController _modelController;
   late TextEditingController _apiKeyController;
   late TextEditingController _baseUrlController;
+  late TextEditingController _userAgentController;
   final FocusNode _baseUrlFocusNode = FocusNode();
   final FocusNode _modelFocusNode = FocusNode();
   late final ModelCapabilityController _capabilityController;
@@ -44,6 +60,7 @@ class _ApiConfigFormPageState extends ConsumerState<ApiConfigFormPage> {
   ApiProtocol _selectedProtocol = ApiProtocol.defaultValue;
   bool _obscureApiKey = true;
   bool _enableWorkPromptCaching = false;
+  String _userAgentChoice = _userAgentDefaultChoice;
   bool _isSaving = false;
   bool _isTesting = false;
 
@@ -78,6 +95,15 @@ class _ApiConfigFormPageState extends ConsumerState<ApiConfigFormPage> {
     // 模型不再预填内置默认值：那份清单会过时（deepseek-chat 已不存在），预填等于
     // 让用户保存一个跑不通的模型。留空，由「获取模型」给出真实候选。
     _modelController = TextEditingController(text: c?.modelName ?? '');
+    final storedUserAgent = (c?.userAgent ?? '').trim();
+    _userAgentChoice = storedUserAgent.isEmpty
+        ? _userAgentDefaultChoice
+        : storedUserAgent == _claudeCliUserAgent
+            ? _userAgentClaudeChoice
+            : _userAgentCustomChoice;
+    _userAgentController = TextEditingController(
+      text: _userAgentChoice == _userAgentCustomChoice ? storedUserAgent : '',
+    );
     // 内置提供商也显示地址，所以起手值必须在"还没填过"时等于请求实际会用的地址。
     _baseUrlController = TextEditingController(
       text: initialBaseUrl(config: c, provider: _selectedProvider),
@@ -97,6 +123,13 @@ class _ApiConfigFormPageState extends ConsumerState<ApiConfigFormPage> {
       return ApiProvider.deepseek;
     }
   }
+
+  /// 当前选择实际会发送的 `User-Agent`；空串表示沿用客户端默认。
+  String get _effectiveUserAgent => switch (_userAgentChoice) {
+        _userAgentClaudeChoice => _claudeCliUserAgent,
+        _userAgentCustomChoice => _userAgentController.text.trim(),
+        _ => '',
+      };
 
   /// 模型名就是输入框里的文字，没有第二处来源。
   ///
@@ -203,6 +236,7 @@ class _ApiConfigFormPageState extends ConsumerState<ApiConfigFormPage> {
         provider: provider,
         apiProtocol: _selectedProtocol,
         customBaseUrl: _baseUrlController.text.trim(),
+        userAgent: _effectiveUserAgent,
       );
       if (!mounted) return;
       if (!catalog.ok) {
@@ -258,6 +292,7 @@ class _ApiConfigFormPageState extends ConsumerState<ApiConfigFormPage> {
     _modelController.dispose();
     _apiKeyController.dispose();
     _baseUrlController.dispose();
+    _userAgentController.dispose();
     _baseUrlFocusNode.dispose();
     _modelFocusNode.removeListener(_onModelFocusChanged);
     _modelFocusNode.dispose();
@@ -449,6 +484,56 @@ class _ApiConfigFormPageState extends ConsumerState<ApiConfigFormPage> {
                     return v?.trim().isEmpty ?? true ? '请输入 API Key' : null;
                   },
                 ),
+                const SizedBox(height: 14),
+                // 有的中转按 UA 白名单放行（agentrouter 只认 claude-cli），与 Key
+                // 是否有效无关；默认不发送这个头，与普通提供商保持一致。
+                DropdownButtonFormField<String>(
+                  key: const Key('api-config-user-agent-preset'),
+                  value: _userAgentChoice,
+                  isExpanded: true,
+                  decoration: appInputDecoration(
+                    '客户端身份（User-Agent）',
+                    null,
+                    Icons.badge_outlined,
+                    cs,
+                  ),
+                  items: _userAgentChoiceLabels.entries
+                      .map((entry) => DropdownMenuItem(
+                            value: entry.key,
+                            child: Text(entry.value,
+                                overflow: TextOverflow.ellipsis),
+                          ))
+                      .toList(),
+                  onChanged: (value) {
+                    if (value != null) {
+                      setState(() => _userAgentChoice = value);
+                    }
+                  },
+                ),
+                if (_userAgentChoice == _userAgentCustomChoice) ...[
+                  const SizedBox(height: 14),
+                  TextFormField(
+                    key: const Key('api-config-user-agent'),
+                    controller: _userAgentController,
+                    // 与配置包解析共用同一上限：表单能存下的值，包一定带得走。
+                    // 两边口径不同会让超长 UA 在导出时被悄悄换成默认身份。
+                    maxLength: ApiBundleLimits.maxUserAgentLength,
+                    decoration: appInputDecoration(
+                      '自定义 User-Agent',
+                      '例如：my-client/1.0',
+                      Icons.edit_outlined,
+                      cs,
+                    ),
+                    validator: (value) {
+                      final text = value?.trim() ?? '';
+                      if (text.length > ApiBundleLimits.maxUserAgentLength) {
+                        return 'User-Agent 不能超过 '
+                            '${ApiBundleLimits.maxUserAgentLength} 个字符';
+                      }
+                      return null;
+                    },
+                  ),
+                ],
               ],
             ),
             const SizedBox(height: 16),
@@ -516,6 +601,7 @@ class _ApiConfigFormPageState extends ConsumerState<ApiConfigFormPage> {
         provider: provider,
         apiProtocol: _selectedProtocol,
         customBaseUrl: _baseUrlController.text.trim(),
+        userAgent: _effectiveUserAgent,
         model: model,
       );
       if (!mounted) return;
@@ -594,6 +680,7 @@ class _ApiConfigFormPageState extends ConsumerState<ApiConfigFormPage> {
         modelName: modelName,
         apiKey: _apiKeyController.text.trim(),
         customBaseUrl: _baseUrlController.text.trim(),
+        userAgent: _effectiveUserAgent,
         createdAt: widget.config?.createdAt,
       );
 

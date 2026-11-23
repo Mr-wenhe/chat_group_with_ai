@@ -14,6 +14,9 @@ import 'package:html/parser.dart' as html;
 import 'package:syncfusion_flutter_pdf/pdf.dart';
 
 void main() {
+  final officeSkip = OfficePreviewSession.findOfficeExecutable() == null
+      ? 'LibreOffice not installed'
+      : false;
   test('common desktop formats include legacy Office and exclude archives', () {
     expect(attachmentPreviewFormat('unnamed', mediaType: 'image'),
         AttachmentPreviewFormat.image);
@@ -152,7 +155,7 @@ void main() {
   });
 
   test(
-      'installed LibreOffice converts Word and Excel without altering originals',
+      'installed LibreOffice converts Excel without altering originals',
       () async {
     final directory =
         await Directory.systemTemp.createTemp('preview-conversion-test-');
@@ -189,14 +192,24 @@ void main() {
     await session.close();
     expect(await converted.exists(), isFalse);
 
+  }, skip: officeSkip, timeout: const Timeout(Duration(seconds: 30)));
+
+  test('installed LibreOffice converts RTF without altering originals', () async {
+    final directory = await Directory.systemTemp.createTemp('preview-rtf-test-');
+    addTearDown(() => directory.delete(recursive: true));
     final rtf = await File('${directory.path}/word.rtf')
         .writeAsString(r'{\rtf1\ansi Preview test\par Second line}');
+    final original = await rtf.readAsBytes();
     final word = OfficePreviewSession();
     addTearDown(word.close);
     final pdf = await word.convert(rtf, spreadsheet: false);
     expect(utf8.decode(await pdf.openRead(0, 4).first), '%PDF');
 
-    for (final name in ['sample.docx', 'sample.pptx']) {
+    expect(await rtf.readAsBytes(), original);
+  }, skip: officeSkip, timeout: const Timeout(Duration(seconds: 30)));
+
+  for (final name in ['sample.docx', 'sample.pptx']) {
+    test('installed LibreOffice converts $name without altering originals', () async {
       final source = File('test/fixtures/attachment_preview/$name');
       final original = await source.readAsBytes();
       final preview = OfficePreviewSession();
@@ -214,10 +227,6 @@ void main() {
       }
       expect(await source.readAsBytes(), original);
       await preview.close();
-    }
-  },
-      skip: OfficePreviewSession.findOfficeExecutable() == null
-          ? 'LibreOffice not installed'
-          : false,
-      timeout: const Timeout(Duration(seconds: 30)));
+    }, skip: officeSkip, timeout: const Timeout(Duration(seconds: 30)));
+  }
 }

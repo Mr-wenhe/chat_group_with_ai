@@ -1,9 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { loadConfig, requireAuthorized } from './config.ts';
 import { isForbiddenIp, isForbiddenHostname } from './network_security.ts';
-import { GatewayError } from './types.ts';
 
 test('blocks private, metadata, reserved, and local upstream addresses', () => {
   for (const address of [
@@ -18,63 +16,19 @@ test('blocks private, metadata, reserved, and local upstream addresses', () => {
   assert.equal(isForbiddenIp('8.8.8.8'), false);
   assert.equal(isForbiddenIp('2606:4700:4700::1111'), false);
   assert.equal(isForbiddenHostname('service.127.0.0.1.nip.io'), true);
-  assert.equal(isForbiddenHostname('api.search.brave.com'), false);
+  assert.equal(isForbiddenHostname('example.com'), false);
 });
 
-test('production config requires a selected provider key and client token', () => {
-  assert.throws(
-    () => loadConfig({ NODE_ENV: 'production', SEARCH_PROVIDER: 'brave', BRAVE_API_KEY: 'key' }),
-    /GATEWAY_API_TOKENS/,
-  );
-  const config = loadConfig({
-    NODE_ENV: 'production',
-    SEARCH_PROVIDER: 'brave',
-    BRAVE_API_KEY: 'provider-key',
-    GATEWAY_API_TOKENS: 'client-token',
+test('pinned lookup honors Node all-address requests without re-resolving', async () => {
+  const { pinnedLookup } = await import('./network_security.ts');
+  const lookup = pinnedLookup(['8.8.8.8', '1.1.1.1']);
+  lookup('ignored.example', { all: true }, (error, addresses) => {
+    assert.equal(error, null);
+    assert.deepEqual(addresses, [{ address: '8.8.8.8', family: 4 }, { address: '1.1.1.1', family: 4 }]);
   });
-  assert.equal(config.provider, 'brave');
-  assert.deepEqual(config.allowedOrigins, new Set());
-  assert.equal(requireAuthorized('Bearer client-token', config), 'client-token');
-  assert.throws(
-    () => requireAuthorized('Bearer wrong-token', config),
-    (error: unknown) => error instanceof GatewayError && error.code === 'UNAUTHORIZED',
-  );
-});
-
-test('normalizes the configured CORS origin list', () => {
-  const config = loadConfig({
-    NODE_ENV: 'production',
-    SEARCH_PROVIDER: 'brave',
-    BRAVE_API_KEY: 'provider-key',
-    GATEWAY_API_TOKENS: 'client-token',
-    ALLOWED_ORIGINS: 'https://app.example.com/, https://admin.example.com',
+  lookup('ignored.example', {}, (error, address, family) => {
+    assert.equal(error, null);
+    assert.equal(address, '8.8.8.8');
+    assert.equal(family, 4);
   });
-
-  assert.deepEqual(
-    [...config.allowedOrigins],
-    ['https://app.example.com', 'https://admin.example.com'],
-  );
-  assert.throws(
-    () => loadConfig({
-      NODE_ENV: 'production',
-      SEARCH_PROVIDER: 'brave',
-      BRAVE_API_KEY: 'provider-key',
-      GATEWAY_API_TOKENS: 'client-token',
-      ALLOWED_ORIGINS: 'https://app.example.com/path',
-    }),
-    /ALLOWED_ORIGINS/,
-  );
-});
-
-test('rejects integer environment values with trailing characters', () => {
-  assert.throws(
-    () => loadConfig({
-      NODE_ENV: 'production',
-      SEARCH_PROVIDER: 'brave',
-      BRAVE_API_KEY: 'provider-key',
-      GATEWAY_API_TOKENS: 'client-token',
-      RATE_LIMIT_PER_MINUTE: '60garbage',
-    }),
-    /RATE_LIMIT_PER_MINUTE/,
-  );
 });

@@ -18,7 +18,10 @@ enum AgentToolName {
   nativeApp('native.app'),
   skillGithubSearch('skill.github.search'),
   skillGithubImport('skill.github.import'),
-  skillResourceRead('skill.resource.read');
+  skillResourceRead('skill.resource.read'),
+  webSearch('web.search'),
+  webRead('web.read'),
+  webDownload('web.download');
 
   final String wireName;
   const AgentToolName(this.wireName);

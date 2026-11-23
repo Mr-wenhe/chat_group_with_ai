@@ -395,6 +395,8 @@ class BackupPreviewPanel extends StatelessWidget {
           Text('缺失附件：${preview.manifest.missingAttachments.length} 个'),
         if (preview.credentialsToRebind > 0)
           Text('${preview.credentialsToRebind} 个 API 配置需要重新绑定 Key'),
+        if (preview.retiredSearchConfigs > 0)
+          Text('${preview.retiredSearchConfigs} 个已移除的搜索配置将跳过；智谱搜索配置不受影响'),
       ],
     );
   }

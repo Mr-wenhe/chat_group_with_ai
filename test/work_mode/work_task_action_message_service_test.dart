@@ -345,6 +345,62 @@ void main() {
     expect(message.content, contains('打开对应任务'));
   });
 
+  test('approval reminder spells out the pending command', () async {
+    // 每个待审批请求都是独立的 messageId，如果正文完全一样，聊天里就会出现
+    // 一长串看起来相同的「查看审批」（现场 110 条）。正文必须写出要执行什么。
+    final db = DatabaseService();
+    final task = _directApprovalTask()
+      ..pendingToolRequestJson = jsonEncode({
+        'tool': 'command.run',
+        'args': {
+          'executable': 'sed',
+          'workingDirectory': '/Users/fengye/Desktop',
+          'arguments': ['-i', '', '411,\$d', 'life.part1.html'],
+          'declaredImpact': ['/Users/fengye/Desktop/life.part1.html'],
+        },
+      });
+    await db.agentTaskBox.put(task.id, task);
+
+    await WorkTaskActionMessageService(database: db).notify(task);
+
+    final content = db.messageBox.values.single.content;
+    expect(content, contains("待确认：sed -i '' 411,\$d life.part1.html。"));
+    // 命令里已经带了目标文件，不再重复「（目标 …）」。
+    expect(content, isNot(contains('（目标')));
+  });
+
+  test('approval reminder names the target when the command omits it', () async {
+    final db = DatabaseService();
+    final task = _directApprovalTask()
+      ..pendingToolRequestJson = jsonEncode({
+        'tool': 'command.run',
+        'args': {
+          'executable': 'python3',
+          'arguments': ['fix_layout.py'],
+          'declaredImpact': ['/Users/fengye/Desktop/life.part1.html'],
+        },
+      });
+    await db.agentTaskBox.put(task.id, task);
+
+    await WorkTaskActionMessageService(database: db).notify(task);
+
+    final content = db.messageBox.values.single.content;
+    expect(content, contains('待确认：python3 fix_layout.py（目标 life.part1.html）'));
+  });
+
+  test('approval reminder tolerates a pending request without args', () async {
+    // 检查点被裁剪过时不能把正文写成「待确认：command.run」。
+    final db = DatabaseService();
+    final task = _directApprovalTask();
+    await db.agentTaskBox.put(task.id, task);
+
+    await WorkTaskActionMessageService(database: db).notify(task);
+
+    final content = db.messageBox.values.single.content;
+    expect(content, isNot(contains('待确认：command.run')));
+    expect(content, contains('任务准备执行一项需要你确认的命令操作'));
+  });
+
   test('describes a direct-chat reminder without group wording', () async {
     final db = DatabaseService();
     final task = _directApprovalTask();

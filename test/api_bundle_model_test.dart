@@ -233,4 +233,48 @@ void main() {
     expect(bundle.chat.single.provider, 'moonshot');
     expect(bundle.chat.single.apiKey, 'sk-e2e');
   });
+  group('聊天条目的 User-Agent 三态', () {
+    Map<String, dynamic> chatPayload(Map<String, dynamic> entry) =>
+        <String, dynamic>{
+          'v': 1,
+          'chat': [
+            {'provider': 'deepseek', 'apiKey': 'sk-x', ...entry},
+          ],
+        };
+
+    test('字段缺失 → null（旧包沿用目标配置原值）', () {
+      final bundle = ApiBundle.parse(chatPayload(const {}));
+      expect(bundle.chat.single.userAgent, isNull);
+      expect(bundle.issues, isEmpty);
+    });
+
+    test('显式空串 → 保留空串，表示改回客户端默认身份', () {
+      final bundle =
+          ApiBundle.parse(chatPayload(const {'userAgent': '   '}));
+      expect(bundle.chat.single.userAgent, '');
+      expect(bundle.issues, isEmpty);
+    });
+
+    test('非空 → 原值保留', () {
+      final bundle = ApiBundle.parse(
+          chatPayload(const {'userAgent': 'claude-cli/2.0.0 (external, cli)'}));
+      expect(bundle.chat.single.userAgent, 'claude-cli/2.0.0 (external, cli)');
+    });
+
+    test('超长 → 记 issue 且按"字段缺失"处理，不静默改成默认身份', () {
+      final long = 'x' * (ApiBundleLimits.maxUserAgentLength + 1);
+      final bundle = ApiBundle.parse(chatPayload({'userAgent': long}));
+      expect(bundle.chat.length, 1);
+      expect(bundle.chat.single.userAgent, isNull);
+      expect(bundle.issues.single.section, '聊天');
+      expect(bundle.issues.single.reason, contains('userAgent'));
+    });
+
+    test('恰好等于上限仍然接受', () {
+      final exact = 'y' * ApiBundleLimits.maxUserAgentLength;
+      final bundle = ApiBundle.parse(chatPayload({'userAgent': exact}));
+      expect(bundle.chat.single.userAgent, exact);
+      expect(bundle.issues, isEmpty);
+    });
+  });
 }

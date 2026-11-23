@@ -43,6 +43,10 @@ enum MemoryOriginType {
   /// 从旧 CharacterMemory / memorySummary 迁移而来，来源场合不一定精确。
   @HiveField(3)
   legacyMigration,
+
+  /// 从应用内五子棋对局中产生的角色经历。
+  @HiveField(4)
+  game,
 }
 
 /// 永久记忆状态。

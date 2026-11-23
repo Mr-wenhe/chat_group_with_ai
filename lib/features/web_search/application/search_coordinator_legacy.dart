@@ -363,11 +363,16 @@ extension SearchCoordinatorMessageSearchFacade on SearchCoordinator {
       conversationId: conversationId,
       sourceMessageId: localRequest.sourceMessageId,
       turnId: localRequest.turnId,
-      category: _routes.isEmpty ? localRequest.category : plan.category,
-      freshness: _routes.isEmpty ? localRequest.freshness : plan.freshness,
-      locale: plan.language.isEmpty
-          ? fallbackLocale
-          : _localeFor(plan.language, fallbackLocale),
+      // Without a model planner, the local intent detector must not replace
+      // caller-supplied route constraints. Roundtable news explicitly requests
+      // the news category and a one-week freshness window.
+      category: plan.usedPlanner ? plan.category : localRequest.category,
+      freshness: plan.usedPlanner ? plan.freshness : localRequest.freshness,
+      locale: plan.usedPlanner
+          ? (plan.language.isEmpty
+              ? fallbackLocale
+              : _localeFor(plan.language, fallbackLocale))
+          : localRequest.locale,
       country: plan.country.isEmpty ? localRequest.country : plan.country,
       maxResults: localRequest.maxResults,
       safeSearch: localRequest.safeSearch,

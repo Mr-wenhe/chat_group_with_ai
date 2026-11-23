@@ -380,22 +380,4 @@ class SearchProviderConfigStore {
     return SearchProviderConfigBackupCodec.backupValue(raw);
   }
 
-  /// Restored configs are deliberately unbound, even if a backup was
-  /// produced by a development build containing a fallback marker.
-  static List<Map<String, dynamic>> restoreValue(Object? raw) {
-    return SearchProviderConfigBackupCodec.restoreValue(raw);
-  }
-
-  /// Normalizes records already present on the device before a merge restore
-  /// writes the whole list back. Secure credential bindings are retained, but
-  /// release builds never copy a legacy Hive plaintext field.
-  static List<Map<String, dynamic>> normalizeExistingValue(
-    Object? raw, {
-    bool? isRelease,
-  }) {
-    return SearchProviderConfigBackupCodec.normalizeExistingValue(
-      raw,
-      isRelease: isRelease,
-    );
-  }
 }

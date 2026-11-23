@@ -44,7 +44,8 @@ void _registerBackupRestoreServiceTestPart2() {
     });
   });
 
-  test('v2 full backup includes global memory files and only global relations',
+  test(
+      'current full backup includes global memory files and only global relations',
       () async {
     await _seedGlobalMemoryData(db, mediaDirectory);
     final backup = File('${testRoot.path}/global.cgbak');
@@ -54,7 +55,7 @@ void _registerBackupRestoreServiceTestPart2() {
       tempRoot: testRoot,
     ).createBackup(destination: backup);
 
-    expect(result.manifest.schemaVersion, 2);
+    expect(result.manifest.schemaVersion, BackupManifest.currentSchemaVersion);
     expect(result.manifest.backupKind, BackupKind.full);
     expect(result.manifest.includesGlobalData, isTrue);
     expect(

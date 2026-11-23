@@ -22,6 +22,36 @@ void main() {
     isWindows: false,
   );
 
+  test('command approval covers the working directory as well as outputs', () {
+    final result = policy.evaluate(
+      _command(
+          executable: 'python3',
+          arguments: ['script.py'],
+          declaredImpact: ['/workspace/output']),
+      taskId: 'task-scope',
+    );
+    expect(result.changePlan!.knownAffectedDirectories, contains('/workspace'));
+  });
+
+  test('command scope excludes unrelated grants and includes explicit paths',
+      () {
+    final policy = WorkCommandPolicy(
+      authorizedRoots: const ['/workspace', '/other', '/unused'],
+      isWindows: false,
+    );
+    final result = policy.evaluate(
+      _command(
+          executable: 'python3',
+          arguments: ['/other/input.py'],
+          declaredImpact: ['/workspace/output']),
+      taskId: 'task-scope',
+    );
+    expect(result.changePlan!.knownAffectedDirectories,
+        containsAll(['/workspace', '/other/input.py']));
+    expect(result.changePlan!.knownAffectedDirectories,
+        isNot(contains('/unused')));
+  });
+
   test('pwd, git status and rg are read-only and automatic', () {
     for (final command in [
       _command(),
@@ -655,5 +685,118 @@ void main() {
     expect(suggestion.installCommand, isNull);
     expect(suggestion.message, contains('官方文档'));
     expect(suggestion.message, contains('无法安全自动安装'));
+  });
+
+  group('只读检索不再逐条要审批', () {
+    test('grep 正则里的 | 与 < 是文本，不是 shell 管道或重定向', () {
+      for (final command in [
+        _command(
+          executable: 'grep',
+          arguments: ['-nE', '<section|</section>|<footer', 'life.html'],
+          declaredImpact: const ['/workspace/life.html'],
+        ),
+        _command(
+          executable: 'grep',
+          arguments: ['-n', '说声你好\\|保持联系', 'life.html'],
+          declaredImpact: const ['/workspace/life.html'],
+        ),
+      ]) {
+        final result = policy.evaluate(command, taskId: 'task-grep-regex');
+
+        expect(result.allowed, isTrue);
+        expect(result.impact, WorkCommandImpact.readOnly);
+        expect(result.requiresApproval, isFalse);
+        expect(result.changePlan, isNull);
+      }
+    });
+
+    test('sed -n 分页读取是只读，无需审批', () {
+      for (final command in [
+        _command(
+          executable: 'sed',
+          arguments: ['-n', '380,760p', 'life.html'],
+          declaredImpact: const ['/workspace/life.html'],
+        ),
+        _command(
+          executable: 'sed',
+          arguments: ['-n', '-E', '/contact-box/p', 'life.html'],
+          declaredImpact: const ['/workspace/life.html'],
+        ),
+        _command(
+          executable: 'sed',
+          arguments: ['-n', '625,1435p', 'life.html'],
+          declaredImpact: const ['/workspace/life.html'],
+        ),
+      ]) {
+        final result = policy.evaluate(command, taskId: 'task-sed-read');
+
+        expect(result.impact, WorkCommandImpact.readOnly);
+        expect(result.requiresApproval, isFalse);
+      }
+    });
+
+    test('sed 原地编辑与写命令仍走变更路径', () {
+      for (final arguments in [
+        ['-i', 's/a/b/', 'life.html'],
+        ['-i.bak', 's/a/b/', 'life.html'],
+        ['--in-place', 's/a/b/', 'life.html'],
+        ['-n', '1,40w /workspace/out.txt', 'life.html'],
+        ['-f', '/workspace/script.sed', 'life.html'],
+      ]) {
+        final result = policy.evaluate(
+          _command(
+            executable: 'sed',
+            arguments: arguments,
+            declaredImpact: const ['/workspace/life.html'],
+          ),
+          taskId: 'task-sed-write',
+        );
+
+        expect(
+          result.impact,
+          isNot(WorkCommandImpact.readOnly),
+          reason: 'sed $arguments 会写文件',
+        );
+      }
+    });
+
+    test('原地编辑的脚本写到别处时影响范围保持不确定', () {
+      final result = policy.evaluate(
+        _command(
+          executable: 'sed',
+          arguments: ['-i', '/contact/w /workspace/leak.txt', 'life.html'],
+          declaredImpact: const ['/workspace/life.html'],
+        ),
+        taskId: 'task-sed-write-elsewhere',
+      );
+
+      expect(result.impact, WorkCommandImpact.impactUncertain);
+      expect(result.requiresApproval, isTrue);
+      expect(result.requiresSeparateConfirmation, isTrue);
+    });
+
+    test('独立词元的管道与重定向仍按影响范围处理', () {
+      final pipeline = policy.evaluate(
+        _command(
+          executable: 'grep',
+          arguments: ['-n', 'contact', 'life.html', '|', 'head', '-50'],
+          declaredImpact: const ['/workspace/life.html'],
+        ),
+        taskId: 'task-pipeline',
+      );
+      final redirect = policy.evaluate(
+        _command(
+          executable: 'grep',
+          arguments: ['-n', 'contact', 'life.html', '>', 'out.txt'],
+          declaredImpact: const ['/workspace/life.html'],
+        ),
+        taskId: 'task-redirect',
+      );
+
+      expect(pipeline.impact, WorkCommandImpact.impactUncertain);
+      expect(pipeline.requiresApproval, isTrue);
+      expect(redirect.impact, WorkCommandImpact.localMutation);
+      expect(redirect.requiresApproval, isTrue);
+    });
   });
 }

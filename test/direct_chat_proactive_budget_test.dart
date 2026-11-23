@@ -109,6 +109,36 @@ void main() {
     expect(db.aiCharacterBox.get('char-1')!.lastReplyTimestamp, isNotNull);
   });
 
+  test('智谱专用角色的主动私聊不注入免 Key 联网工具', () async {
+    final character = seedCharacter(atHourlyLimit: false)
+      ..zhipuSearchAnswerOnly = true;
+    await db.aiCharacterBox.put(character.id, character);
+    final service = DirectChatProactiveService(
+      db: db,
+      chatApi: chatApi,
+      credentialResolver: FakeApiCredentialResolver(),
+    );
+
+    final result = await service.tryCreateProactiveMessage();
+
+    expect(result?.message.content, '主动私聊内容');
+    expect(chatApi.messageCalls, hasLength(1));
+    final sent = chatApi.messageCalls.single
+        .map((message) => message['content'].toString())
+        .join('\n');
+    for (final toolName in const [
+      'web.search',
+      'web.read',
+      'web.download',
+    ]) {
+      expect(
+        sent,
+        isNot(contains(toolName)),
+        reason: '智谱专用角色的主动回复不能获得 $toolName',
+      );
+    }
+  });
+
   test('主动私聊不应注入角色未加入群聊的用户消息', () async {
     seedCharacter(atHourlyLimit: false);
     await db.chatGroupBox.put(

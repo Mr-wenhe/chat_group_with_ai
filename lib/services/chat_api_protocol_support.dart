@@ -3,6 +3,7 @@ part of 'chat_api_service.dart';
 /// Protocol-specific request/response helpers kept outside the transport
 /// class so the legacy OpenAI-compatible path stays small and easy to audit.
 extension _ChatApiServiceProtocolSupport on ChatApiService {
+  static const _step5ShortReplyTokenBudget = 1024;
   String _requestPath(String url) => Uri.tryParse(url)?.path ?? url;
 
   /// 本次请求实际生效的服务地址：**配置里存了地址就用它**，没存才用提供商的
@@ -31,16 +32,22 @@ extension _ChatApiServiceProtocolSupport on ChatApiService {
     return ApiProvider.defaultModels[provider.name] ?? '';
   }
 
-  String? _safeProviderErrorDetail(Object? responseData) {
+  String? _safeProviderErrorDetail(Object? responseData, {String? apiKey}) {
+    String? scrub(Object? value) {
+      final text = value?.toString().trim();
+      return text != null && apiKey != null && apiKey.isNotEmpty
+          ? text.replaceAll(apiKey, '[REDACTED]')
+          : text;
+    }
+
     final responseMap =
         responseData is Map ? Map<String, dynamic>.from(responseData) : null;
     final errorValue = responseMap?['error'];
     final errorMap =
         errorValue is Map ? Map<String, dynamic>.from(errorValue) : null;
-    final message =
-        (errorMap?['message'] ?? responseMap?['message'])?.toString().trim();
-    final type = errorMap?['type']?.toString().trim();
-    final code = errorMap?['code']?.toString().trim();
+    final message = scrub(errorMap?['message'] ?? responseMap?['message']);
+    final type = scrub(errorMap?['type']);
+    final code = scrub(errorMap?['code']);
     if ((message == null || message.isEmpty) &&
         (type == null || type.isEmpty) &&
         (code == null || code.isEmpty)) {
@@ -87,11 +94,23 @@ extension _ChatApiServiceProtocolSupport on ChatApiService {
     };
   }
 
+  /// 组装请求头。
+  ///
+  /// [userAgent] 是**本次请求所属配置**的 `User-Agent` 覆盖值（`ApiConfig.userAgent`），
+  /// 由调用方逐层透传：表单里还没保存的值同样走这个参数。空串与 `null` 都表示
+  /// 「不发送 User-Agent 覆盖、用客户端默认」——空串必须是显式的「不用覆盖」，
+  /// 不能回落到别的配置，否则用户清空字段后点测试，测的就不是他眼前的值。
+  ///
+  /// 刻意**不**按 Base URL 反查配置：同一中转地址可以有多条配置（多模型、多身份），
+  /// 按地址查只能命中配置箱里排在前面的那条，于是 B 配置填了白名单 UA 而 A 配置
+  /// 为空时，B 的普通聊天仍带着默认 UA 发出去，表现为「测试连接成功、实际请求 401」。
   Map<String, String> _requestHeaders({
     required String apiKey,
     required ApiProtocol apiProtocol,
+    String? customBaseUrl,
+    String? userAgent,
   }) {
-    return switch (apiProtocol) {
+    final headers = switch (apiProtocol) {
       ApiProtocol.anthropicMessages => <String, String>{
           'Content-Type': 'application/json',
           'x-api-key': apiKey,
@@ -108,6 +127,11 @@ extension _ChatApiServiceProtocolSupport on ChatApiService {
           'Authorization': 'Bearer $apiKey',
         },
     };
+    final override = userAgent?.trim() ?? '';
+    if (override.isNotEmpty) {
+      headers['User-Agent'] = override;
+    }
+    return headers;
   }
 
   Map<String, dynamic> _requestBody({
@@ -118,15 +142,27 @@ extension _ChatApiServiceProtocolSupport on ChatApiService {
     required int maxTokens,
     required bool streaming,
     bool structuredJson = false,
+    bool useDefaultTemperature = false,
     bool stepPlanLowReasoning = false,
     String? reasoningEffort,
     String? promptCacheKey,
   }) {
-    final step5Effort = model.trim().toLowerCase() == 'step-5-preview' &&
-            const {'low', 'medium', 'high'}.contains(reasoningEffort)
-        ? reasoningEffort
+    // Default reasoning can exhaust a short reply budget before producing a tool request or answer.
+    final shortReplyEffort = apiProtocol == ApiProtocol.openAiChatCompletions &&
+            maxTokens > 0 &&
+            maxTokens <= _step5ShortReplyTokenBudget
+        ? 'low'
         : null;
-    return switch (apiProtocol) {
+    // 显式声明的推理档位对**任何**模型都生效（失败重试时用它降档，避免推理把
+    // 输出预算吃光、正文为空）；step-5-preview 没显式声明时沿用短回复自动降档。
+    final requestedEffort =
+        const {'low', 'medium', 'high'}.contains(reasoningEffort)
+            ? reasoningEffort
+            : null;
+    final effort = model.trim().toLowerCase() == 'step-5-preview'
+        ? (requestedEffort ?? shortReplyEffort)
+        : requestedEffort;
+    final data = switch (apiProtocol) {
       ApiProtocol.anthropicMessages => _anthropicRequestBody(
           model: model,
           messages: messages,
@@ -134,14 +170,14 @@ extension _ChatApiServiceProtocolSupport on ChatApiService {
           maxTokens: maxTokens,
           streaming: streaming,
           promptCacheKey: promptCacheKey,
-          reasoningEffort: step5Effort,
+          reasoningEffort: effort,
         ),
       ApiProtocol.openAiChatCompletions => <String, dynamic>{
           'model': model,
           'messages': messages,
           if (promptCacheKey != null) 'prompt_cache_key': promptCacheKey,
           'temperature': temperature,
-          if (step5Effort != null) 'reasoning_effort': step5Effort,
+          if (effort != null) 'reasoning_effort': effort,
           if (maxTokens > 0) 'max_tokens': maxTokens,
           if (streaming) 'stream': true,
           if (streaming) 'stream_options': {'include_usage': true},
@@ -161,6 +197,8 @@ extension _ChatApiServiceProtocolSupport on ChatApiService {
           if (promptCacheKey != null) 'prompt_cache_key': promptCacheKey,
           'temperature': temperature,
           if (maxTokens > 0) 'max_output_tokens': maxTokens,
+          // Responses 协议里推理档位是嵌套对象；只在明确要求降档时发送。
+          if (effort != null) 'reasoning': {'effort': effort},
           'stream': streaming,
         },
       ApiProtocol.geminiGenerateContent => _geminiRequestBody(
@@ -170,6 +208,14 @@ extension _ChatApiServiceProtocolSupport on ChatApiService {
           maxTokens: maxTokens,
         ),
     };
+    if (useDefaultTemperature) {
+      if (apiProtocol == ApiProtocol.geminiGenerateContent) {
+        (data['generationConfig'] as Map).remove('temperature');
+      } else {
+        data.remove('temperature');
+      }
+    }
+    return data;
   }
 
   bool _isStepPlanEndpoint({

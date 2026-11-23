@@ -131,7 +131,8 @@ void _registerDiscussionHistoryRegressions() {
     'same-content',
     'baseline-unchanged',
     'changed',
-    'tool-write'
+    'tool-write',
+    'tool-rename'
   ]) {
     test('群制作完成必须有本工作项交付文件变更：$scenario', () async {
       if (scenario == 'changed') db = _ReviewFixtureDatabase(dir);
@@ -181,7 +182,8 @@ void _registerDiscussionHistoryRegressions() {
       root['artifactChanges'] = {
         output.path: {'changed': true}
       };
-      if (scenario != 'read-only' && scenario != 'tool-write') {
+      if (scenario != 'read-only' &&
+          !{'tool-write', 'tool-rename'}.contains(scenario)) {
         root['productionChanges'] = {
           'binding': {
             ...root['workItemExecution'] as Map,
@@ -208,6 +210,14 @@ void _registerDiscussionHistoryRegressions() {
           publicUpdate: '已完成优化。',
           completion: AgentFinishCompletion(
               summary: '已完成优化。', evidence: [output.path])).toJson());
+      final downloaded = File('$workspace/downloaded.html');
+      if (scenario == 'tool-rename') await output.rename(downloaded.path);
+      final rename = jsonEncode(AgentToolDecision(
+          publicUpdate: '原样移动已下载的文件。',
+          tool: AgentToolCall(name: AgentToolName.workspaceRename, arguments: {
+            'path': downloaded.path,
+            'destinationPath': output.path,
+          })).toJson());
       final patch = jsonEncode(AgentToolDecision(
           publicUpdate: '实际修订目标文件。',
           tool: AgentToolCall(name: AgentToolName.workspacePatch, arguments: {
@@ -215,7 +225,7 @@ void _registerDiscussionHistoryRegressions() {
             'content': '<html><body>工具真实修改</body></html>',
             'overwrite': true,
           })).toJson());
-      if (scenario == 'tool-write') {
+      if ({'tool-write', 'tool-rename'}.contains(scenario)) {
         task.requestedPermissions = [
           ToolPermission.workspaceRead,
           ToolPermission.workspacePatch
@@ -227,8 +237,14 @@ void _registerDiscussionHistoryRegressions() {
         ];
         await db.aiCharacterBox.put(actor.id, actor);
       }
-      final client = _MaterialFinishClient(
-          [scenario == 'tool-write' ? patch : finish, finish]);
+      final client = _MaterialFinishClient([
+        scenario == 'tool-rename'
+            ? rename
+            : scenario == 'tool-write'
+                ? patch
+                : finish,
+        finish
+      ]);
       final runner = DefaultWorkTaskRunner(
           database: db,
           eventStore: events,
@@ -238,7 +254,7 @@ void _registerDiscussionHistoryRegressions() {
           workspaceService: execution.workspaceService,
           folderGrantService: execution.folderGrantService,
           workspaceFileService: execution.workspaceFileService,
-          mutationService: scenario == 'tool-write'
+          mutationService: {'tool-write', 'tool-rename'}.contains(scenario)
               ? WorkspaceMutationService(
                   pathPolicy: execution.workspaceFileService!.pathPolicy,
                   snapshotPort: WorkSnapshotService(
@@ -246,7 +262,7 @@ void _registerDiscussionHistoryRegressions() {
                       pathPolicy: execution.workspaceFileService!.pathPolicy))
               : execution.mutationService);
       await runner.run(task, WorkTaskCancellation());
-      if (scenario == 'tool-write') {
+      if ({'tool-write', 'tool-rename'}.contains(scenario)) {
         expect(task.status, AgentTaskStatus.waitingForApproval);
         final checkpoint = jsonDecode(task.executionStateJson) as Map;
         task.executionStateJson =
@@ -258,9 +274,11 @@ void _registerDiscussionHistoryRegressions() {
           WorkDiscussionState.fromExecutionState(task.executionStateJson)!
               .collaboration!;
       expect(state.workItems.first['status'],
-          {'changed', 'tool-write'}.contains(scenario) ? 'done' : 'active',
+          {'changed', 'tool-write', 'tool-rename'}.contains(scenario)
+              ? 'done'
+              : 'active',
           reason: task.lastError);
-      if (!{'changed', 'tool-write'}.contains(scenario)) {
+      if (!{'changed', 'tool-write', 'tool-rename'}.contains(scenario)) {
         expect(task.lastError, contains('本轮制作没有可核验的交付文件变更'));
         expect(state.iterations, isEmpty);
       }
@@ -269,6 +287,10 @@ void _registerDiscussionHistoryRegressions() {
           scenario == 'tool-write'
               ? '<html><body>工具真实修改</body></html>'
               : '<html><body>实际内容</body></html>');
+      if (scenario == 'tool-rename') {
+        expect(await downloaded.exists(), isFalse);
+        expect(sha256.convert(await output.readAsBytes()).toString(), digest);
+      }
       if (scenario == 'changed') {
         expect(await runner.prepareCollaborationWork(task), isTrue,
             reason: task.lastError);
@@ -1126,7 +1148,10 @@ void _registerDiscussionHistoryRegressions() {
     expect((cue['relationship'] as Map)['effectiveMood'], 'warm');
     expect(qaContext!['responsibility'], containsPair('memberId', 'qa'));
     final capabilities = qaContext!['capabilities'] as Map;
-    expect(qaContext!['effectiveTools'], ['workspaceRead']);
+    expect(qaContext!['effectiveTools'], [
+      'workspaceRead',
+      if (Platform.isMacOS || Platform.isWindows) ...['web.search', 'web.read'],
+    ]);
     expect(capabilities['registeredInvestigationAdapter'], isTrue);
     expect(capabilities['modelCapabilityKnown'], isA<bool>());
     expect(capabilities['supportsVision'], isA<bool>());
@@ -1287,6 +1312,9 @@ void _registerDiscussionHistoryRegressions() {
     // 放宽的只有材料要求：文件清单与验证命令一项不能少。
     expect(single, contains('artifactContract.files'));
     expect(single, contains('verificationCommands'));
+    expect(single, contains('软件交付必须提供 verificationCommands'));
+    expect(single, contains('非软件的原文件下载交付不要求 verificationCommands'));
+    expect(single, contains('用户禁止命令时不得规划或运行命令'));
 
     final multi = WorkDiscussionV2Turn.protocolFor('生成一份 飞行棋游戏的HTML 和一份说明文档',
         stage: WorkDiscussionStage.prepareProposal);

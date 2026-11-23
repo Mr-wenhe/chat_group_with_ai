@@ -66,6 +66,12 @@ class ScriptedChatApi extends ChatApiService {
   /// 最近一次选人请求的取消令牌，用来确认打断真的取消了它。
   CancelToken? pickerCancelToken;
 
+  /// 最近一次回复请求的取消令牌。
+  ///
+  /// 真后台/离开会话必须 abort 传输层，而不是只停本地订阅：dio 卡在等字节时
+  /// 取消订阅打断不了那个 await，只有 CancelToken 能让它断开。
+  CancelToken? replyCancelToken;
+
   /// 让下一次选人一直悬着，从外部控制它何时完成。
   Completer<Map<String, dynamic>> holdNextPicker() {
     final pending = Completer<Map<String, dynamic>>();
@@ -79,6 +85,7 @@ class ScriptedChatApi extends ChatApiService {
     required ApiProvider provider,
     ApiProtocol apiProtocol = ApiProtocol.defaultValue,
     String? customBaseUrl,
+    String? userAgent,
     required String model,
     required List<Map<String, dynamic>> messages,
     double temperature = 0.85,
@@ -106,6 +113,7 @@ class ScriptedChatApi extends ChatApiService {
 
   @override
   Stream<ChatStreamEvent> streamChatMessage({
+    String? userAgent,
     required String apiKey,
     required ApiProvider provider,
     ApiProtocol apiProtocol = ApiProtocol.defaultValue,
@@ -122,6 +130,7 @@ class ScriptedChatApi extends ChatApiService {
     String? promptCacheKey,
   }) async* {
     replyCalls.add(messages);
+    replyCancelToken = cancelToken;
     if (holdReplies) {
       final pending = Completer<void>();
       _heldReply = pending;

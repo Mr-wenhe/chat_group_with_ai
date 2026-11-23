@@ -62,6 +62,7 @@ class _PlannerClient extends ChatApiService {
     required ApiProvider provider,
     ApiProtocol apiProtocol = ApiProtocol.defaultValue,
     String? customBaseUrl,
+    String? userAgent,
     required String model,
     required List<Map<String, dynamic>> messages,
     double? temperature,
@@ -108,6 +109,7 @@ class _PlannerClient extends ChatApiService {
     required ApiProvider provider,
     ApiProtocol apiProtocol = ApiProtocol.defaultValue,
     String? customBaseUrl,
+    String? userAgent,
     required String model,
     required List<Map<String, dynamic>> messages,
     double? temperature,
@@ -140,6 +142,7 @@ class _PlannerClient extends ChatApiService {
 
   @override
   Stream<ChatStreamEvent> streamChatMessage({
+    String? userAgent,
     required String apiKey,
     required ApiProvider provider,
     ApiProtocol apiProtocol = ApiProtocol.defaultValue,
@@ -162,16 +165,18 @@ class _PlannerClient extends ChatApiService {
 class _SequenceProvider implements SearchProvider {
   final List<SearchProviderResponse> responses;
   final Duration delay;
+  final SearchProviderKind providerKind;
   final List<SearchRequest> requests = [];
   int searchCount = 0;
 
   _SequenceProvider(
     Iterable<SearchProviderResponse> responses, {
     this.delay = Duration.zero,
+    this.providerKind = SearchProviderKind.brave,
   }) : responses = List<SearchProviderResponse>.from(responses);
 
   @override
-  SearchProviderKind get kind => SearchProviderKind.brave;
+  SearchProviderKind get kind => providerKind;
 
   @override
   Future<SearchProviderResponse> search(

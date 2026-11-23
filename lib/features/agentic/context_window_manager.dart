@@ -54,6 +54,58 @@ class ContextSummary {
 
 /// 在上下文达到阈值时提炼核心内容，并沉淀为跨会话角色记忆。
 class ContextWindowManager {
+  /// 群聊等场合的默认短回复上限。
+  static const shortReplyMaxOutput = 1024;
+
+  /// 私聊回复的输出上限。
+  ///
+  /// 私聊是双人对话，且推理型模型在 1024 下会把整份预算花在思考上、正文为空
+  /// （现场：`completionTokens=1024`、`reasoningTokens=1024`、正文 0 字）。
+  /// **只有私聊**放宽到 4096；群聊维持 [shortReplyMaxOutput]，避免改变多人房间
+  /// 里每条发言的长度与成本。
+  static const directChatReplyOutputCeiling = 4096;
+
+  /// SenseNova 6.8 Flash Lite 普通私聊专用上限。
+  ///
+  /// 该模型会把输出预算用于推理；普通私聊遇到 4096 全部消耗为 reasoning 时，
+  /// 8192 可给最终正文留下空间。模型能力表已声明 8192，群聊和工作任务不走此例外。
+  static const senseNovaFlashLiteDirectChatReplyOutputCeiling = 8192;
+
+  /// 放宽私聊输出上限所需的最小窗口。
+  ///
+  /// 窗口只有 8k 时，4096 的输出会把输入压到 3.8k，人设 + 共同设定 + 最近 20 条
+  /// 很容易放不下，反而从"能回"变成"设定放不下"。所以小窗口模型保持原来的
+  /// 1024 上限——放宽只对真的装得下的模型生效。
+  static const int directChatReplyMinWindowTokens = 16384;
+
+  /// Complete link lists need room without reserving an unbounded model output.
+  static const sourceLinkMaxOutput = 4096;
+
+  static int replyOutputBudget(
+      {required int contextWindow,
+      required int maxOutput,
+      bool completeSourceLinks = false,
+      bool isDirectChat = false,
+      String? modelName,
+      int replyCeiling = shortReplyMaxOutput}) {
+    final useSenseNovaDirectChatCeiling = isDirectChat &&
+        modelName?.trim().toLowerCase() == 'sensenova-6.8-flash-lite';
+    final effectiveReplyCeiling = useSenseNovaDirectChatCeiling
+        ? senseNovaFlashLiteDirectChatReplyOutputCeiling
+        : replyCeiling;
+    final effectiveSourceLinkCeiling = useSenseNovaDirectChatCeiling
+        ? senseNovaFlashLiteDirectChatReplyOutputCeiling
+        : sourceLinkMaxOutput;
+    final effectiveCeiling = effectiveReplyCeiling > shortReplyMaxOutput &&
+            contextWindow < directChatReplyMinWindowTokens
+        ? shortReplyMaxOutput
+        : effectiveReplyCeiling;
+    final limit = completeSourceLinks
+        ? math.min(effectiveSourceLinkCeiling, math.max(1, contextWindow ~/ 2))
+        : math.min(effectiveCeiling, math.max(1, contextWindow ~/ 2));
+    return maxOutput.clamp(1, limit).toInt();
+  }
+
   /// Computes the input portion of a model window after reserving output and
   /// a small framing margin. The result is always within the model window,
   /// including for deliberately tiny custom capabilities.

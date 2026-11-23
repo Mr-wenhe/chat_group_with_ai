@@ -38,6 +38,22 @@ void main() {
     expect(isDuplicateAiReply('我不赞成，风险太高。', recent), isFalse);
   });
 
+  test('keeps a new download even when its confirmation text repeats', () {
+    final recent = [
+      Message(
+        groupId: 'g',
+        senderId: 'a',
+        senderType: 'ai',
+        content: '下载完成。',
+      ),
+    ];
+    expect(isDuplicateAiReply('下载完成。', recent), isTrue);
+    expect(
+      isDuplicateAiReply('下载完成。', recent, hasAttachments: true),
+      isFalse,
+    );
+  });
+
   test('does not compare against user messages', () {
     final recent = [
       Message(

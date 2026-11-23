@@ -9,17 +9,7 @@ import {
 import { GatewayError } from './types.ts';
 import type { GatewayConfig } from './types.ts';
 
-const config: GatewayConfig = {
-  port: 0,
-  provider: 'brave',
-  providerApiKey: 'server-key',
-  apiTokens: new Set(['client-token']),
-  allowedOrigins: new Set(),
-  allowUnauthenticatedDevelopment: false,
-  requestTimeoutMs: 1000,
-  rateLimitPerMinute: 60,
-  quotaPerDay: 1000,
-};
+const config: GatewayConfig = { requestTimeoutMs: 1000 };
 const commit = '0123456789abcdef0123456789abcdef01234567';
 const skill = '---\nname: Demo\ndescription: Demo skill\nallowed-tools: Bash\n---\nRead [guide](references/guide.md).';
 const script = '#!/bin/sh\necho checked\n';

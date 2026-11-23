@@ -10,6 +10,61 @@ import 'package:dio/dio.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test('invalid or oversized HTTP error bodies preserve the classified failure',
+      () async {
+    for (final body in [
+      'not json',
+      jsonEncode({
+        'error': {'message': 'x' * (17 * 1024)}
+      })
+    ]) {
+      final dio = Dio()
+        ..interceptors.add(InterceptorsWrapper(onRequest: (request, handler) {
+          handler.resolve(Response<ResponseBody>(
+              requestOptions: request,
+              statusCode: 429,
+              data: ResponseBody.fromString(body, 429)));
+        }));
+      final events = await ChatApiService(dio: dio).streamChatMessage(
+          apiKey: 'test-key',
+          provider: ApiProvider.custom,
+          customBaseUrl: 'https://example.test/v1',
+          model: 'step-5-preview',
+          messages: const []).toList();
+      expect(events.single.message, 'HTTP 429 请求失败');
+      expect(events.single.failureDetail, isNull);
+      dio.close();
+    }
+  });
+  test('streamed HTTP failures retain bounded redacted provider diagnostics',
+      () async {
+    final secret = 'private-test-value-' * 20;
+    final dio = Dio()
+      ..interceptors.add(InterceptorsWrapper(onRequest: (request, handler) {
+        handler.resolve(Response<ResponseBody>(
+            requestOptions: request,
+            statusCode: 429,
+            data: ResponseBody.fromString(
+                jsonEncode({
+                  'error': {
+                    'message': 'Too many concurrent requests for $secret'
+                  }
+                }),
+                429)));
+      }));
+    final events = await ChatApiService(dio: dio).streamChatMessage(
+        apiKey: secret,
+        provider: ApiProvider.custom,
+        customBaseUrl: 'https://example.test/v1',
+        model: 'step-5-preview',
+        messages: const []).toList();
+    expect(events.single.message, 'HTTP 429 请求失败');
+    expect(
+        events.single.failureDetail, contains('Too many concurrent requests'));
+    expect(
+        events.single.failureDetail, isNot(contains(secret.substring(0, 40))));
+    dio.close();
+  });
   for (final structured in [false, true]) {
     test('group collected stream completes before EOF structured=$structured',
         () async {
@@ -102,6 +157,42 @@ void main() {
       3,
     );
     expect(events.last.type, ChatStreamEventType.done);
+  });
+
+  test('SenseNova 8192 output budget is sent as max_tokens without clamping',
+      () async {
+    late RequestOptions captured;
+    final dio = Dio();
+    dio.interceptors.add(InterceptorsWrapper(
+      onRequest: (options, handler) {
+        captured = options;
+        final sse = [
+          'data: {"choices":[{"delta":{"content":"正文"},"finish_reason":"stop"}]}\n\n',
+          'data: [DONE]\n\n',
+        ].map((line) => Uint8List.fromList(utf8.encode(line)));
+        handler.resolve(Response<ResponseBody>(
+          requestOptions: options,
+          statusCode: 200,
+          data: ResponseBody(Stream<Uint8List>.fromIterable(sse), 200),
+        ));
+      },
+    ));
+
+    final result = await ChatApiService(dio: dio).sendChatMessageStreamed(
+      apiKey: 'test-key',
+      provider: ApiProvider.sensenova,
+      model: 'sensenova-6.8-flash-lite',
+      messages: const [
+        {'role': 'user', 'content': '请检索并回答'}
+      ],
+      maxTokens: 8192,
+      maxRetries: 0,
+    );
+
+    expect(result['success'], isTrue);
+    expect(result['message'], '正文');
+    expect((captured.data as Map<String, dynamic>)['max_tokens'], 8192);
+    dio.close();
   });
 
   test('structured streamed completion enables JSON mode for OpenAI protocol',
@@ -879,6 +970,7 @@ class _ThrowingStreamChatApiService extends ChatApiService {
 
   @override
   Stream<ChatStreamEvent> streamChatMessage({
+    String? userAgent,
     required String apiKey,
     required ApiProvider provider,
     ApiProtocol apiProtocol = ApiProtocol.defaultValue,
@@ -906,6 +998,7 @@ class _AlwaysFailingStreamService extends ChatApiService {
 
   @override
   Stream<ChatStreamEvent> streamChatMessage({
+    String? userAgent,
     required String apiKey,
     required ApiProvider provider,
     ApiProtocol apiProtocol = ApiProtocol.defaultValue,
@@ -934,6 +1027,7 @@ class _StatusStreamChatApiService extends ChatApiService {
 
   @override
   Stream<ChatStreamEvent> streamChatMessage({
+    String? userAgent,
     required String apiKey,
     required ApiProvider provider,
     ApiProtocol apiProtocol = ApiProtocol.defaultValue,

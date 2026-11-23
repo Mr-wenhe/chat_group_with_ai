@@ -263,7 +263,45 @@ void main() {
     dio.close();
   });
 
-  test('Step 5 群讨论显式选择低推理档，默认调用和其它模型不改变', () async {
+  test(
+      'Step 5 short replies reserve room for content without overriding explicit effort',
+      () async {
+    for (final model in ['step-5-preview', 'other-model']) {
+      for (final maxTokens in [0, 1024, 2048]) {
+        for (final effort in <String?>[null, 'high']) {
+          late Map body;
+          final dio = Dio()
+            ..interceptors
+                .add(InterceptorsWrapper(onRequest: (options, handler) {
+              body = options.data as Map;
+              handler.resolve(Response<ResponseBody>(
+                  requestOptions: options,
+                  statusCode: 200,
+                  data: ResponseBody.fromString(
+                      'data: {"choices":[{"delta":{"content":"OK"}}]}\n\ndata: [DONE]\n\n',
+                      200)));
+            }));
+          await ChatApiService(dio: dio)
+              .streamChatMessage(
+                  apiKey: 'test-key',
+                  provider: ApiProvider.custom,
+                  customBaseUrl: 'https://example.test/v1',
+                  model: model,
+                  messages: const [],
+                  maxTokens: maxTokens,
+                  reasoningEffort: effort)
+              .toList();
+          // 显式档位对任何模型都生效；step-5 的短回复自动降档只属于它自己。
+          final expected =
+              effort ?? (model == 'step-5-preview' && maxTokens == 1024 ? 'low' : null);
+          expect(body['reasoning_effort'], expected);
+          dio.close();
+        }
+      }
+    }
+  });
+
+  test('显式推理档对任何模型生效，默认调用不带档位', () async {
     for (final model in ['step-5-preview', 'other-model']) {
       for (final effort in <String?>[null, 'low']) {
         late Map body;
@@ -292,8 +330,8 @@ void main() {
         expect(activity, 2);
         expect(events.last.content, 'OK');
         expect(events.any((e) => (e.delta ?? '').contains('PRIVATE')), isFalse);
-        expect(body['reasoning_effort'],
-            model == 'step-5-preview' ? effort : null);
+        // 显式档位对任何模型都生效（失败重试靠它降档），默认调用仍然不带。
+        expect(body['reasoning_effort'], effort);
         expect(body.containsKey('max_tokens'), isFalse);
         dio.close();
       }
@@ -347,7 +385,11 @@ void main() {
                   maxResponseBytes: 4096,
                   maxRetries: 0);
           expect(result['success'], isTrue);
-          final expected = model == 'step-5-preview' ? effort : null;
+          final expected = effort ??
+              (model == 'step-5-preview' &&
+                      protocol == ApiProtocol.openAiChatCompletions
+                  ? 'low'
+                  : null);
           final outputConfig = body['output_config'];
           expect(
               protocol == ApiProtocol.anthropicMessages
@@ -816,8 +858,7 @@ void main() {
     addTearDown(dio.close);
     final gateway = AiRequestGateway(
         store: MemoryGovernanceStore(), client: ChatApiService(dio: dio));
-    Future<Map<String, dynamic>> send(String system) =>
-        gateway.sendChatMessage(
+    Future<Map<String, dynamic>> send(String system) => gateway.sendChatMessage(
           apiKey: 'test-key',
           provider: ApiProvider.custom,
           apiProtocol: ApiProtocol.anthropicMessages,
@@ -839,8 +880,8 @@ void main() {
     final leadingDynamic = bodies.last['system'] as List;
     expect(leadingDynamic, isNotEmpty);
     expect(
-      leadingDynamic.any(
-          (block) => (block as Map).containsKey('cache_control')),
+      leadingDynamic
+          .any((block) => (block as Map).containsKey('cache_control')),
       isFalse,
       reason: '没有稳定前缀时不应带 cache_control',
     );

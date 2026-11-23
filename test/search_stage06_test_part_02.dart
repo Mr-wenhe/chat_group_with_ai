@@ -275,6 +275,57 @@ void _registerSearchStage06TestPart2() {
       ]);
     });
 
+    test('Zhipu native search makes one focused fallback and stays on Zhipu',
+        () async {
+      final store = MemoryGovernanceStore(
+        globalSearchPolicy: WebSearchPolicy.auto,
+      );
+      final provider = _SequenceProvider(
+        [_noResultsResponse(), _noResultsResponse(), _successResponse()],
+        providerKind: SearchProviderKind.nativeModel,
+      );
+      final coordinator = SearchCoordinator(
+        store: store,
+        routes: [
+          SearchProviderRoute(
+            provider: provider,
+            id: 'zhipu-native',
+            isNative: true,
+            displayName: '智谱 GLM-4.7',
+          ),
+        ],
+      );
+
+      final result = await coordinator.searchIfAllowed(
+        text: '搜索 Flutter 稳定版发布信息',
+        conversationId: 'roundtable-news',
+        requestConsent: (_) async => true,
+        category: SearchCategory.news,
+        freshness: SearchFreshness.week,
+        forceSearch: true,
+      );
+
+      expect(coordinator.providerRoutes.map((route) => route.id),
+          ['zhipu-native']);
+      expect(provider.searchCount, 2);
+      expect(
+        provider.requests.map((request) => request.query),
+        ['搜索 Flutter 稳定版发布信息', 'Flutter 稳定版发布信息'],
+      );
+      expect(provider.requests.last.forceRefresh, isTrue);
+      expect(
+        provider.requests.map((request) => request.category),
+        everyElement(SearchCategory.news),
+      );
+      expect(
+        provider.requests.map((request) => request.freshness),
+        everyElement(SearchFreshness.week),
+      );
+      expect(result?.hasNoResults, isTrue);
+      expect(
+          result?.executedQueries, ['搜索 Flutter 稳定版发布信息', 'Flutter 稳定版发布信息']);
+    });
+
     test('ask re-confirms the exact fallback query', () async {
       final store = MemoryGovernanceStore(
         globalSearchPolicy: WebSearchPolicy.ask,
@@ -368,14 +419,34 @@ void _registerSearchStage06TestPart2() {
       final context = formatter.formatNumberedContext(snapshot);
       final messages = formatter.formatMessages(snapshot);
 
+      expect(context, contains('本轮检索时间（UTC）：2026-09-14T08:00:00.000Z'));
       expect(context, contains('[S1] 标题: 白银现货价格'));
       expect(context, contains('来源: example.com'));
-      expect(context, contains('发布时间: 2026-09-14'));
+      expect(context, contains('发布时间（UTC）: 2026-09-14'));
       expect(context, contains('链接: https://example.com/silver'));
       expect(context, contains('内容: 白银价格随市场交易实时波动。'));
       expect(messages.first['content'], contains('仅依据【搜索结果】'));
+      expect(messages.first['content'], contains('分别标注两者及其时区'));
       expect(messages.last['content'], contains('ZHIPU_WEB_SEARCH_RESULTS_BEGIN'));
       expect(messages.last['content'], contains(context));
+    });
+
+    test(
+        'Zhipu attribution cleanup preserves punctuation without replacement markers',
+        () {
+      const formatter = SearchContextFormatter();
+      for (final answer in [
+        '结论 [S1] ，以上内容来自智谱搜索结果。',
+        '结论 [S1]。。以上内容来自智谱搜索结果。',
+      ]) {
+        final sanitized = formatter.sanitizeCitationsWithSourceIds(
+          answer,
+          const ['S1'],
+          hideCitations: true,
+        );
+        expect(sanitized, '结论。');
+        expect(sanitized, isNot(contains(r'$1')));
+      }
     });
 
     test('keeps JSON valid, source IDs ordered, and evidence within budget',

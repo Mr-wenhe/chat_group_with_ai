@@ -1,17 +1,10 @@
+import 'dart:async';
+import 'dart:convert';
+import 'dart:typed_data';
 import 'package:chat_group/core/database/database_service.dart';
-import 'package:chat_group/features/web_search/application/search_provider_route.dart';
-import 'package:chat_group/features/web_search/application/search_runtime_provider_factory.dart';
-import 'package:chat_group/features/web_search/data/search_credential_resolver.dart';
-import 'package:chat_group/features/web_search/data/search_settings_store.dart';
-import 'package:chat_group/features/web_search/models/search_models.dart';
-import 'package:chat_group/features/web_search/models/search_provider_config.dart';
-import 'package:chat_group/features/web_search/providers/search_provider.dart';
-import 'package:chat_group/features/web_search/providers/search_provider_http_support.dart';
-import 'package:chat_group/features/web_search/security/search_endpoint_dns_guard.dart';
+import 'package:chat_group/features/web_search/desktop/desktop_web_service.dart';
+import 'package:chat_group/features/web_search/desktop/web_worker_client.dart';
 import 'package:dio/dio.dart';
-import 'package:flutter/foundation.dart';
-import 'package:uuid/uuid.dart';
-
 import 'skill_resource_pack.dart';
 
 const String githubSkillImportPath = '/v1/github/skills/import';
@@ -28,15 +21,34 @@ class GitHubSkillServiceException implements Exception {
 
 class GitHubSkillService {
   final DatabaseService database;
-  final SearchProviderConfigStore settings;
-  final Dio Function() dioFactory;
+  final WebWorkerClient Function() workerFactory;
 
-  GitHubSkillService({
-    required this.database,
-    SearchProviderConfigStore? settings,
-    Dio Function()? dioFactory,
-  })  : settings = settings ?? SearchProviderConfigStore(db: database),
-        dioFactory = dioFactory ?? _defaultDio;
+  GitHubSkillService(
+      {required this.database, WebWorkerClient Function()? workerFactory})
+      : workerFactory = workerFactory ?? WebWorkerClient.bundled;
+
+  Future<T> _usingWorker<T>(CancelToken? cancelToken,
+      Future<T> Function(WebWorkerClient worker) operation) async {
+    if (cancelToken?.isCancelled == true) throw cancelToken!.cancelError!;
+    final worker = workerFactory();
+    var finished = false;
+    if (cancelToken != null) {
+      unawaited(cancelToken.whenCancel.then((_) {
+        if (!finished) worker.close();
+      }));
+    }
+    try {
+      final value = await operation(worker);
+      if (cancelToken?.isCancelled == true) throw cancelToken!.cancelError!;
+      return value;
+    } on Object {
+      if (cancelToken?.isCancelled == true) throw cancelToken!.cancelError!;
+      rethrow;
+    } finally {
+      finished = true;
+      worker.close();
+    }
+  }
 
   Future<List<Map<String, String>>> discover(
     String query, {
@@ -49,70 +61,30 @@ class GitHubSkillService {
         '搜索词为空或超出限制。',
       );
     }
-    final request = SearchRequest(
-      requestId: const Uuid().v4(),
-      rootRequestId: const Uuid().v4(),
-      turnId: const Uuid().v4(),
-      query: 'site:github.com "$normalized" (SKILL.md OR skills)',
-      category: SearchCategory.software,
-      maxResults: 8,
-    );
-    if (request.isSensitive) {
-      throw const GitHubSkillServiceException(
-        'sensitiveQuery',
-        '搜索词包含敏感内容，已阻止发送到搜索服务。',
-      );
-    }
-    final route = _gatewaySearchRoute();
-    if (route == null) {
-      throw const GitHubSkillServiceException(
-        'gatewayUnavailable',
-        '没有可用的生产搜索 Gateway，无法发现 GitHub 技能。',
-      );
-    }
-    final SearchProviderResponse response;
-    try {
-      response = await route.provider.search(
-        request,
-        credential: route.credential,
-        cancelToken: cancelToken,
-      );
-    } on DioException catch (error) {
-      if (CancelToken.isCancel(error)) rethrow;
-      throw const GitHubSkillServiceException(
-        'searchFailed',
-        '生产搜索 Gateway 暂时不可用。',
-      );
-    } on Object {
-      throw const GitHubSkillServiceException(
-        'searchFailed',
-        '生产搜索 Gateway 暂时不可用。',
-      );
-    }
-    if (response.failure != null) {
-      throw GitHubSkillServiceException(
-        response.failure!.type.name,
-        response.failure!.safeMessage,
-      );
-    }
-    final results = <Map<String, String>>[];
-    for (final item in response.items) {
-      final candidate = _candidateFromUrl(item.url);
-      if (candidate == null) continue;
-      results.add({
-        ...candidate,
-        'title': item.title,
-        'summary': item.snippet,
-      });
-      if (results.length == 5) break;
-    }
-    if (results.isEmpty) {
-      throw const GitHubSkillServiceException(
-        'noSkillResults',
-        '搜索结果中没有可解析的 GitHub 技能目录。',
-      );
-    }
-    return List.unmodifiable(results);
+    return _usingWorker(cancelToken, (worker) async {
+      final results = <Map<String, String>>[];
+      final items = await DesktopWebService(worker).search(
+          'site:github.com "$normalized" (SKILL.md OR skills)',
+          cancellation: cancelToken?.whenCancel.then<void>((_) {}));
+      for (final item in items) {
+        final candidate = _candidateFromUrl(Uri.parse(item['url']!));
+        if (candidate != null) {
+          results.add({
+            ...candidate,
+            'title': item['title']!,
+            'summary': item['snippet']!
+          });
+        }
+        if (results.length == 5) break;
+      }
+      if (results.isEmpty) {
+        throw const GitHubSkillServiceException(
+          'noSkillResults',
+          '搜索结果中没有可解析的 GitHub 技能目录。',
+        );
+      }
+      return List.unmodifiable(results);
+    });
   }
 
   Future<SkillResourcePack> importPublicSkill({
@@ -123,140 +95,41 @@ class GitHubSkillService {
     CancelToken? cancelToken,
   }) async {
     _validateImportFields(owner: owner, repo: repo, path: path, ref: ref);
-    if (kIsWeb || settings.isWebUnsupported) {
-      throw const GitHubSkillServiceException(
-        'unsupportedPlatform',
-        '当前平台不支持通过受控 Gateway 导入技能。',
-      );
-    }
-    final route = _configuredGateway();
-    if (route == null) {
-      throw const GitHubSkillServiceException(
-        'gatewayUnavailable',
-        '没有可用的生产搜索 Gateway，无法导入 GitHub 技能。',
-      );
-    }
-    final current = settings.findById(route.id);
-    if (current == null ||
-        current.provider != SearchProviderKind.gateway ||
-        !current.enabled ||
-        current.requiresAttention) {
-      throw const GitHubSkillServiceException(
-        'gatewayUnavailable',
-        '已配置的 Gateway 当前不可用。',
-      );
-    }
-    final resolver = SearchCredentialResolver(
-      credentials: settings.credentials,
-      isRelease: settings.isRelease,
-    );
-    final resolved = await resolver.resolveResult(current);
-    if (current.credentialRequired && !resolved.isAvailable) {
-      await settings.setRequiresAttention(current.id, true);
-      throw const GitHubSkillServiceException(
-        'authorizationRequired',
-        'Gateway 凭据不可用，请在搜索设置中重新连接。',
-      );
-    }
-    if (settings.isRelease &&
-        (!resolved.isAvailable || resolved.value?.trim().isNotEmpty != true)) {
-      throw const GitHubSkillServiceException(
-        'authorizationRequired',
-        'Release 版本需要已配置的 Gateway 凭据。',
-      );
-    }
-    final endpoint = resolveSearchProviderEndpoint(
-      current.baseUrl,
-      githubSkillImportPath,
-      isRelease: settings.isRelease,
-      allowLocalDevelopmentGateway: settings.allowLocalDevelopmentGateway,
-    );
-    final dio = dioFactory();
-    try {
-      await prepareSearchEndpointConnection(
-        dio,
-        endpoint,
-        isRelease: settings.isRelease,
-      );
-      final response = await dio.postUri<dynamic>(
-        endpoint,
-        data: {'owner': owner, 'repo': repo, 'path': path, 'ref': ref},
-        options: Options(
-          headers: {
-            'Content-Type': 'application/json',
-            'X-Request-Id': const Uuid().v4(),
-            if (resolved.isAvailable && resolved.value?.isNotEmpty == true)
-              'Authorization': 'Bearer ${resolved.value}',
-          },
-          responseType: ResponseType.json,
-          validateStatus: (_) => true,
-        ),
-        cancelToken: cancelToken,
-      );
-      if (response.statusCode == 401 || response.statusCode == 403) {
-        await settings.setRequiresAttention(current.id, true);
+    return _usingWorker(cancelToken, (worker) async {
+      final bytes = BytesBuilder(copy: false);
+      var completed = false;
+      await for (final frame in worker.request({
+        'operation': 'github.import',
+        'arguments': {'owner': owner, 'repo': repo, 'path': path, 'ref': ref}
+      })) {
+        if (cancelToken?.isCancelled == true) throw cancelToken!.cancelError!;
+        if (frame['status'] == 'error') {
+          throw const GitHubSkillServiceException(
+              'importFailed', '公开 GitHub 技能导入失败。');
+        }
+        if (frame['status'] == 'chunk') {
+          bytes.add(base64Decode(frame['data'] as String));
+          if (bytes.length > 4 * 1024 * 1024) {
+            throw const FormatException('技能包超过上限。');
+          }
+        }
+        if (frame['status'] == 'done') {
+          if (frame['byteLength'] != bytes.length) {
+            throw const FormatException('技能包不完整。');
+          }
+          completed = true;
+        }
       }
-      if (response.statusCode != 200) {
-        throw GitHubSkillServiceException(
-          _safeGatewayCode(response.data),
-          _safeGatewayMessage(response.statusCode),
-        );
-      }
-      final pack = _parseGatewayResponse(response.data);
+      if (!completed) throw const FormatException('技能导入提前结束。');
+      final pack = SkillResourcePack.fromGatewayJson(
+          jsonDecode(utf8.decode(bytes.takeBytes())));
       if (RegExp(r'^[0-9a-f]{40}$', caseSensitive: false).hasMatch(ref) &&
           pack.commit.toLowerCase() != ref.toLowerCase()) {
         throw const GitHubSkillServiceException(
-          'commitConflict',
-          'Gateway 返回的提交与指定 SHA 不一致，已拒绝保存。',
-        );
+            'commitConflict', '返回的提交与指定 SHA 不一致。');
       }
       return pack;
-    } on GitHubSkillServiceException {
-      rethrow;
-    } on DioException catch (error) {
-      if (CancelToken.isCancel(error)) rethrow;
-      throw const GitHubSkillServiceException(
-        'gatewayUnavailable',
-        'GitHub 技能 Gateway 请求失败。',
-      );
-    } on FormatException {
-      throw const GitHubSkillServiceException(
-        'invalidSkillPack',
-        'Gateway 返回的技能包结构或摘要校验失败。',
-      );
-    } on Object {
-      throw const GitHubSkillServiceException(
-        'gatewayUnavailable',
-        'GitHub 技能 Gateway 请求失败。',
-      );
-    } finally {
-      dio.close(force: true);
-    }
-  }
-
-  SearchProviderRoute? _gatewaySearchRoute() {
-    final routes = SearchRuntimeProviderFactory(store: settings).buildRoutes();
-    final matches = routes
-        .where((route) =>
-            route.kind == SearchProviderKind.gateway &&
-            route.enabled &&
-            !route.isFallback)
-        .toList();
-    if (matches.isEmpty) return null;
-    final primary = matches.where((route) => route.isPrimary).toList();
-    return primary.isNotEmpty ? primary.first : matches.first;
-  }
-
-  SearchProviderConfig? _configuredGateway() {
-    final matches = settings.configs
-        .where((config) =>
-            config.provider == SearchProviderKind.gateway &&
-            config.enabled &&
-            !config.requiresAttention)
-        .toList();
-    if (matches.isEmpty) return null;
-    final primary = matches.where((config) => config.isDefault).toList();
-    return primary.isNotEmpty ? primary.first : matches.first;
+    });
   }
 
   static Map<String, String>? _candidateFromUrl(Uri url) {
@@ -325,43 +198,4 @@ class GitHubSkillService {
       );
     }
   }
-
-  static SkillResourcePack _parseGatewayResponse(Object? raw) {
-    if (raw is! Map ||
-        raw.keys.any((key) => key != 'request_id' && key != 'pack') ||
-        raw.length != 2 ||
-        raw['request_id'] is! String) {
-      throw const FormatException('Gateway 响应字段无效。');
-    }
-    return SkillResourcePack.fromGatewayJson(raw['pack']);
-  }
-
-  static String _safeGatewayCode(Object? raw) {
-    if (raw is Map && raw['error'] is Map) {
-      final code = (raw['error'] as Map)['code'];
-      if (code is String && RegExp(r'^[A-Z0-9_]{1,64}$').hasMatch(code)) {
-        return code;
-      }
-    }
-    return 'gatewayError';
-  }
-
-  static String _safeGatewayMessage(int? status) => switch (status) {
-        401 || 403 => 'Gateway 拒绝了当前请求，请检查搜索设置。',
-        404 => '指定的公开 GitHub 资源不存在。',
-        413 => '技能导入请求超过大小限制。',
-        422 => 'GitHub 技能包不完整或包含不支持的资源。',
-        429 || 402 => 'Gateway 当前限流或额度不足。',
-        _ => 'GitHub 技能 Gateway 暂时不可用。',
-      };
-
-  static Dio _defaultDio() => configureSearchProviderDio(
-        Dio(BaseOptions(
-          connectTimeout: const Duration(seconds: 15),
-          sendTimeout: const Duration(seconds: 15),
-          receiveTimeout: const Duration(seconds: 30),
-          followRedirects: false,
-          maxRedirects: 0,
-        )),
-      );
 }

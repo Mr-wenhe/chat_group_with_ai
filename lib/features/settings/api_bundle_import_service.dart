@@ -2,7 +2,7 @@
 ///
 /// 核心约定：**不新造任何凭据写入通道**，四类服务各自复用既有的绑定路径——
 /// 聊天走 `DatabaseService.saveApiConfig`，语音走 `bindVoiceApiKey`，图像走
-/// `bindImageApiKey`，搜索走 `SearchProviderConfigStore.save`。这样「明文 Key
+/// `bindImageApiKey`，智谱搜索走 `ZhipuNativeSearchCredentialStore.save`。这样「明文 Key
 /// 不许进 `app_settings`」「非 macOS 的 release 严禁写 Hive 明文 Key」这些既有
 /// 红线自动继续生效，不需要为导入功能再实现一遍平台分流。
 ///
@@ -24,26 +24,15 @@ import 'package:chat_group/core/models/api_provider.dart';
 import 'package:chat_group/core/storage/credential_repository.dart';
 import 'package:chat_group/features/settings/ai_speaker_picker_settings.dart';
 import 'package:chat_group/features/settings/api_bundle_import_models.dart';
-import 'package:chat_group/features/web_search/data/search_settings_store.dart';
 import 'package:chat_group/features/web_search/data/zhipu_native_search_credential_store.dart';
-import 'package:chat_group/features/web_search/models/search_models.dart';
-import 'package:chat_group/features/web_search/models/search_provider_config.dart';
-import 'package:chat_group/features/web_search/security/search_endpoint_validator.dart';
 
 class ApiBundleImportService {
   ApiBundleImportService({
     required DatabaseService db,
     CredentialRepository? credentials,
-    SearchProviderConfigStore? searchStore,
     bool? isRelease,
   })  : _db = db,
         _credentials = credentials ?? CredentialRepository(),
-        _isRelease = isRelease ?? kReleaseMode,
-        _searchStore = searchStore ??
-            SearchProviderConfigStore(
-              db: db,
-              isRelease: isRelease ?? kReleaseMode,
-            ),
         // `isRelease` 必须透传：release 下 macOS 的开发回退被禁用，用 `kReleaseMode`
         // 的默认值在注入 `isRelease: false` 的测试里会得到不一致的平台分流。
         _zhipuSearchStore = ZhipuNativeSearchCredentialStore(
@@ -53,9 +42,7 @@ class ApiBundleImportService {
 
   final DatabaseService _db;
   final CredentialRepository _credentials;
-  final SearchProviderConfigStore _searchStore;
   final ZhipuNativeSearchCredentialStore _zhipuSearchStore;
-  final bool _isRelease;
 
   static const String _zhipuNativeSearchTitle = '智谱原生搜索';
 
@@ -106,9 +93,6 @@ class ApiBundleImportService {
     if (resolution.imageWrite != null) {
       outcomes.add(await _applyImage(resolution.imageWrite!));
     }
-    for (final write in resolution.searchWrites) {
-      outcomes.add(await _applySearch(write));
-    }
     if (resolution.zhipuSearchWrite != null) {
       outcomes.add(await _applyZhipuNativeSearch(resolution.zhipuSearchWrite!));
     }
@@ -140,10 +124,8 @@ class ApiBundleImportService {
 
     final voiceWrite = _resolveVoice(bundle.voice, changes);
     final imageWrite = _resolveImage(bundle.image, changes);
-    final searchWrites = <_SearchWrite>[];
     for (final entry in bundle.search) {
-      final write = _resolveSearch(entry, changes);
-      if (write != null) searchWrites.add(write);
+      _recordRetiredSearch(entry, changes);
     }
     final zhipuSearchWrite =
         _resolveZhipuNativeSearch(bundle.zhipuNativeSearch, changes);
@@ -153,7 +135,6 @@ class ApiBundleImportService {
       chatWrites: chatWrites,
       voiceWrite: voiceWrite,
       imageWrite: imageWrite,
-      searchWrites: searchWrites,
       zhipuSearchWrite: zhipuSearchWrite,
     );
   }
@@ -186,6 +167,15 @@ class ApiBundleImportService {
     // （生成工具、测试、将来的其它入口），服务才是语义上的权威。
     if (entry.apiKey.isEmpty) {
       skip('apiKey 不能为空');
+      return null;
+    }
+    // 上限与表单、包解析共用 `ApiBundleLimits.maxUserAgentLength`。解析层已经
+    // 拦过超长值（保留原值并给出 issue），这里防的是**程序化构造**的包
+    // （生成脚本、测试、将来的其它入口）：身份被截断或被静默换掉，都会让一条
+    // 原本可用的白名单中转换台机器就 401。
+    if (entry.userAgent != null &&
+        entry.userAgent!.trim().length > ApiBundleLimits.maxUserAgentLength) {
+      skip('User-Agent 过长（上限 ${ApiBundleLimits.maxUserAgentLength} 字符）');
       return null;
     }
     final protocol = entry.protocol.isEmpty
@@ -226,6 +216,7 @@ class ApiBundleImportService {
           protocol: protocol,
           name: entry.name,
           enableWorkPromptCaching: entry.enableWorkPromptCaching,
+          userAgent: entry.userAgent,
         )) {
       skip('与现有配置一致，保持不变');
       return null;
@@ -322,62 +313,14 @@ class ApiBundleImportService {
     return _ImageWrite(entry);
   }
 
-  _SearchWrite? _resolveSearch(
-    ApiBundleSearchEntry entry,
-    List<BundleChange> changes,
-  ) {
-    final fingerprint = _fingerprint(entry.apiKey);
-    void skip(String reason) => changes.add(BundleChange(
-          service: BundleService.search,
-          action: BundleChangeAction.skip,
-          title: entry.name,
-          detail: reason,
-          keyFingerprint: fingerprint,
-        ));
-
-    final id = SearchProviderConfig.canonicalizeId(entry.id);
-    if (id == null) {
-      skip('id 为空、含首尾空格/控制字符，或超过长度上限');
-      return null;
-    }
-    final kind = _searchKindByName(entry.provider);
-    if (kind == null) {
-      skip('未知的搜索提供方「${entry.provider}」');
-      return null;
-    }
-    final requiresCredential =
-        searchProviderRequiresCredential(kind, isRelease: _isRelease);
-    if (requiresCredential && entry.apiKey.isEmpty) {
-      skip('该搜索提供方必须配置访问令牌');
-      return null;
-    }
-    if (!searchProviderUsesFixedEndpoint(kind)) {
-      if (entry.baseUrl.isEmpty) {
-        skip('Base URL 不能为空');
-        return null;
-      }
-      final validation = SearchEndpointValidator.validate(
-        entry.baseUrl,
-        isRelease: _isRelease,
-        allowLocalDevelopmentGateway: _searchStore.allowLocalDevelopmentGateway,
-      );
-      if (!validation.isValid) {
-        skip(validation.message);
-        return null;
-      }
-    }
-
-    final existing = _searchStore.findById(id);
+  void _recordRetiredSearch(
+      ApiBundleSearchEntry entry, List<BundleChange> changes) {
     changes.add(BundleChange(
-      service: BundleService.search,
-      action: existing == null
-          ? BundleChangeAction.create
-          : BundleChangeAction.overwrite,
-      title: '${entry.name}（${kind.name}）',
-      detail: existing == null ? '新增搜索提供方' : '更新搜索提供方并替换令牌',
-      keyFingerprint: fingerprint,
-    ));
-    return _SearchWrite(entry: entry, id: id, kind: kind, existing: existing);
+        service: BundleService.search,
+        action: BundleChangeAction.skip,
+        title: entry.name,
+        detail: '旧搜索提供商已退役；智谱请使用独立智谱搜索配置。',
+        keyFingerprint: _fingerprint(entry.apiKey)));
   }
 
   /// 智谱原生搜索是**另一类**搜索凭据，落点与上面那条 Provider 路径完全不同
@@ -433,6 +376,7 @@ class ApiBundleImportService {
       enableWorkPromptCaching: write.entry.enableWorkPromptCaching ??
           target?.enableWorkPromptCaching ??
           false,
+      userAgent: write.entry.userAgent ?? target?.userAgent ?? '',
     );
     try {
       await _db.saveApiConfig(config);
@@ -529,33 +473,6 @@ class ApiBundleImportService {
     );
   }
 
-  Future<BundleImportOutcome> _applySearch(_SearchWrite write) async {
-    final entry = write.entry;
-    final existing = write.existing;
-    final config = SearchProviderConfig(
-      id: write.id,
-      name: entry.name,
-      provider: write.kind,
-      baseUrl: entry.baseUrl,
-      enabled: entry.enabled,
-      // 包里没点名要设为默认时，保留现有默认标记——否则覆盖一条本来就是默认的
-      // 配置会顺手把它降级，而用户没要求这么做。
-      isDefault: entry.isDefault || (existing?.isDefault ?? false),
-    );
-    // 失败是返回值而不是异常；其内部自带 repair intent 与单条回滚，
-    // 外层不要再包事务。
-    final result = await _searchStore.save(
-      config,
-      enteredCredential: entry.apiKey,
-    );
-    return BundleImportOutcome(
-      service: BundleService.search,
-      title: entry.name,
-      succeeded: result.isSuccess,
-      reason: result.isSuccess ? '' : (result.errorMessage ?? '搜索配置保存失败'),
-    );
-  }
-
   Future<BundleImportOutcome> _applyZhipuNativeSearch(
     _ZhipuNativeSearchWrite write,
   ) async {
@@ -599,6 +516,7 @@ class ApiBundleImportService {
     required ApiProtocol protocol,
     required String name,
     bool? enableWorkPromptCaching,
+    String? userAgent,
   }) =>
       // 名称也算「元数据」：只改名也是一次真实变更，判成「无变化」会让用户
       // 反复导入却看不到任何效果，而且没有任何提示。
@@ -608,7 +526,8 @@ class ApiBundleImportService {
       _normalizeUrl(target.customBaseUrl) == _normalizeUrl(baseUrl) &&
       target.apiProtocol == protocol.name &&
       (enableWorkPromptCaching == null ||
-          target.enableWorkPromptCaching == enableWorkPromptCaching);
+          target.enableWorkPromptCaching == enableWorkPromptCaching) &&
+      (userAgent == null || target.userAgent.trim() == userAgent.trim());
 
   static String _normalizeUrl(String raw) {
     var value = raw.trim();
@@ -628,13 +547,6 @@ class ApiBundleImportService {
   static ApiProtocol? _protocolByName(String name) {
     for (final protocol in ApiProtocol.values) {
       if (protocol.name == name) return protocol;
-    }
-    return null;
-  }
-
-  static SearchProviderKind? _searchKindByName(String name) {
-    for (final kind in SearchProviderKind.values) {
-      if (kind.name == name) return kind;
     }
     return null;
   }
@@ -669,7 +581,6 @@ class _Resolution {
     required this.chatWrites,
     required this.voiceWrite,
     required this.imageWrite,
-    required this.searchWrites,
     required this.zhipuSearchWrite,
   });
 
@@ -677,7 +588,6 @@ class _Resolution {
   final List<_ChatWrite> chatWrites;
   final _VoiceWrite? voiceWrite;
   final _ImageWrite? imageWrite;
-  final List<_SearchWrite> searchWrites;
   final _ZhipuNativeSearchWrite? zhipuSearchWrite;
 }
 
@@ -707,20 +617,6 @@ class _ImageWrite {
   const _ImageWrite(this.entry);
 
   final ApiBundleImageEntry entry;
-}
-
-class _SearchWrite {
-  const _SearchWrite({
-    required this.entry,
-    required this.id,
-    required this.kind,
-    required this.existing,
-  });
-
-  final ApiBundleSearchEntry entry;
-  final String id;
-  final SearchProviderKind kind;
-  final SearchProviderConfig? existing;
 }
 
 class _ZhipuNativeSearchWrite {

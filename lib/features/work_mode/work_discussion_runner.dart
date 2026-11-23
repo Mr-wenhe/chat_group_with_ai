@@ -19,7 +19,10 @@ import 'work_context_builder.dart';
 import 'package:chat_group/features/web_search/models/search_models.dart'
     as search;
 import 'package:chat_group/features/web_search/application/search_context_formatter.dart';
+import 'package:chat_group/features/web_search/desktop/public_web_sources.dart';
+import 'package:chat_group/features/web_search/desktop/web_worker_client.dart';
 import 'work_discussion_investigation.dart';
+import 'work_web_tools.dart' show workModeAllowsAutonomousNetworkTools;
 import 'work_agent_loop.dart';
 import 'default_work_task_runner.dart'
     show workModeOutputReservationTokens, workModeRequestInputBudget;

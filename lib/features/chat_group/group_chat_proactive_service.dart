@@ -142,6 +142,7 @@ class GroupChatProactiveService {
       ),
       apiProtocol: config.protocol,
       customBaseUrl: config.customBaseUrl,
+      userAgent: config.userAgent,
       model: config.modelName,
       messages: messages,
       temperature: 0.85,

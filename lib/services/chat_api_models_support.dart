@@ -28,14 +28,17 @@ class ProviderModelCatalog {
   final bool ok;
   final List<ProviderModelInfo> models;
   final String message;
+  final int? statusCode;
 
-  const ProviderModelCatalog._(this.ok, this.models, this.message);
+  const ProviderModelCatalog._(this.ok, this.models, this.message,
+      {this.statusCode});
 
   factory ProviderModelCatalog.success(List<ProviderModelInfo> models) =>
       ProviderModelCatalog._(true, models, '');
 
-  factory ProviderModelCatalog.failure(String message) =>
-      ProviderModelCatalog._(false, const <ProviderModelInfo>[], message);
+  factory ProviderModelCatalog.failure(String message, {int? statusCode}) =>
+      ProviderModelCatalog._(false, const <ProviderModelInfo>[], message,
+          statusCode: statusCode);
 }
 
 extension _ChatApiServiceModels on ChatApiService {
@@ -50,6 +53,7 @@ extension _ChatApiServiceModels on ChatApiService {
     required ApiProvider provider,
     ApiProtocol apiProtocol = ApiProtocol.defaultValue,
     String? customBaseUrl,
+    String? userAgent,
   }) async {
     if (kIsWeb) {
       return ProviderModelCatalog.failure(
@@ -69,6 +73,8 @@ extension _ChatApiServiceModels on ChatApiService {
       apiKey: apiKey,
       url: primaryUrl,
       apiProtocol: apiProtocol,
+      customBaseUrl: configuredBase,
+      userAgent: userAgent,
     );
     if (primary.ok || primary.authRejected) return primary;
 
@@ -83,6 +89,8 @@ extension _ChatApiServiceModels on ChatApiService {
       apiKey: apiKey,
       url: fallbackUrl,
       apiProtocol: apiProtocol,
+      customBaseUrl: configuredBase,
+      userAgent: userAgent,
     );
     return retried.ok ? retried : primary;
   }
@@ -91,12 +99,19 @@ extension _ChatApiServiceModels on ChatApiService {
     required String apiKey,
     required String url,
     required ApiProtocol apiProtocol,
+    String? customBaseUrl,
+    String? userAgent,
   }) async {
     try {
       final response = await _dio.get<ResponseBody>(
         url,
         options: Options(
-          headers: _requestHeaders(apiKey: apiKey, apiProtocol: apiProtocol),
+          headers: _requestHeaders(
+            apiKey: apiKey,
+            apiProtocol: apiProtocol,
+            customBaseUrl: customBaseUrl,
+            userAgent: userAgent,
+          ),
           responseType: ResponseType.stream,
           receiveTimeout: _modelsRequestTimeout,
           // 不让底层客户端自动跟随重定向：跟随会把整个 headers map（含 API Key）
@@ -107,20 +122,25 @@ extension _ChatApiServiceModels on ChatApiService {
           validateStatus: (status) => status != null && status < 600,
         ),
       );
+      if (response.statusCode != 200) {
+        final errorData = await _readStreamErrorBody(response.data);
+        return ProviderModelCatalog.failure(
+          _modelsFailureMessage(response.statusCode,
+              providerError:
+                  _safeProviderErrorDetail(errorData, apiKey: apiKey)),
+          statusCode: response.statusCode,
+        );
+      }
       final data = await _readBoundedResponseData(
         response.data,
         ChatApiService.defaultMaxResponseBytes,
       );
-      if (response.statusCode != 200) {
-        return ProviderModelCatalog.failure(
-          _modelsFailureMessage(response.statusCode),
-        );
-      }
       return _parseModelCatalog(data, apiProtocol: apiProtocol);
     } on _ChatResponseTooLargeException {
       return ProviderModelCatalog.failure('模型列表响应超过安全大小限制');
     } on DioException catch (e) {
-      return ProviderModelCatalog.failure(_dioErrorMessage(e));
+      return ProviderModelCatalog.failure(_dioErrorMessage(e),
+          statusCode: e.response?.statusCode);
     } catch (_) {
       return ProviderModelCatalog.failure('获取模型列表失败');
     }
@@ -233,7 +253,14 @@ extension _ChatApiServiceModels on ChatApiService {
     return text.isEmpty ? null : text;
   }
 
-  String _modelsFailureMessage(int? statusCode) => switch (statusCode) {
+  String _modelsFailureMessage(int? statusCode, {String? providerError}) =>
+      switch (statusCode) {
+        401
+            when providerError
+                    ?.toLowerCase()
+                    .contains('unauthorized client detected') ??
+                false =>
+          _safeHttpErrorMessage(statusCode, providerError: providerError),
         401 => 'API Key 无效或已过期（鉴权失败）',
         403 => 'API Key 没有访问该接口的权限（HTTP 403）',
         404 || 405 => '该服务地址没有模型列表接口，请手动填写模型名',
@@ -295,5 +322,5 @@ extension _ChatApiServiceModels on ChatApiService {
 
 extension on ProviderModelCatalog {
   /// 鉴权被拒时不该换地址重试：问题在 Key，不在路径。
-  bool get authRejected => !ok && message.contains('API Key');
+  bool get authRejected => !ok && (statusCode == 401 || statusCode == 403);
 }

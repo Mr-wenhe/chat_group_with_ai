@@ -9,6 +9,7 @@ import 'package:flutter_test/flutter_test.dart';
 const _displayFiles = <String>[
   'lib/core/widgets/readable_json_dialog.dart',
   'lib/features/chat_group/widgets/chat_message_bubble.dart',
+  'lib/features/web_search/presentation/inline_search_reply.dart',
   'lib/features/chat_group/widgets/progress_log_bubble.dart',
   'lib/features/work_mode/presentation/work_task_panel.dart',
   'lib/features/work_mode/presentation/work_task_panel_details.dart',

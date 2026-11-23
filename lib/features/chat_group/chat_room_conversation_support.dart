@@ -57,6 +57,8 @@ extension _ChatRoomConversationSupport on _ChatRoomPageState {
       isAutoChat: isAutoChat,
       roundGeneration: roundGeneration,
       autoChatGeneration: autoChatGeneration,
+      // 摘要同样是回合内的模型请求，必须能被同一个「停止」断开。
+      cancelToken: _activeReplyCancelToken,
     );
     // 摘要是外围模型调用，可能在用户离开很久之后才返回：迟到的结果不许再
     // 改写旧群上下文（用户已经在看别的群或别的页面了）。
@@ -77,6 +79,7 @@ extension _ChatRoomConversationSupport on _ChatRoomPageState {
     required bool isAutoChat,
     required int roundGeneration,
     int? autoChatGeneration,
+    CancelToken? cancelToken,
   }) async {
     bool invalidated() => _isReplyRoundInvalidated(
           isAutoChat: isAutoChat,
@@ -116,9 +119,11 @@ extension _ChatRoomConversationSupport on _ChatRoomPageState {
           orElse: () => ApiProvider.deepseek),
       apiProtocol: config.protocol,
       customBaseUrl: config.customBaseUrl,
+      userAgent: config.userAgent,
       model: config.modelName,
       messages: msgs,
       temperature: 0.4,
+      cancelToken: cancelToken,
       purpose: AiRequestPurpose.summary,
       conversationId: widget.groupId,
       characterId: character.id,

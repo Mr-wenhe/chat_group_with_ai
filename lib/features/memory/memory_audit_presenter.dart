@@ -34,6 +34,7 @@ class MemoryAuditLabels {
         MemoryOriginType.manual => const MemoryAuditLabel('手动', '由你明确创建或修正的记忆'),
         MemoryOriginType.legacyMigration =>
           const MemoryAuditLabel('旧版迁移', '从旧版记忆结构转换而来，来源可能不完整'),
+        MemoryOriginType.game => const MemoryAuditLabel('棋局', '从应用内棋局产生的角色记忆'),
       };
 
   static MemoryAuditLabel status(MemoryStatus value) => switch (value) {
@@ -333,6 +334,7 @@ class MemoryAuditPresenter {
         MemoryOriginType.group => snapshot ?? _deletedGroupName,
         MemoryOriginType.manual => snapshot ?? '手动记录',
         MemoryOriginType.legacyMigration => snapshot ?? '旧版来源未知',
+        MemoryOriginType.game => snapshot ?? '五子棋对局',
       };
     }
     return resolveConversationName(id, snapshotName: memory.originNameSnapshot);

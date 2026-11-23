@@ -443,7 +443,7 @@ extension _WorkAgentLoopActions on WorkAgentLoop {
       );
       final stalled = await _observeV2Progress(
         state,
-        _toolProgressObservation(call, refusal),
+        _toolProgressObservation(call, refusal, task: state.task),
       );
       if (stalled != null) return stalled;
       state
@@ -592,7 +592,7 @@ extension _WorkAgentLoopActions on WorkAgentLoop {
       }
       final stalled = await _observeV2Progress(
         state,
-        _toolProgressObservation(call, toolResult),
+        _toolProgressObservation(call, toolResult, task: state.task),
       );
       if (stalled != null) return stalled;
       final message = _publicText(toolResult.message);
@@ -691,7 +691,7 @@ extension _WorkAgentLoopActions on WorkAgentLoop {
     if (definition.isMutation && toolResult.data['changed'] == false) {
       final stalled = await _observeV2Progress(
         state,
-        _toolProgressObservation(call, toolResult),
+        _toolProgressObservation(call, toolResult, task: state.task),
       );
       if (stalled != null) return stalled;
       return _handleUnchangedMutation(state, call, toolResult);
@@ -707,7 +707,7 @@ extension _WorkAgentLoopActions on WorkAgentLoop {
     );
     final stalled = await _observeV2Progress(
       state,
-      _toolProgressObservation(call, toolResult),
+      _toolProgressObservation(call, toolResult, task: state.task),
     );
     if (stalled != null) return stalled;
     if (state.cancellation.isCancelled) return _interrupt(state);

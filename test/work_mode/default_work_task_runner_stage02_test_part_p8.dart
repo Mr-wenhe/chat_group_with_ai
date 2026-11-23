@@ -3,7 +3,7 @@ part of 'default_work_task_runner_stage02_test.dart';
 void _registerP8RunnerTests(Directory Function() hive,
     Directory Function() root, WorkTaskEventStore Function() events) {
   Future<DefaultWorkTaskRunner> recoveryRunner(AiRequestGateway gateway,
-      {bool browserContext = false}) async {
+      {bool browserContext = false, bool document = false}) async {
     final db = CandidateTestDatabase(hive());
     final grants = WorkFolderGrantService(
         box: db.appSettingsBox,
@@ -27,7 +27,11 @@ void _registerP8RunnerTests(Directory Function() hive,
               name: id,
               avatar: id,
               age: 30,
-              role: id == 'a' ? '软件开发工程师' : '测试工程师',
+              role: document
+                  ? '作家'
+                  : id == 'a'
+                      ? '软件开发工程师'
+                      : '测试工程师',
               personalityTags: [],
               systemPrompt: id,
               apiKey: '',
@@ -83,6 +87,370 @@ void _registerP8RunnerTests(Directory Function() hive,
             database: runner.database, credentials: _TestCredentials()));
     addTearDown(instance.dispose);
     return instance;
+  }
+
+  for (final mode in [
+    'read',
+    'search',
+    'sections',
+    'empty-sections',
+    'empty-search',
+    'missing',
+    'empty',
+    'failed',
+    'metadata-only',
+    'missing-digest',
+    'wrong-tool',
+    'browser',
+    'other-actor',
+    'other-revision'
+  ]) {
+    test('professional review requires bound network tool evidence: $mode',
+        () async {
+      final source = await File('${root().path}/README.md')
+          .writeAsString('# 原文\n\n完整正文。\n');
+      final gateway = _SingleToolGateway(AgentToolName.workspaceDocument, {
+        'path': 'README.md'
+      }, finishEvidence: [
+        jsonEncode({
+          'method': '完整读取候选及独立来源核对',
+          'result': 'passed',
+          'acceptanceIds': ['qa'],
+          'report': '已核对正文及网络来源。',
+          'defects': []
+        })
+      ]);
+      final runner = await recoveryRunner(gateway, document: true);
+      final capability = mode.contains('search')
+          ? 'web.search'
+          : mode == 'browser'
+              ? 'browser.context'
+              : 'web.read';
+      final raw = candidateTestState(format: 'markdown').toJson()
+        ..['artifactContract'] = {
+          'type': 'document',
+          'format': 'markdown',
+          'location': '.',
+          'revisionTarget': '',
+          'files': ['README.md']
+        }
+        ..['acceptances'] = [
+          {
+            'id': 'qa',
+            'method': '核对正文和来源',
+            'requiredCapability': capability,
+            'status': 'pending',
+            'evidenceRef': '',
+            'requestRevision': 1,
+            'verificationRevision': 1
+          }
+        ];
+      final task = candidateTestTask(WorkCollaborationState.tryParse(raw)!)
+        ..lastArtifactPaths = [source.path];
+      await runner.database.agentTaskBox.put(task.id, task);
+      final candidate = await runner.publishCandidate(task,
+          publicationId: 'network-review', requiredPaths: [source.path]);
+      final state =
+          WorkDiscussionState.fromExecutionState(task.executionStateJson)!
+              .collaboration!;
+      final binding = {
+        'stage': 'verify',
+        'workItemId': candidate.iterationId,
+        'iterationId': candidate.iterationId,
+        'requestRevision': state.requestRevision,
+        'teamRevision': state.teamRevision,
+        'verificationRevision': state.verificationRevision,
+        'actorId': 'b'
+      };
+      final read = {
+        'source_id': 's1',
+        'text': mode == 'empty' ? '' : '独立来源正文',
+        'sha256': sha256.convert(await source.readAsBytes()).toString(),
+        'byteLength': await source.length()
+      };
+      if (mode == 'metadata-only') read.remove('text');
+      if (mode == 'missing-digest') read.remove('sha256');
+      if (mode.contains('sections')) {
+        read.remove('text');
+        read['sections'] = [
+          {'text': mode == 'sections' ? '来源段落' : ''}
+        ];
+      }
+      final saved = jsonEncode({
+        'binding': {
+          ...binding,
+          if (mode == 'other-actor') 'actorId': 'a',
+          if (mode == 'other-revision')
+            'requestRevision': state.requestRevision + 1
+        },
+        'artifactDigest': candidate.digest,
+        'verificationRevision': state.verificationRevision + 1,
+        'receipts': [
+          if (mode != 'missing')
+            {
+              'tool': mode == 'wrong-tool' ? 'web.search' : capability,
+              'arguments': {'source_id': 's1'},
+              'status': mode == 'failed' ? 'failed' : 'success',
+              'data': mode.contains('search')
+                  ? {
+                      'sources': [
+                        if (mode == 'search')
+                          {'url': 'https://example.com/source', 'title': '公开来源'}
+                      ]
+                    }
+                  : read
+            }
+        ]
+      });
+      final ref =
+          sha256.convert(utf8.encode(saved)).toString().substring(0, 24);
+      await events().writeDiscussionDetail(task.id, ref, saved);
+      final execution =
+          jsonDecode(task.executionStateJson) as Map<String, dynamic>;
+      execution['workItemExecution'] = binding;
+      execution['v2ReviewReceiptRef'] = ref;
+      task
+        ..executionStateJson = jsonEncode(execution)
+        ..characterId = 'b'
+        ..status = AgentTaskStatus.queued;
+      if (mode.startsWith('other-')) {
+        await expectLater(runner.run(task, WorkTaskCancellation()),
+            throwsA(isA<StateError>()));
+      } else {
+        await runner.run(task, WorkTaskCancellation());
+      }
+      expect(gateway.calls, mode.startsWith('other-') ? 0 : greaterThan(1),
+          reason: task.lastError);
+      final current =
+          WorkDiscussionState.fromExecutionState(task.executionStateJson)!
+              .collaboration!;
+      expect(current.acceptances.single['status'],
+          {'read', 'search', 'sections'}.contains(mode) ? 'passed' : 'pending',
+          reason: task.lastError);
+      expect(await source.readAsString(), '# 原文\n\n完整正文。\n');
+    });
+  }
+
+  for (final mode in [
+    'delete-dir',
+    'rename-dir',
+    'rename-into-dir',
+    'rename-outside-into-dir',
+    'rename-dir-outside',
+    'patch-dir',
+    'outside'
+  ]) {
+    test(
+        'directory mutation is unsupported without losing an existing grant: $mode',
+        () async {
+      final folder = await Directory('${root().path}/downloads').create();
+      final keep =
+          await File('${root().path}/keep.txt').writeAsString('unchanged');
+      final outside = await Directory('${hive().path}/outside').create();
+      final name = mode.startsWith('rename')
+          ? AgentToolName.workspaceRename
+          : mode == 'patch-dir'
+              ? AgentToolName.workspacePatch
+              : AgentToolName.workspaceDelete;
+      final arguments = <String, dynamic>{
+        'path': mode == 'outside' || mode == 'rename-outside-into-dir'
+            ? outside.path
+            : mode == 'rename-into-dir'
+                ? 'keep.txt'
+                : 'downloads',
+        if (mode == 'rename-dir') 'destinationPath': 'unused.txt',
+        if (mode == 'rename-into-dir') 'destinationPath': 'downloads',
+        if (mode == 'rename-outside-into-dir') 'destinationPath': 'downloads',
+        if (mode == 'rename-dir-outside') 'destinationPath': outside.path,
+        if (mode == 'patch-dir') 'content': 'must not write',
+      };
+      final gateway = _SingleToolGateway(name, arguments);
+      final runner = await recoveryRunner(gateway);
+      final task = AgentTask(
+          id: 'directory-$mode',
+          groupId: 'group-a',
+          characterId: 'a',
+          userRequest: '仅解释工具反馈。',
+          workModeTask: true);
+      await runner.run(task, WorkTaskCancellation());
+      expect(await folder.exists(), isTrue);
+      expect(await outside.exists(), isTrue);
+      expect(await keep.readAsString(), 'unchanged');
+      expect(
+          await runner.folderGrantService!.isPathWritableResolved(root().path),
+          isTrue);
+      if (mode.contains('outside')) {
+        expect(task.status, AgentTaskStatus.failed);
+        expect(gateway.calls, 1);
+      } else {
+        expect(task.status, AgentTaskStatus.completed, reason: task.lastError);
+        expect(gateway.calls, greaterThan(1));
+        expect(gateway.lastPrompt, contains('仅支持普通文件'));
+      }
+    });
+  }
+
+  for (final mode in ['complete', 'partial', 'members']) {
+    final partial = mode == 'partial';
+    final members = mode == 'members';
+    test(
+        'frozen Markdown body usage requires actual complete model reading mode=$mode',
+        () async {
+      final content = members
+          ? List.generate(14, (i) => '## 段落 $i\n\n原始正文第 $i 段，保持全部内容。')
+              .join('\n\n')
+          : partial
+              ? '正文内容。' * 1800
+              : '# 原文\n\n公开下载的原始内容。\n';
+      final source =
+          await File('${root().path}/README.md').writeAsString(content);
+      final gateway = _SingleToolGateway(AgentToolName.workspaceDocument,
+          {'path': 'README.md', 'startChunk': 0},
+          pageDocument: members,
+          finishEvidence: [
+            jsonEncode({
+              'method': '完整读取冻结 Markdown 原文',
+              'result': 'passed',
+              'acceptanceIds': ['qa'],
+              'report': '本人已读取并核对原文。',
+              'defects': [],
+              'documentEvidence': {
+                'pageNumbers': [],
+                'sourceLocations': [
+                  {'fileName': 'README.md', 'paragraph': 1}
+                ]
+              }
+            })
+          ]);
+      final runner = await recoveryRunner(gateway, document: true);
+      final raw = candidateTestState(format: 'markdown').toJson()
+        ..['artifactContract'] = {
+          'type': 'document',
+          'format': 'markdown',
+          'location': '.',
+          'revisionTarget': '',
+          'files': ['README.md']
+        }
+        ..['team'] = [
+          for (final member in ['a', 'b'])
+            {
+              'memberId': member,
+              'role': 'document',
+              'qualificationRef': 'skill-$member',
+              'qualified': true,
+              'available': true
+            }
+        ]
+        ..['workItems'] = [
+          {
+            'id': 'make-readme',
+            'ownerId': 'a',
+            'kind': 'produce',
+            'dependencies': [],
+            'status': 'done',
+            'requestRevision': 1,
+            'resultRef': 'proposal:done'
+          }
+        ]
+        ..['autonomyPolicy'] = WorkCollaborationAutonomy.policyFor(['a', 'b'])
+        ..['usageEvidenceRefs'] = []
+        ..['coordinatorDecisions'] = [
+          {
+            'eventId': 'plan-ruling',
+            'coordinatorId': 'a',
+            'kind': 'plan',
+            'subjectId': 'task-a',
+            'requestRevision': 1,
+            'teamRevision': 1,
+            'verificationRevision': 1,
+            'iterationId': '',
+            'artifactDigest': '',
+            'opinionEventIds': ['plan-a-1', 'plan-b-1'],
+            'reason': '两名成员已确认。',
+            'responseRef': 'plan-ruling-message'
+          }
+        ]
+        ..['usageAssignments'] = [
+          for (final member in ['a', 'b'])
+            {
+              'memberId': member,
+              'scenarioId': 'scene-$member',
+              'goal': '$member 核对原文',
+              'preconditions': '原文件候选已冻结',
+              'stepGoals': ['完整读取当前候选正文'],
+              'expectedResult': '$member 独立确认原文完整',
+              'acceptanceIds': ['qa'],
+              'requiredCapabilities': ['document.body'],
+              'resetMethod': '重新读取当前候选',
+              'requestRevision': 1
+            }
+        ];
+      final state = WorkCollaborationState.tryParse(raw,
+          onInvalid: (section) => fail(section))!;
+      expect(state.planReady, isTrue);
+      final task = candidateTestTask(state)..lastArtifactPaths = [source.path];
+      await runner.database.agentTaskBox.put(task.id, task);
+      final candidate = await runner.publishCandidate(task,
+          publicationId: 'markdown-usage', requiredPaths: [source.path]);
+      final frozen =
+          WorkDiscussionState.fromExecutionState(task.executionStateJson)!
+              .collaboration!;
+      final execution =
+          jsonDecode(task.executionStateJson) as Map<String, dynamic>;
+      execution['workItemExecution'] = {
+        'stage': 'usage',
+        'workItemId': 'scene-a',
+        'iterationId': candidate.iterationId,
+        'requestRevision': frozen.requestRevision,
+        'teamRevision': frozen.teamRevision,
+        'verificationRevision': frozen.verificationRevision,
+        'actorId': 'a'
+      };
+      task.executionStateJson = jsonEncode(execution);
+      task.status = AgentTaskStatus.queued;
+      await runner.run(task, WorkTaskCancellation());
+      final current =
+          WorkDiscussionState.fromExecutionState(task.executionStateJson)!
+              .collaboration!;
+      expect(
+          await WorkUsageReceiptStore(events()).valid(current, 'a'), !partial,
+          reason: task.lastError);
+      expect(current.currentUsageFor('b'), isNull);
+      expect(
+          gateway.lastPrompt,
+          contains(partial
+              ? '正文内容'
+              : members
+                  ? '原始正文'
+                  : '公开下载的原始内容'));
+      if (members) {
+        final next =
+            jsonDecode(task.executionStateJson) as Map<String, dynamic>;
+        final binding =
+            Map<String, dynamic>.from(next['workItemExecution'] as Map)
+              ..['actorId'] = 'b'
+              ..['workItemId'] = 'scene-b';
+        next['workItemExecution'] = binding;
+        next.remove('v2UsageObservationRef');
+        next.remove('lastToolResult');
+        task
+          ..executionStateJson = jsonEncode(next)
+          ..characterId = 'b'
+          ..contextSummary = ''
+          ..resultSummary = ''
+          ..lastError = ''
+          ..status = AgentTaskStatus.queued;
+        await runner.run(task, WorkTaskCancellation());
+        final both =
+            WorkDiscussionState.fromExecutionState(task.executionStateJson)!
+                .collaboration!;
+        expect(await WorkUsageReceiptStore(events()).valid(both, 'a'), isTrue);
+        expect(await WorkUsageReceiptStore(events()).valid(both, 'b'), isTrue,
+            reason: task.lastError);
+      }
+      if (partial) expect(task.lastError, contains('完整读取'));
+      expect(await source.readAsString(), content);
+    });
   }
 
   for (final resize in [false, true]) {
@@ -758,6 +1126,7 @@ class _BrowserSessionRecoveryGateway extends AiRequestGateway {
   @override
   Future<Map<String, dynamic>> sendChatMessageStreamed(
       {required String apiKey,
+      String? userAgent,
       required ApiProvider provider,
       ApiProtocol apiProtocol = ApiProtocol.defaultValue,
       String? promptCacheKey,

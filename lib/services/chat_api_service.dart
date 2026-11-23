@@ -15,6 +15,7 @@ import 'package:flutter/foundation.dart';
 part 'chat_api_service_support.dart';
 part 'chat_api_protocol_support.dart';
 part 'chat_api_models_support.dart';
+part 'chat_api_sampling_support.dart';
 
 class ChatApiService {
   static const String _emptyCompletionMessage = '模型返回了空内容';
@@ -25,6 +26,8 @@ class ChatApiService {
   /// recover from.
   static const String cancelledResultMessage = '请求已取消';
   static const int defaultMaxResponseBytes = 4 * 1024 * 1024;
+  static const int _maxHttpErrorBytes = 16 * 1024;
+  static const Duration _httpErrorReadTimeout = Duration(seconds: 3);
   static const int maxSseLineBytes = 512 * 1024;
   static const int maxSseWireBytes = 8 * 1024 * 1024;
   // Some relays keep connections open after finish_reason; briefly drain the usage trailer.
@@ -35,6 +38,11 @@ class ChatApiService {
 
   final Dio _dio;
   final RetrySleep _retrySleep;
+
+  /// Preserve negotiated sampling across nested retries without sharing it between requests.
+  static Future<T> withSamplingCompatibility<T>(
+          Future<T> Function() operation) =>
+      _withRequestSampling(operation);
 
   ChatApiService({Dio? dio, RetrySleep? retrySleep})
       : _retrySleep = retrySleep ?? Future<void>.delayed,
@@ -58,6 +66,7 @@ class ChatApiService {
     required ApiProvider provider,
     ApiProtocol apiProtocol = ApiProtocol.defaultValue,
     String? customBaseUrl,
+    String? userAgent,
     required String model,
     required List<Map<String, dynamic>> messages,
     double temperature = 0.85,
@@ -74,26 +83,28 @@ class ChatApiService {
         'message': _webNetworkUnsupportedMessage,
       };
     }
-    final result = await RetryHandler.executeWithRetry<Map<String, dynamic>>(
-      operation: (attempt) => _sendChatMessageOnce(
-        apiKey: apiKey,
-        provider: provider,
-        apiProtocol: apiProtocol,
-        promptCacheKey: promptCacheKey,
-        customBaseUrl: customBaseUrl,
-        model: model,
-        messages: messages,
-        temperature: attempt.temperatureFor(temperature),
-        maxTokens: maxTokens,
-        receiveTimeout: receiveTimeout,
-        cancelToken: cancelToken,
-        maxResponseBytes: defaultMaxResponseBytes,
-        allowReasoningContentFallback: allowReasoningContentFallback,
-      ),
-      shouldRetryResult: RetryHandler.isTransientResult,
-      sleep: _retrySleep,
-      maxRetries: maxRetries,
-    );
+    final result = await withSamplingCompatibility(
+        () => RetryHandler.executeWithRetry<Map<String, dynamic>>(
+              operation: (attempt) => _sendChatMessageOnce(
+                apiKey: apiKey,
+                provider: provider,
+                apiProtocol: apiProtocol,
+                promptCacheKey: promptCacheKey,
+                customBaseUrl: customBaseUrl,
+                userAgent: userAgent,
+                model: model,
+                messages: messages,
+                temperature: attempt.temperatureFor(temperature),
+                maxTokens: maxTokens,
+                receiveTimeout: receiveTimeout,
+                cancelToken: cancelToken,
+                maxResponseBytes: defaultMaxResponseBytes,
+                allowReasoningContentFallback: allowReasoningContentFallback,
+              ),
+              shouldRetryResult: RetryHandler.isTransientResult,
+              sleep: _retrySleep,
+              maxRetries: maxRetries,
+            ));
     return _friendlyRetryFailure(result, maxRetries);
   }
 
@@ -107,6 +118,7 @@ class ChatApiService {
     required ApiProvider provider,
     ApiProtocol apiProtocol = ApiProtocol.defaultValue,
     String? customBaseUrl,
+    String? userAgent,
     required String model,
     required List<Map<String, dynamic>> messages,
     double temperature = 0.85,
@@ -129,32 +141,34 @@ class ChatApiService {
     if (maxResponseBytes < 1) {
       return {'success': false, 'message': '响应大小限制无效'};
     }
-    final result = await RetryHandler.executeWithRetry<Map<String, dynamic>>(
-      operation: (attempt) => _sendChatMessageOnce(
-        apiKey: apiKey,
-        provider: provider,
-        apiProtocol: apiProtocol,
-        promptCacheKey: promptCacheKey,
-        customBaseUrl: customBaseUrl,
-        model: model,
-        messages: messages,
-        temperature: attempt.temperatureFor(temperature),
-        maxTokens: maxTokens,
-        receiveTimeout: receiveTimeout,
-        cancelToken: cancelToken,
-        maxResponseBytes: maxResponseBytes,
-        structuredJson: structuredJson,
-        reasoningEffort: reasoningEffort,
-        allowReasoningContentFallback: allowReasoningContentFallback,
-        stepPlanLowReasoning: _isStepPlanEndpoint(
-          provider: provider,
-          customBaseUrl: customBaseUrl,
-        ),
-      ),
-      shouldRetryResult: RetryHandler.isTransientResult,
-      sleep: _retrySleep,
-      maxRetries: maxRetries,
-    );
+    final result = await withSamplingCompatibility(
+        () => RetryHandler.executeWithRetry<Map<String, dynamic>>(
+              operation: (attempt) => _sendChatMessageOnce(
+                apiKey: apiKey,
+                provider: provider,
+                apiProtocol: apiProtocol,
+                promptCacheKey: promptCacheKey,
+                customBaseUrl: customBaseUrl,
+                userAgent: userAgent,
+                model: model,
+                messages: messages,
+                temperature: attempt.temperatureFor(temperature),
+                maxTokens: maxTokens,
+                receiveTimeout: receiveTimeout,
+                cancelToken: cancelToken,
+                maxResponseBytes: maxResponseBytes,
+                structuredJson: structuredJson,
+                reasoningEffort: reasoningEffort,
+                allowReasoningContentFallback: allowReasoningContentFallback,
+                stepPlanLowReasoning: _isStepPlanEndpoint(
+                  provider: provider,
+                  customBaseUrl: customBaseUrl,
+                ),
+              ),
+              shouldRetryResult: RetryHandler.isTransientResult,
+              sleep: _retrySleep,
+              maxRetries: maxRetries,
+            ));
     return _friendlyRetryFailure(result, maxRetries);
   }
 
@@ -240,6 +254,7 @@ class ChatApiService {
     required ApiProvider provider,
     required ApiProtocol apiProtocol,
     String? customBaseUrl,
+    String? userAgent,
     required String model,
     required List<Map<String, dynamic>> messages,
     required double temperature,
@@ -251,6 +266,7 @@ class ChatApiService {
     bool structuredJson = false,
     bool stepPlanLowReasoning = false,
     bool allowReasoningContentFallback = false,
+    bool useDefaultTemperature = false,
     String? promptCacheKey,
   }) async {
     if (kIsWeb) {
@@ -274,7 +290,20 @@ class ChatApiService {
       return {'success': false, 'message': '模型名称不能为空'};
     }
 
-    final headers = _requestHeaders(apiKey: apiKey, apiProtocol: apiProtocol);
+    final headers = _requestHeaders(
+      apiKey: apiKey,
+      apiProtocol: apiProtocol,
+      customBaseUrl: customBaseUrl,
+      userAgent: userAgent,
+    );
+    useDefaultTemperature = useDefaultTemperature ||
+        (_requestSamplingState?.useDefaultTemperature ?? false) ||
+        _isKnownTemperatureIncompatible(
+          provider: provider,
+          apiProtocol: apiProtocol,
+          customBaseUrl: customBaseUrl,
+          model: modelName,
+        );
 
     try {
       final response = await _dio.post(
@@ -288,6 +317,7 @@ class ChatApiService {
           maxTokens: maxTokens,
           streaming: false,
           structuredJson: structuredJson,
+          useDefaultTemperature: useDefaultTemperature,
           reasoningEffort: reasoningEffort,
           stepPlanLowReasoning: stepPlanLowReasoning,
         ),
@@ -304,9 +334,14 @@ class ChatApiService {
         cancelToken: cancelToken,
       );
 
-      final responseData = maxResponseBytes == null
-          ? response.data
-          : await _readBoundedResponseData(response.data, maxResponseBytes);
+      final responseData = response.statusCode != 200 &&
+              response.data is ResponseBody
+          ? await _readStreamErrorBody(response.data as ResponseBody,
+              maxResponseBytes: maxResponseBytes)
+          : maxResponseBytes == null
+              ? response.data
+              : await _readBoundedResponseData(response.data, maxResponseBytes);
+      if (cancelToken?.isCancelled == true) throw cancelToken!.cancelError!;
 
       if (response.statusCode == 200) {
         final data = _asJsonMap(responseData);
@@ -343,18 +378,57 @@ class ChatApiService {
           if (usage != null) ...usage,
         };
       } else {
-        final providerError = _safeProviderErrorDetail(responseData);
+        final providerError =
+            _safeProviderErrorDetail(responseData, apiKey: apiKey);
         final retryAfter = _retryAfterFromHeaders(response.headers);
-        return {
+        final failure = <String, dynamic>{
           'success': false,
           'statusCode': response.statusCode,
-          'message': _safeHttpErrorMessage(response.statusCode),
+          'message': _safeHttpErrorMessage(response.statusCode,
+              providerError: providerError),
           'requestPath': _requestPath(url),
           'requestModel': modelName,
           ...?_usageFields(_asJsonMap(responseData) ?? {}, apiProtocol),
           if (providerError != null) 'providerError': providerError,
           if (retryAfter != null) 'retryAfterMs': retryAfter.inMilliseconds,
         };
+        if (!useDefaultTemperature &&
+            response.statusCode == 400 &&
+            cancelToken?.isCancelled != true &&
+            _isFixedTemperatureRejection(responseData)) {
+          _requestSamplingState?.useDefaultTemperature = true;
+          _rememberTemperatureIncompatible(
+            provider: provider,
+            apiProtocol: apiProtocol,
+            customBaseUrl: customBaseUrl,
+            model: modelName,
+          );
+          final retry = await _sendChatMessageOnce(
+            apiKey: apiKey,
+            provider: provider,
+            apiProtocol: apiProtocol,
+            customBaseUrl: customBaseUrl,
+            userAgent: userAgent,
+            model: model,
+            messages: messages,
+            temperature: temperature,
+            maxTokens: maxTokens,
+            receiveTimeout: receiveTimeout,
+            cancelToken: cancelToken,
+            maxResponseBytes: maxResponseBytes,
+            reasoningEffort: reasoningEffort,
+            structuredJson: structuredJson,
+            stepPlanLowReasoning: stepPlanLowReasoning,
+            allowReasoningContentFallback: allowReasoningContentFallback,
+            useDefaultTemperature: true,
+            promptCacheKey: promptCacheKey,
+          );
+          return {
+            ...retry,
+            'usageAttempts': [failure, retry]
+          };
+        }
+        return failure;
       }
     } on _ChatResponseTooLargeException {
       return {'success': false, 'message': '模型响应超过安全大小限制'};
@@ -377,12 +451,14 @@ class ChatApiService {
           'failureDetail': detail,
         };
       } else if (e.response != null) {
-        final providerError = _safeProviderErrorDetail(e.response!.data);
+        final providerError =
+            _safeProviderErrorDetail(e.response!.data, apiKey: apiKey);
         final retryAfter = _retryAfterFromHeaders(e.response!.headers);
         return {
           'success': false,
           'statusCode': e.response!.statusCode,
-          'message': _safeHttpErrorMessage(e.response!.statusCode),
+          'message': _safeHttpErrorMessage(e.response!.statusCode,
+              providerError: providerError),
           'requestPath': _requestPath(
             e.response!.requestOptions.uri.toString(),
           ),
@@ -416,12 +492,14 @@ class ChatApiService {
     required ApiProvider provider,
     ApiProtocol apiProtocol = ApiProtocol.defaultValue,
     String? customBaseUrl,
+    String? userAgent,
   }) =>
       _fetchModelCatalog(
         apiKey: apiKey,
         provider: provider,
         apiProtocol: apiProtocol,
         customBaseUrl: customBaseUrl,
+        userAgent: userAgent,
       );
 
   Future<Map<String, dynamic>> sendChatMessageStreamed({
@@ -429,6 +507,7 @@ class ChatApiService {
     required ApiProvider provider,
     ApiProtocol apiProtocol = ApiProtocol.defaultValue,
     String? customBaseUrl,
+    String? userAgent,
     required String model,
     required List<Map<String, dynamic>> messages,
     double temperature = 0.85,
@@ -448,6 +527,7 @@ class ChatApiService {
       apiProtocol: apiProtocol,
       promptCacheKey: promptCacheKey,
       customBaseUrl: customBaseUrl,
+      userAgent: userAgent,
       model: model,
       messages: messages,
       temperature: temperature,
@@ -472,6 +552,7 @@ class ChatApiService {
     required ApiProvider provider,
     ApiProtocol apiProtocol = ApiProtocol.defaultValue,
     String? customBaseUrl,
+    String? userAgent,
     required String model,
     required List<Map<String, dynamic>> messages,
     double temperature = 0.85,
@@ -491,6 +572,7 @@ class ChatApiService {
       apiProtocol: apiProtocol,
       promptCacheKey: promptCacheKey,
       customBaseUrl: customBaseUrl,
+      userAgent: userAgent,
       model: model,
       messages: messages,
       temperature: temperature,
@@ -511,6 +593,7 @@ class ChatApiService {
     required ApiProvider provider,
     required ApiProtocol apiProtocol,
     String? customBaseUrl,
+    String? userAgent,
     required String model,
     required List<Map<String, dynamic>> messages,
     required double temperature,
@@ -531,55 +614,58 @@ class ChatApiService {
         'message': _webNetworkUnsupportedMessage,
       };
     }
-    final result = await RetryHandler.executeWithRetry<Map<String, dynamic>>(
-      operation: (attempt) {
-        final nextTemperature = attempt.temperatureFor(temperature);
-        if (!attempt.useStreaming) {
-          return _sendChatMessageOnce(
-            apiKey: apiKey,
-            provider: provider,
-            apiProtocol: apiProtocol,
-            promptCacheKey: promptCacheKey,
-            customBaseUrl: customBaseUrl,
-            model: model,
-            messages: messages,
-            temperature: nextTemperature,
-            maxTokens: maxTokens,
-            receiveTimeout: receiveTimeout,
-            cancelToken: cancelToken,
-            allowReasoningContentFallback: structuredJson,
-            structuredJson: structuredJson,
-            reasoningEffort: reasoningEffort,
-            stepPlanLowReasoning: _isStepPlanEndpoint(
-              provider: provider,
-              customBaseUrl: customBaseUrl,
-            ),
-            maxResponseBytes: defaultMaxResponseBytes,
-          );
-        }
-        return _collectStreamedOnce(
-          apiKey: apiKey,
-          provider: provider,
-          apiProtocol: apiProtocol,
-          promptCacheKey: promptCacheKey,
-          customBaseUrl: customBaseUrl,
-          model: model,
-          messages: messages,
-          temperature: nextTemperature,
-          maxTokens: maxTokens,
-          receiveTimeout: receiveTimeout,
-          cancelToken: cancelToken,
-          structuredJson: structuredJson,
-          finishOnTerminalFrame: finishOnTerminalFrame,
-          reasoningEffort: reasoningEffort,
-          onResponseActivity: onResponseActivity,
-          onEvent: onEvent,
-        );
-      },
-      shouldRetryResult: RetryHandler.isTransientResult,
-      sleep: _retrySleep,
-      maxRetries: maxRetries,
-    );
+    final result = await withSamplingCompatibility(
+        () => RetryHandler.executeWithRetry<Map<String, dynamic>>(
+              operation: (attempt) {
+                final nextTemperature = attempt.temperatureFor(temperature);
+                if (!attempt.useStreaming) {
+                  return _sendChatMessageOnce(
+                    apiKey: apiKey,
+                    provider: provider,
+                    apiProtocol: apiProtocol,
+                    promptCacheKey: promptCacheKey,
+                    customBaseUrl: customBaseUrl,
+                    userAgent: userAgent,
+                    model: model,
+                    messages: messages,
+                    temperature: nextTemperature,
+                    maxTokens: maxTokens,
+                    receiveTimeout: receiveTimeout,
+                    cancelToken: cancelToken,
+                    allowReasoningContentFallback: structuredJson,
+                    structuredJson: structuredJson,
+                    reasoningEffort: reasoningEffort,
+                    stepPlanLowReasoning: _isStepPlanEndpoint(
+                      provider: provider,
+                      customBaseUrl: customBaseUrl,
+                    ),
+                    maxResponseBytes: defaultMaxResponseBytes,
+                  );
+                }
+                return _collectStreamedOnce(
+                  apiKey: apiKey,
+                  provider: provider,
+                  apiProtocol: apiProtocol,
+                  promptCacheKey: promptCacheKey,
+                  customBaseUrl: customBaseUrl,
+                  userAgent: userAgent,
+                  model: model,
+                  messages: messages,
+                  temperature: nextTemperature,
+                  maxTokens: maxTokens,
+                  receiveTimeout: receiveTimeout,
+                  cancelToken: cancelToken,
+                  structuredJson: structuredJson,
+                  finishOnTerminalFrame: finishOnTerminalFrame,
+                  reasoningEffort: reasoningEffort,
+                  onResponseActivity: onResponseActivity,
+                  onEvent: onEvent,
+                );
+              },
+              shouldRetryResult: RetryHandler.isTransientResult,
+              sleep: _retrySleep,
+              maxRetries: maxRetries,
+            ));
     return _friendlyRetryFailure(result, maxRetries);
   }
 
@@ -637,6 +723,7 @@ class ChatApiService {
     required ApiProvider provider,
     ApiProtocol apiProtocol = ApiProtocol.defaultValue,
     String? customBaseUrl,
+    String? userAgent,
     required String model,
     required List<Map<String, dynamic>> messages,
     double temperature = 0.85,
@@ -655,6 +742,7 @@ class ChatApiService {
       apiProtocol: apiProtocol,
       promptCacheKey: promptCacheKey,
       customBaseUrl: customBaseUrl,
+      userAgent: userAgent,
       model: model,
       messages: messages,
       temperature: temperature,
@@ -673,6 +761,7 @@ class ChatApiService {
     required ApiProvider provider,
     required ApiProtocol apiProtocol,
     String? customBaseUrl,
+    String? userAgent,
     required String model,
     required List<Map<String, dynamic>> messages,
     required double temperature,
@@ -680,6 +769,7 @@ class ChatApiService {
     required Duration receiveTimeout,
     CancelToken? cancelToken,
     required bool structuredJson,
+    bool useDefaultTemperature = false,
     bool finishOnTerminalFrame = false,
     String? reasoningEffort,
     void Function()? onResponseActivity,
@@ -710,9 +800,22 @@ class ChatApiService {
     }
 
     final headers = <String, String>{
-      ..._requestHeaders(apiKey: apiKey, apiProtocol: apiProtocol),
+      ..._requestHeaders(
+        apiKey: apiKey,
+        apiProtocol: apiProtocol,
+        customBaseUrl: customBaseUrl,
+        userAgent: userAgent,
+      ),
       'Accept': 'text/event-stream',
     };
+    useDefaultTemperature = useDefaultTemperature ||
+        (_requestSamplingState?.useDefaultTemperature ?? false) ||
+        _isKnownTemperatureIncompatible(
+          provider: provider,
+          apiProtocol: apiProtocol,
+          customBaseUrl: customBaseUrl,
+          model: modelName,
+        );
     final data = _requestBody(
       promptCacheKey: promptCacheKey,
       apiProtocol: apiProtocol,
@@ -723,6 +826,7 @@ class ChatApiService {
       maxTokens: maxTokens,
       streaming: true,
       structuredJson: structuredJson,
+      useDefaultTemperature: useDefaultTemperature,
       stepPlanLowReasoning: _isStepPlanEndpoint(
         provider: provider,
         customBaseUrl: customBaseUrl,
@@ -757,11 +861,57 @@ class ChatApiService {
       );
 
       if (response.statusCode != 200) {
-        yield ChatStreamEvent.error(
-          _safeHttpErrorMessage(response.statusCode),
+        final errorData = await _readStreamErrorBody(response.data);
+        if (cancelToken?.isCancelled == true) throw cancelToken!.cancelError!;
+        final providerError =
+            _safeProviderErrorDetail(errorData, apiKey: apiKey);
+        final detail = providerError == null
+            ? null
+            : _failureDetail(StateError(providerError));
+        final failure = ChatStreamEvent.error(
+          _safeHttpErrorMessage(response.statusCode,
+              providerError: providerError),
           retryAfter: _retryAfterFromHeaders(response.headers),
           sanitized: true,
-        );
+          failureDetail: detail,
+        ).withUsage(ReportedTokenUsage.fromMap(
+            _usageFields(errorData ?? {}, apiProtocol) ?? {}));
+        if (!useDefaultTemperature &&
+            response.statusCode == 400 &&
+            cancelToken?.isCancelled != true &&
+            _isFixedTemperatureRejection(errorData)) {
+          _requestSamplingState?.useDefaultTemperature = true;
+          _rememberTemperatureIncompatible(
+            provider: provider,
+            apiProtocol: apiProtocol,
+            customBaseUrl: customBaseUrl,
+            model: modelName,
+          );
+          yield ChatStreamEvent(
+              type: ChatStreamEventType.token,
+              delta: '',
+              transportFailure: failure);
+          yield* _streamChatMessageInternal(
+            apiKey: apiKey,
+            provider: provider,
+            apiProtocol: apiProtocol,
+            customBaseUrl: customBaseUrl,
+            model: model,
+            messages: messages,
+            temperature: temperature,
+            maxTokens: maxTokens,
+            receiveTimeout: receiveTimeout,
+            cancelToken: cancelToken,
+            structuredJson: structuredJson,
+            useDefaultTemperature: true,
+            finishOnTerminalFrame: finishOnTerminalFrame,
+            reasoningEffort: reasoningEffort,
+            onResponseActivity: onResponseActivity,
+            promptCacheKey: promptCacheKey,
+          );
+        } else {
+          yield failure;
+        }
         return;
       }
 

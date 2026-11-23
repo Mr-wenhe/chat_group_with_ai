@@ -1,3 +1,8 @@
+import '../../core/streaming/chat_stream_event.dart';
+import 'context_compaction_decision.dart';
+import '../web_search/desktop/desktop_web_service.dart';
+import '../web_search/desktop/web_worker_client.dart';
+import '../web_search/desktop/network_reply_stream.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -49,7 +54,6 @@ import 'package:chat_group/features/web_search/application/search_flow_logger.da
 import 'package:chat_group/features/web_search/models/search_models.dart'
     as web_search;
 import 'package:chat_group/features/web_search/models/search_runtime_settings.dart';
-import 'package:chat_group/features/web_search/presentation/web_search_sources_dialog.dart';
 import 'package:chat_group/features/chat_group/agentic_reply_utils.dart';
 import 'package:chat_group/features/chat_group/ai_speaker_selector.dart';
 import 'package:chat_group/features/chat_group/attachment_utils.dart';
@@ -83,6 +87,7 @@ import 'package:chat_group/features/chat_group/reply_eligibility_policy.dart';
 import 'package:chat_group/features/chat_group/roundtable_mode_config_service.dart';
 import 'package:chat_group/features/chat_group/roundtable_mode_session.dart';
 import 'package:chat_group/features/chat_group/roundtable_news_role_service.dart';
+import 'package:chat_group/features/web_search/application/autonomous_web_policy.dart';
 import 'package:chat_group/features/chat_group/scene_behavior.dart';
 import 'package:chat_group/features/chat_group/message_action_item.dart';
 import 'package:chat_group/features/chat_group/streaming_reply_session.dart';

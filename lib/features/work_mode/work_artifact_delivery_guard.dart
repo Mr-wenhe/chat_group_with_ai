@@ -131,7 +131,7 @@ class WorkArtifactDeliveryGuard {
   /// file contract, the source signal and the format filter cannot disagree
   /// about the same text again.
   static String _formatScanText(String request) =>
-      request.trim().replaceAll(_initialismDot, r'$1').toLowerCase();
+      request.trim().replaceAllMapped(_initialismDot, (match) => match[1]!).toLowerCase();
 
   /// Returns whether [request] asks for a source-code file rather than merely
   /// asking the model to explain or review code.

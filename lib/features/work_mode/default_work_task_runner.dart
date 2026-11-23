@@ -1,3 +1,6 @@
+import '../web_search/desktop/desktop_web_service.dart';
+import '../web_search/desktop/web_worker_client.dart';
+import 'work_web_tools.dart';
 import 'work_task_attachment_context.dart';
 import 'work_task_completion_choice.dart';
 import 'dart:async';
@@ -195,6 +198,30 @@ class DefaultWorkTaskRunner
     } finally {
       token.cancel();
     }
+  }
+
+  WebWorkerClient? _webWorker;
+  final _webSessions = <String, DesktopWebService>{};
+
+  DesktopWebService _webForTask(AgentTask task) {
+    _webSessions.removeWhere((id, _) => database.agentTaskBox.get(id) == null);
+    final service = _webSessions.putIfAbsent(task.id, () {
+      final service =
+          DesktopWebService(_webWorker ??= WebWorkerClient.bundled());
+      service.restoreSources(_decodeMap(task.executionStateJson)['webSources']);
+      return service;
+    });
+    service.registerUserSources(WorkDiscussionState.currentRequestScope(task));
+    final state = _decodeMap(task.executionStateJson);
+    state['webSources'] = service.exportSources();
+    task.executionStateJson = jsonEncode(state);
+    return service;
+  }
+
+  void closeWebTools() {
+    _webWorker?.close();
+    _webWorker = null;
+    _webSessions.clear();
   }
 
   final DatabaseService database;

@@ -5,7 +5,6 @@ import 'package:dio/dio.dart';
 import '../models/search_failure.dart';
 import '../models/search_models.dart' as domain;
 import '../providers/search_provider.dart';
-import '../providers/duckduckgo_result_page_enricher.dart';
 import '../models/search_failure_factory.dart';
 import 'search_failure_mapper.dart';
 import 'search_provider_route.dart';
@@ -24,25 +23,22 @@ class SearchProviderChain {
   final List<SearchProviderRoute> _routes;
   final SearchRetryPolicy retryPolicy;
   final DateTime Function() _clock;
-  final DuckDuckGoResultPageEnricher? _duckDuckGoPageEnricher;
   final Map<String, _ProviderCircuitState> _circuits = {};
 
   SearchProviderChain({
     required Iterable<SearchProviderRoute> routes,
     required this.retryPolicy,
     DateTime Function()? clock,
-    DuckDuckGoResultPageEnricher? duckDuckGoPageEnricher,
   })  : _routes = List.unmodifiable(routes),
-        _clock = clock ?? DateTime.now,
-        _duckDuckGoPageEnricher = duckDuckGoPageEnricher;
+        _clock = clock ?? DateTime.now;
 
   String primaryProviderKey(domain.SearchRequest request) {
-    final routes = _routesFor(request);
+    final routes = _routesFor();
     return routes.isEmpty ? 'none' : routes.first.cacheKey;
   }
 
   String primaryProviderName(domain.SearchRequest request) {
-    final routes = _routesFor(request);
+    final routes = _routesFor();
     return routes.isEmpty ? 'none' : routes.first.providerName;
   }
 
@@ -50,7 +46,7 @@ class SearchProviderChain {
   /// query. Consent cannot be limited to the primary route because a later
   /// retry may legitimately cross a Provider boundary.
   String providerDisclosure(domain.SearchRequest request) {
-    final names = _routesFor(request)
+    final names = _routesFor()
         .map((route) => route.providerName)
         .toSet()
         .toList(growable: false);
@@ -78,7 +74,7 @@ class SearchProviderChain {
         failure: buildSearchFailure(type: SearchFailureType.unsafeQuery),
       );
     }
-    final routes = _routesFor(request);
+    final routes = _routesFor();
     final startedAt = _clock();
     final policyDeadline = startedAt.add(retryPolicy.totalBudget);
     final effectiveDeadline =
@@ -174,8 +170,7 @@ class SearchProviderChain {
             cancelToken: attemptCancelToken,
           );
         },
-        shouldRetryResult: (response) =>
-            SearchRetryPolicy.isRetryableFailure(
+        shouldRetryResult: (response) => SearchRetryPolicy.isRetryableFailure(
           failure: response.failure,
           statusCode: response.statusCode,
         ),
@@ -238,13 +233,6 @@ class SearchProviderChain {
       }
 
       var response = _normalizeResponse(attempt.requireValue);
-      // DuckDuckGo returns lightweight snippets; hydrate its first two links
-      // before building the immutable snapshot consumed by the LLM prompt.
-      response = await _enrichDuckDuckGoResponse(
-        route: route,
-        response: response,
-        cancelToken: cancelToken,
-      );
       if (response.failure?.retryable == true) {
         _recordRetryableFailure(route);
       } else {
@@ -318,15 +306,9 @@ class SearchProviderChain {
         );
   }
 
-  List<SearchProviderRoute> _routesFor(domain.SearchRequest request) {
+  List<SearchProviderRoute> _routesFor() {
     final indexed = _routes
         .where((route) => route.enabled)
-        .where(
-          (route) =>
-              route.isNative ||
-              route.kind != domain.SearchProviderKind.duckDuckGoInstantAnswer ||
-              _isStableKnowledge(request),
-        )
         .toList(growable: false)
         .asMap()
         .entries
@@ -335,25 +317,11 @@ class SearchProviderChain {
       final a = left.value;
       final b = right.value;
       if (a.isPrimary != b.isPrimary) return a.isPrimary ? -1 : 1;
-      final tier = _fallbackTier(a).compareTo(_fallbackTier(b));
-      if (tier != 0) return tier;
       if (a.isFallback != b.isFallback) return a.isFallback ? 1 : -1;
       final priority = a.priority.compareTo(b.priority);
       return priority == 0 ? left.key.compareTo(right.key) : priority;
     });
     return indexed.map((entry) => entry.value).toList(growable: false);
-  }
-
-  static bool _isStableKnowledge(domain.SearchRequest request) =>
-      request.category == domain.SearchCategory.general &&
-      request.freshness == domain.SearchFreshness.any;
-
-  static int _fallbackTier(SearchProviderRoute route) {
-    if (route.kind == domain.SearchProviderKind.duckDuckGoInstantAnswer) {
-      return 1;
-    }
-    if (route.kind == domain.SearchProviderKind.keylessHtml) return 2;
-    return 0;
   }
 
   SearchProviderResponse _normalizeResponse(SearchProviderResponse response) {
@@ -388,42 +356,6 @@ class SearchProviderChain {
         providerRequestId: response.providerRequestId,
       ),
     );
-  }
-
-  Future<SearchProviderResponse> _enrichDuckDuckGoResponse({
-    required SearchProviderRoute route,
-    required SearchProviderResponse response,
-    required CancelToken? cancelToken,
-  }) async {
-    final enricher = _duckDuckGoPageEnricher;
-    final sourceProvider = response.sourceProvider?.toLowerCase() ?? '';
-    final isDuckDuckGoRoute =
-        route.kind == domain.SearchProviderKind.duckDuckGoInstantAnswer ||
-            (route.kind == domain.SearchProviderKind.keylessHtml &&
-                !sourceProvider.contains('bing'));
-    if (enricher == null || !isDuckDuckGoRoute || response.items.isEmpty) {
-      return response;
-    }
-    try {
-      final items = await enricher.enrich(
-        response.items,
-        cancelToken: cancelToken,
-      );
-      return SearchProviderResponse(
-        items: items,
-        providerRequestId: response.providerRequestId,
-        sourceProvider: response.sourceProvider,
-        correctedQuery: response.correctedQuery,
-        moreResultsAvailable: response.moreResultsAvailable,
-        fromCache: response.fromCache,
-        degraded: response.degraded,
-        terminal: response.terminal,
-        failure: response.failure,
-        statusCode: response.statusCode,
-      );
-    } on Object {
-      return response;
-    }
   }
 
   domain.WebSearchSnapshot _failureSnapshot({

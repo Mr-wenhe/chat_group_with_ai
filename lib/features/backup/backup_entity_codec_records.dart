@@ -17,6 +17,7 @@ class _BackupEntityRecordCodec {
         'enableWorkPromptCaching': item.enableWorkPromptCaching,
         'modelName': item.modelName,
         'customBaseUrl': _publicUrl(item.customBaseUrl),
+        'userAgent': item.userAgent,
         'createdAt': _date(item.createdAt),
         'credentialRequired': item.hasCredential ||
             item.legacyApiKeyForMigration?.isNotEmpty == true,
@@ -30,6 +31,7 @@ class _BackupEntityRecordCodec {
         enableWorkPromptCaching: json['enableWorkPromptCaching'] == true,
         modelName: _string(json, 'modelName'),
         customBaseUrl: json['customBaseUrl']?.toString() ?? '',
+        userAgent: json['userAgent']?.toString() ?? '',
         createdAt: _dateTime(json, 'createdAt'),
         apiKey: '',
         credentialId: '',

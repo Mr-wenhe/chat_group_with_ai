@@ -154,6 +154,17 @@ extension _DefaultWorkTaskRunnerUsage on DefaultWorkTaskRunner {
     if (observation.operation == 'bundle-integrity-failed') {
       usage.observations.removeWhere((item) => item.runtime == 'macos-native');
     }
+    final newBodyChunk = observation.valid &&
+        observation.runtime == 'document' &&
+        observation.operation == 'body-read' &&
+        observation.chunkIndexes.any((chunk) => !usage.observations.any(
+            (previous) =>
+                previous.runtime == 'document' &&
+                previous.operation == 'body-read' &&
+                previous.documentPath == observation.documentPath &&
+                previous.documentDigest == observation.documentDigest &&
+                previous.chunkCount == observation.chunkCount &&
+                previous.chunkIndexes.contains(chunk)));
     usage.observations.add(observation);
     final body = jsonEncode({
       'taskId': task.id,
@@ -171,7 +182,18 @@ extension _DefaultWorkTaskRunnerUsage on DefaultWorkTaskRunner {
     await eventStore.recordCommittedAction(task.id, 'usage-observations:$hash');
     final root = _decodeMap(task.executionStateJson)
       ..['v2UsageObservationRef'] = hash.substring(0, 24);
-    task.executionStateJson = jsonEncode(root);
+    // Another member receiving a new chunk is real evidence even if the bytes match.
+    task.executionStateJson = jsonEncode(newBodyChunk
+        ? WorkProgressGuard.observe(
+                root,
+                WorkProgressObservation(
+                    kind: WorkProgressObservationKind.progress,
+                    fingerprint: 'document-usage:$hash',
+                    summary: '成员已实际收到新的文档正文分块。',
+                    missing: '需要本人完整阅读当前候选并提交反馈。'),
+                now: clock())
+            .executionState
+        : root);
   }
 
   Future<void> _recordDocumentModelUse(
@@ -205,14 +227,23 @@ extension _DefaultWorkTaskRunnerUsage on DefaultWorkTaskRunner {
       }
       final sourcePath = data['path'];
       if (sourcePath is! String) continue;
-      final candidateFile = usage.candidate.files.where((file) {
-        final path = file['path'] as String;
-        return file['sha256'] == documentDigest &&
-            p.equals(
-              p.normalize(File(sourcePath).absolute.path),
-              p.normalize(usage.candidate.file(path).absolute.path),
-            );
-      }).firstOrNull;
+      Map<String, dynamic>? candidateFile;
+      try {
+        // 候选路径可保留平台别名，工具返回的是规范路径。
+        final source = await File(sourcePath).resolveSymbolicLinks();
+        for (final file in usage.candidate.files) {
+          if (file['sha256'] != documentDigest) continue;
+          final expected = await usage.candidate
+              .file(file['path'] as String)
+              .resolveSymbolicLinks();
+          if (p.equals(source, expected)) {
+            candidateFile = file;
+            break;
+          }
+        }
+      } on FileSystemException {
+        continue;
+      }
       if (candidateFile == null) continue;
       final documentPath = candidateFile['path'] as String;
       final isVisual = data['pageNumber'] is int;
@@ -353,7 +384,10 @@ extension _DefaultWorkTaskRunnerUsage on DefaultWorkTaskRunner {
 
   bool _containsSentText(Object? value, String target, {int depth = 0}) {
     if (value is String) {
-      if (value.contains(target)) return true;
+      // 动态上下文带前缀，完整 JSON 字符串中的正文仍已实际送达。
+      if (value.contains(target) || value.contains(jsonEncode(target))) {
+        return true;
+      }
       if (depth >= 4) return false;
       try {
         return _containsSentText(jsonDecode(value), target, depth: depth + 1);
@@ -421,12 +455,15 @@ extension _DefaultWorkTaskRunnerUsage on DefaultWorkTaskRunner {
                                   p.normalize(candidatePath));
                         }).firstOrNull;
                   if (entry == null ||
-                      !const {'docx', 'pdf'}.contains(p
-                          .extension(entry['path'] as String)
-                          .toLowerCase()
-                          .replaceFirst('.', ''))) {
+                      !(operation == 'render'
+                          ? const {'docx', 'pdf'}.contains(p
+                              .extension(entry['path'] as String)
+                              .toLowerCase()
+                              .replaceFirst('.', ''))
+                          : WorkDocumentTool.supportsBodyFile(
+                              entry['path'] as String))) {
                     return const WorkToolResult.permissionDenied(
-                        message: '文档使用只能读取本轮冻结候选中的 DOCX 或 PDF。');
+                        message: '文档使用只能读取本轮冻结候选中的受支持文档；页图仅支持 DOCX 或 PDF。');
                   }
                   final candidatePath = usage.candidate
                       .file(entry['path'] as String)
@@ -1156,7 +1193,9 @@ extension _DefaultWorkTaskRunnerUsage on DefaultWorkTaskRunner {
     }
     if (feedback['result'] != 'blocked' && usage.observations.isEmpty ||
         usage.observations.any((o) => !o.matches(current, usage.actorId))) {
-      return '缺少本人当前候选的真实操作及前后观察，不能用报告或命令 JSON 代替。';
+      return requiresDocumentFeedback
+          ? '缺少本人当前候选的完整文档读取收据。请用 workspace.document 从 startChunk:0 开始，按 nextChunkStart 读完冻结候选；视觉检查须实际收到必要页图，再提交 documentEvidence。来源读取或文本预览不能代替。'
+          : '缺少本人当前候选的真实操作及前后观察，不能用报告或命令 JSON 代替。';
     }
     // A blocked member must be able to record a missing renderer, vision model, or page.
     if (requiresDocumentFeedback && feedback['result'] != 'blocked') {
@@ -1229,13 +1268,15 @@ extension _DefaultWorkTaskRunnerUsage on DefaultWorkTaskRunner {
       return '文档使用能力只能验收冻结的文档候选。';
     }
     final candidates = usage.candidate.files
-        .where((file) => const {'docx', 'pdf'}.contains(p
-            .extension(file['path'] as String)
-            .toLowerCase()
-            .replaceFirst('.', '')))
+        .where((file) => capabilities.contains('document.body')
+            ? WorkDocumentTool.supportsBodyFile(file['path'] as String)
+            : const {'docx', 'pdf'}.contains(p
+                .extension(file['path'] as String)
+                .toLowerCase()
+                .replaceFirst('.', '')))
         .map((file) => file['path'] as String)
         .toSet();
-    if (candidates.isEmpty) return '冻结候选没有 DOCX 或 PDF 文件。';
+    if (candidates.isEmpty) return '冻结候选没有支持正文解析的文档。';
     final observations = usage.observations
         .where((observation) => observation.runtime == 'document')
         .toList(growable: false);
@@ -1290,7 +1331,9 @@ extension _DefaultWorkTaskRunnerUsage on DefaultWorkTaskRunner {
           return '$fileName 尚未由本人模型完整读取。';
         }
       }
-      if (capabilities.contains('document.visual')) {
+      if (capabilities.contains('document.visual') &&
+          const {'docx', 'pdf'}.contains(
+              p.extension(documentPath).toLowerCase().replaceFirst('.', ''))) {
         final visual = fileObservations
             .where((observation) => observation.operation == 'visual-read')
             .toList(growable: false);

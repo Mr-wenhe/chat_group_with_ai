@@ -1,6 +1,22 @@
 part of 'default_work_task_runner.dart';
 
 extension _ProductionChanges on DefaultWorkTaskRunner {
+  List<String> _productionFileNames(WorkCollaborationState state) {
+    final declared = state.artifactContract['files'];
+    if (declared is List) return declared.cast<String>();
+    final location = state.artifactContract['location'];
+    // Document contracts may name just one output; software still needs files.
+    if (state.artifactContract['type'] == 'document' &&
+        location is String &&
+        !location.contains('[本地路径]') &&
+        !location.contains('[REDACTED]') &&
+        !location.contains('://') &&
+        p.extension(location).isNotEmpty) {
+      return [location];
+    }
+    return const [];
+  }
+
   Future<bool> _recoverUnchangedProduction(
       AgentTask task, WorkCollaborationState state) async {
     if (state.currentIteration == null ||
@@ -63,8 +79,7 @@ extension _ProductionChanges on DefaultWorkTaskRunner {
     final workspace = _workspaceRootForTask(task);
     if (files == null || workspace == null) return;
     final hashes = <String, String?>{};
-    for (final name in (_candidateState(task).artifactContract['files'] as List)
-        .cast<String>()) {
+    for (final name in _productionFileNames(_candidateState(task))) {
       final path = p.normalize(p.join(workspace, name));
       try {
         final resolved = await files.pathPolicy.resolveNewTarget(path);
@@ -106,7 +121,9 @@ extension _ProductionChanges on DefaultWorkTaskRunner {
     final canonicalWorkspace =
         (await files.pathPolicy.resolveExisting(workspace)).path;
     final state = _candidateState(task);
-    final declared = (state.artifactContract['files'] as List).cast<String>();
+    final declared = (baseline['hashes'] as Map).keys.cast<String>()
+        .map((name) => p.relative(name, from: canonicalWorkspace))
+        .toSet();
     final previous = state.currentIteration == null
         ? null
         : (await (await candidatePublisher(task)).recover()).lastOrNull;

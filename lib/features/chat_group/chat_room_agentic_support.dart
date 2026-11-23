@@ -36,10 +36,10 @@ extension _ChatRoomAgenticRecoverySupport on _ChatRoomPageState {
 
   /// 启动空闲自动聊天调度器（首次延迟带随机抖动）。
   ///
-  /// 只有用户真的在看这个群时才启动：被别的页面盖住或 App 退到后台时
-  /// [_roomWorkAllowed] 为假，此时连调度器都不该存在。
+  /// 自动聊天只要求"会话还在"：窗口被遮挡/失焦继续跑（用户 2026-11-17 拍板），
+  /// 只有真正离开会话（App 内切页、页面销毁）才停——见 [_roomSessionVisible]。
   void _startAutoChat() {
-    if (!_roomWorkAllowed) return;
+    if (!_autoChatAllowed) return;
     if (!ChatActivityPolicy.canStartAutoChat(
       workModeEnabled: _workModeEnabled,
       hasActiveWorkTask: _hasActiveWorkTaskForAutoChat,
@@ -92,7 +92,9 @@ extension _ChatRoomAgenticRecoverySupport on _ChatRoomPageState {
   /// 一轮内的发言者**逐次**选出：上一位说完再决定下一位，因此候补是基于最新
   /// 对话算出来的，而不是开场时一次锁定。
   Future<void> _tryAutoChatRound() async {
-    if (!_roomWorkAllowed) return;
+    if (!_autoChatAllowed) {
+      return;
+    }
     if (_hasActiveWorkTaskForAutoChat) {
       _stopAutoChat();
       return;
@@ -110,7 +112,9 @@ extension _ChatRoomAgenticRecoverySupport on _ChatRoomPageState {
       }
       return;
     }
-    if (!_canTouchUi) return;
+    if (!_canTouchUi) {
+      return;
+    }
     if (_isAiReplying ||
         _isStreaming ||
         _textController.text.trim().isNotEmpty) {
@@ -137,7 +141,9 @@ extension _ChatRoomAgenticRecoverySupport on _ChatRoomPageState {
     // beginAutoGuard 返回 null 表示已有回合占用，本轮直接放弃。其完成
     // 不依赖 UI 活跃状态，避免页面切出后把会话永久留在 generating。
     final autoRunGuard = _conversationController.beginAutoGuard();
-    if (autoRunGuard == null) return;
+    if (autoRunGuard == null) {
+      return;
+    }
 
     // 与本群普通回合同一条代际口径：中途离开本群（哪怕立刻回来）让这一轮作废，
     // 循环据此收手，而不是接着往下一位发言者走。
@@ -157,7 +163,7 @@ extension _ChatRoomAgenticRecoverySupport on _ChatRoomPageState {
           step++) {
         // 循环内逐次复检：用户可能中途关闭自动聊天、切到工作模式或离开本群。
         if (!_isAutoChatEnabled || _autoChatPausedByWorkMode) break;
-        if (!_roomWorkAllowed) break;
+        if (!_autoChatAllowed) break;
         if (roundGeneration != _roomRoundGeneration) break;
         if (autoChatGeneration != _autoChatRoundGeneration) break;
         if (_conversationController.state.phase == ConversationPhase.stopping) {

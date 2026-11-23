@@ -763,8 +763,11 @@ class _V2DiscussionSession {
       state.issues.where((issue) => issue['status'] == 'open').firstOrNull;
 
   bool _formalPlanNeedsRevision(Map<String, dynamic> issue) =>
-      _canReviewFormalPlanIssue(issue, issue['sourceId'] as String) &&
-      _reviewedFormalPlans[issue['id']] == _formalPlanRef;
+      _isPreProductionPlanIssue(issue) &&
+      (issue['requestRevision'] == state.requestRevision &&
+              _formalPlanSnapshot
+                  .containsKey((issue['target'] as String).split('.').first) ||
+          _reviewedFormalPlans[issue['id']] == _formalPlanRef);
 
   Map<String, dynamic>? get _ideaNeedingRevision {
     return state.issues
@@ -988,6 +991,9 @@ class _V2DiscussionSession {
       Map<String, dynamic> promptEvidence,
       Map<String, dynamic> turnFocus,
       Map<String, dynamic> collaboration) {
+    final canInvestigateWeb = WebWorkerClient.isSupported &&
+        runner.investigate != null &&
+        workModeAllowsAutonomousNetworkTools(member.character);
     final modelCapability = member.provider == null || member.config == null
         ? null
         : runner.gateway.capability(member.provider!, member.config!.modelName);
@@ -1017,6 +1023,7 @@ class _V2DiscussionSession {
           state.issues.where((i) => i['status'] == 'open').firstOrNull,
       'evidence': promptEvidence,
       'authorizedSearchEvidence': _searchEvidence(member.character.id),
+      if (canInvestigateWeb) 'publicWeb': _publicWebContext(),
       // 预览只供自然衔接；完整义务、认可和证据仍来自上方权威台账。
       'recentDiscussion': replies
           .skip(
@@ -1042,14 +1049,16 @@ class _V2DiscussionSession {
                 'instructions': s.instructions
               })
           .toList(),
-      'effectiveTools': member.character.toolPermissions
-          .where((p) =>
-              task.requestedPermissions.isEmpty ||
-              task.requestedPermissions.contains(p))
-          .map((p) => p.name)
-          .toList(),
+      'effectiveTools': [
+        ...member.character.toolPermissions
+            .where((p) =>
+                task.requestedPermissions.isEmpty ||
+                task.requestedPermissions.contains(p))
+            .map((p) => p.name),
+        if (canInvestigateWeb) ...['web.search', 'web.read'],
+      ],
       'capabilities': {
-        'registeredInvestigationAdapter': runner.investigate != null,
+        'registeredInvestigationAdapter': canInvestigateWeb,
         if (modelCapability != null) ...{
           'modelCapabilityKnown': modelCapability.isKnown,
           'supportsVision': modelCapability.supportsVision,
@@ -1060,6 +1069,22 @@ class _V2DiscussionSession {
       // Keep the actual turn after the complete ledger, including long histories.
       'turnFocus': turnFocus,
       'outputGuidance': _outputGuidance(member),
+    };
+  }
+
+  Map<String, dynamic> _publicWebContext() {
+    final checkpoint =
+        Map<String, dynamic>.from(jsonDecode(task.executionStateJson) as Map);
+    final sources = PublicWebSources()
+      ..restore(checkpoint['webSources'])
+      ..registerUserText(WorkDiscussionState.currentRequestScope(task));
+    checkpoint['webSources'] = sources.toMap();
+    task.executionStateJson = jsonEncode(checkpoint);
+    return {
+      'tools': ['web.search', 'web.read'],
+      'productionTools': ['web.search', 'web.read', 'web.download'],
+      'sources': sources.toMap(),
+      'untrustedExternalData': true,
     };
   }
 

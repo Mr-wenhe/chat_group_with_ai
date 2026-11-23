@@ -7,6 +7,113 @@ import 'package:chat_group/features/agentic/context_window_manager.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test('群聊默认短回复 1024，私聊按声明放宽但封顶 4096', () {
+    // 默认（群聊等）保持原有 1024。
+    expect(
+        ContextWindowManager.replyOutputBudget(
+            contextWindow: 8192, maxOutput: 8192),
+        1024);
+    expect(
+        ContextWindowManager.replyOutputBudget(
+            contextWindow: 1000000, maxOutput: 200000),
+        1024);
+    // 私聊：跟着声明的 maxOutput 走，封顶 4096，且不超过窗口一半。
+    expect(
+        ContextWindowManager.replyOutputBudget(
+            contextWindow: 16384,
+            maxOutput: 8192,
+            replyCeiling: ContextWindowManager.directChatReplyOutputCeiling),
+        4096);
+    // 小窗口不放宽：4096 输出会把输入压到放不下人设与共同设定。
+    expect(
+        ContextWindowManager.replyOutputBudget(
+            contextWindow: 8192,
+            maxOutput: 8192,
+            replyCeiling: ContextWindowManager.directChatReplyOutputCeiling),
+        1024);
+    expect(
+        ContextWindowManager.replyOutputBudget(
+            contextWindow: 1000000,
+            maxOutput: 200000,
+            replyCeiling: ContextWindowManager.directChatReplyOutputCeiling),
+        4096);
+    expect(
+        ContextWindowManager.replyOutputBudget(
+            contextWindow: 16384,
+            maxOutput: 2048,
+            replyCeiling: ContextWindowManager.directChatReplyOutputCeiling),
+        2048);
+    expect(
+        ContextWindowManager.replyOutputBudget(
+            contextWindow: 8192,
+            maxOutput: 512,
+            replyCeiling: ContextWindowManager.directChatReplyOutputCeiling),
+        512);
+    expect(
+        ContextWindowManager.replyOutputBudget(
+            contextWindow: 2048,
+            maxOutput: 8192,
+            replyCeiling: ContextWindowManager.directChatReplyOutputCeiling),
+        1024);
+    // 需要完整来源链接时按 4096 与窗口一半收敛（与聊天类型无关）。
+    expect(
+        ContextWindowManager.replyOutputBudget(
+            contextWindow: 8192, maxOutput: 8192, completeSourceLinks: true),
+        4096);
+    expect(
+        ContextWindowManager.replyOutputBudget(
+            contextWindow: 8192, maxOutput: 512, completeSourceLinks: true),
+        512);
+    expect(
+        ContextWindowManager.replyOutputBudget(
+            contextWindow: 1000000,
+            maxOutput: 80000,
+            completeSourceLinks: true),
+        4096);
+    expect(
+        ContextWindowManager.replyOutputBudget(
+            contextWindow: 1, maxOutput: 8192, completeSourceLinks: true),
+        1);
+  });
+  test('只有 SenseNova 6.8 Flash Lite 普通私聊可用 8192 输出预算', () {
+    int budget({
+      required String modelName,
+      bool isDirectChat = true,
+      bool completeSourceLinks = false,
+      int contextWindow = 131072,
+      int maxOutput = 8192,
+    }) =>
+        ContextWindowManager.replyOutputBudget(
+          contextWindow: contextWindow,
+          maxOutput: maxOutput,
+          completeSourceLinks: completeSourceLinks,
+          isDirectChat: isDirectChat,
+          modelName: modelName,
+          replyCeiling: isDirectChat
+              ? ContextWindowManager.directChatReplyOutputCeiling
+              : ContextWindowManager.shortReplyMaxOutput,
+        );
+
+    expect(budget(modelName: 'sensenova-6.8-flash-lite'), 8192);
+    expect(
+      budget(modelName: 'sensenova-6.8-flash-lite', completeSourceLinks: true),
+      8192,
+    );
+    expect(
+      budget(modelName: 'sensenova-6.8-flash-lite', isDirectChat: false),
+      1024,
+    );
+    expect(budget(modelName: 'qiniu/conatus-free'), 4096);
+    expect(budget(modelName: 'sensenova-6.7-flash-lite'), 4096);
+    expect(
+      budget(modelName: 'sensenova-6.8-flash-lite', contextWindow: 8192),
+      1024,
+    );
+    expect(
+      budget(modelName: 'sensenova-6.8-flash-lite', maxOutput: 4096),
+      4096,
+    );
+  });
   test('默认压缩阈值为 200k token 并按字符粗略估算', () {
     const manager = ContextWindowManager(
       complete: _unusedCompletion,

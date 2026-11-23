@@ -8,7 +8,6 @@ import 'package:chat_group/features/web_search/models/search_failure.dart';
 import 'package:chat_group/features/web_search/models/search_models.dart';
 import 'package:chat_group/features/web_search/providers/native_web_search_adapter.dart';
 import 'package:chat_group/features/web_search/providers/search_provider.dart';
-import 'package:chat_group/features/web_search/providers/search_provider_http_support.dart';
 import 'package:dio/dio.dart';
 import 'package:flutter_test/flutter_test.dart';
 

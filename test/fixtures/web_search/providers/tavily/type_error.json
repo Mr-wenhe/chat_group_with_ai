@@ -1,7 +1,0 @@
-{
-  "query": "malformed",
-  "request_id": "tavily-malformed-001",
-  "results": {
-    "unexpected": "object"
-  }
-}

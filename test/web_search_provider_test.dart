@@ -1,13 +1,7 @@
-import 'dart:convert';
-import 'dart:io';
 
-import 'package:chat_group/features/ai_governance/ai_governance_models.dart';
-import 'package:chat_group/features/ai_governance/search_audit_entry.dart';
 import 'package:chat_group/features/web_search/application/search_snapshot_builder.dart';
 import 'package:chat_group/features/web_search/models/search_models.dart';
-import 'package:chat_group/features/web_search/providers/duckduckgo_instant_answer_provider.dart';
 import 'package:chat_group/features/web_search/providers/search_provider.dart';
-import 'package:dio/dio.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
@@ -29,134 +23,6 @@ void main() {
       () => validateSearchUrl(Uri.parse('http://public.example/article')),
       throwsArgumentError,
     );
-  });
-
-  group('DuckDuckGoInstantAnswerProvider JSON branches', () {
-    test('parses Abstract fields', () async {
-      final response = await _searchFixture('abstract.json');
-
-      expect(response.failure, isNull);
-      expect(response.items, hasLength(1));
-      expect(response.items.single.title, 'Dart');
-      expect(response.items.single.snippet, contains('client-optimized'));
-      expect(response.items.single.url, Uri.parse('https://dart.dev/'));
-    });
-
-    test('parses Answer fields without copying the query into its source URL',
-        () async {
-      final response = await _searchFixture('answer.json');
-
-      expect(response.failure, isNull);
-      expect(response.items, hasLength(1));
-      expect(response.items.single.title, 'calc');
-      expect(response.items.single.snippet, '42');
-      expect(response.items.single.url.scheme, 'https');
-      expect(response.items.single.url.queryParameters['ia'], 'answer');
-      expect(response.items.single.url.queryParameters['q'], isNull);
-    });
-
-    test('parses Definition fields', () async {
-      final response = await _searchFixture('definition.json');
-
-      expect(response.items, hasLength(1));
-      expect(response.items.single.title, 'Example Dictionary');
-      expect(response.items.single.snippet, contains('concise explanation'));
-      expect(response.items.single.url.host, 'example.com');
-    });
-
-    test('parses Results fields and strips result markup', () async {
-      final response = await _searchFixture('results.json');
-
-      expect(response.items, hasLength(2));
-      expect(response.items[0].title, 'Flutter');
-      expect(response.items[0].snippet, 'Build beautiful, multiplatform apps.');
-      expect(response.items[1].title, 'Fallback title');
-      expect(response.items[1].snippet, 'A result represented by HTML.');
-    });
-
-    test('parses flat and nested RelatedTopics', () async {
-      final response = await _searchFixture('related_topics.json');
-
-      expect(response.items, hasLength(2));
-      expect(response.items.map((item) => item.title), ['Dart', 'Flutter']);
-      expect(response.items.map((item) => item.url.host), [
-        'dart.dev',
-        'flutter.dev',
-      ]);
-    });
-
-    test('maps just_another_test with no content to noResults', () async {
-      final response = await _searchFixture('no_results.json');
-
-      expect(response.items, isEmpty);
-      expect(response.failure?.type, SearchFailureType.noResults);
-      expect(response.failure?.retryable, isFalse);
-      expect(response.failure?.type, isNot(SearchFailureType.invalidResponse));
-    });
-
-    test('does not report an empty probe as a healthy connection', () async {
-      final provider = DuckDuckGoInstantAnswerProvider(
-        dio: _fixtureDio(_fixtureData('no_results.json')),
-      );
-
-      final health = await provider.testConnection(
-        credential: null,
-        probeQuery: 'probe',
-      );
-
-      expect(health.isHealthy, isFalse);
-      expect(health.failure?.type, SearchFailureType.noResults);
-    });
-
-    test('reports a probe with a valid result as healthy', () async {
-      final provider = DuckDuckGoInstantAnswerProvider(
-        dio: _fixtureDio(_fixtureData('abstract.json')),
-      );
-
-      final health = await provider.testConnection(
-        credential: null,
-        probeQuery: 'probe',
-      );
-
-      expect(health.isHealthy, isTrue);
-      expect(health.failure, isNull);
-    });
-  });
-
-  group('DuckDuckGoInstantAnswerProvider malformed and duplicate data', () {
-    test('ignores abnormal fields and invalid URLs without throwing', () async {
-      final response = await _searchFixture('invalid_fields.json');
-
-      expect(response.failure, isNull);
-      expect(response.items, hasLength(1));
-      expect(response.items.single.title, 'Valid result');
-      expect(response.items.single.url, Uri.parse('https://example.com/valid'));
-    });
-
-    test('deduplicates URL variants before returning provider items', () async {
-      final response = await _searchFixture('duplicate_results.json');
-
-      expect(response.items, hasLength(2));
-      expect(response.items.map((item) => item.url.host), [
-        'example.com',
-        'example.com',
-      ]);
-      expect(response.items[1].url.path, '/different');
-    });
-
-    test('returns invalidResponse for malformed JSON', () async {
-      final response = await _searchWithData('not-json');
-
-      expect(response.items, isEmpty);
-      expect(response.failure?.type, SearchFailureType.invalidResponse);
-    });
-
-    test('returns invalidResponse for a non-object JSON payload', () async {
-      final response = await _searchWithData(const []);
-
-      expect(response.items, isEmpty);
-      expect(response.failure?.type, SearchFailureType.invalidResponse);
-    });
   });
 
   group('web search domain models', () {
@@ -412,44 +278,4 @@ void main() {
       );
     });
   });
-}
-
-Future<SearchProviderResponse> _searchFixture(String fileName) {
-  return _searchWithData(_fixtureData(fileName));
-}
-
-dynamic _fixtureData(String fileName) => jsonDecode(
-      File('test/fixtures/web_search/$fileName').readAsStringSync(),
-    );
-
-Future<SearchProviderResponse> _searchWithData(dynamic data) {
-  final provider = DuckDuckGoInstantAnswerProvider(dio: _fixtureDio(data));
-  return provider.search(
-    SearchRequest(
-      requestId: 'req-test',
-      rootRequestId: 'root-test',
-      turnId: 'turn-test',
-      query: 'fixture query',
-      maxResults: 10,
-    ),
-    credential: null,
-  );
-}
-
-Dio _fixtureDio(dynamic data) {
-  final dio = Dio();
-  dio.interceptors.add(
-    InterceptorsWrapper(
-      onRequest: (options, handler) {
-        handler.resolve(
-          Response<dynamic>(
-            requestOptions: options,
-            statusCode: 200,
-            data: data is String ? data : jsonEncode(data),
-          ),
-        );
-      },
-    ),
-  );
-  return dio;
 }

@@ -45,6 +45,18 @@ class ChatStreamEvent {
   /// 保留机器可读的成因，只进诊断与事件日志，**不得**用于用户可见文案。
   final String? failureDetail;
 
+  /// Rejected transport attempt before a compatibility retry; not reply content.
+  final ChatStreamEvent? transportFailure;
+
+  /// type == error 时有效：这次失败是「上游返回了一个空完成」。
+  ///
+  /// 空完成（HTTP 200、正文空白、可能只有推理内容）属于协议级偶发，出路与
+  /// HTTP 429／超时／连接中断完全不同：调用方可以回退到非流式通道再问一次，
+  /// 或者原样重发一次。这些路必须看到一个**结构化标记**，不能靠匹配
+  /// [message] 里的「空内容」字样——改一个字就会静默失效，编排层再也分不清
+  /// 「空完成可重发」和「真失败」。
+  final bool emptyCompletion;
+
   /// type == error 时有效：message 是否已由 ChatApiService 脱敏或分类。
   ///
   /// 为 true 表示这条文案是客户端自己产出的（供应商正文已剥离，例如
@@ -97,6 +109,8 @@ class ChatStreamEvent {
     this.uncachedInputTokens,
     this.truncated = false,
     this.failureDetail,
+    this.transportFailure,
+    this.emptyCompletion = false,
   });
 
   ChatStreamEvent withUsage(ReportedTokenUsage usage) => ChatStreamEvent(
@@ -108,6 +122,8 @@ class ChatStreamEvent {
         retryAfter: retryAfter,
         sanitized: sanitized,
         failureDetail: failureDetail,
+        transportFailure: transportFailure,
+        emptyCompletion: emptyCompletion,
         truncated: truncated,
         promptTokens: usage.inputTokens,
         completionTokens: usage.outputTokens,
@@ -138,6 +154,7 @@ class ChatStreamEvent {
     Duration? retryAfter,
     bool sanitized = false,
     String? failureDetail,
+    bool emptyCompletion = false,
   }) =>
       ChatStreamEvent(
         type: ChatStreamEventType.error,
@@ -145,9 +162,10 @@ class ChatStreamEvent {
         retryAfter: retryAfter,
         sanitized: sanitized,
         failureDetail: failureDetail,
+        emptyCompletion: emptyCompletion,
       );
 
   @override
   String toString() =>
-      'ChatStreamEvent(type: $type, delta: $delta, content: $content, model: $model, message: $message, retryAfter: $retryAfter, sanitized: $sanitized, truncated: $truncated, failureDetail: $failureDetail)';
+      'ChatStreamEvent(type: $type, delta: $delta, content: $content, model: $model, message: $message, retryAfter: $retryAfter, sanitized: $sanitized, truncated: $truncated, failureDetail: $failureDetail, emptyCompletion: $emptyCompletion)';
 }

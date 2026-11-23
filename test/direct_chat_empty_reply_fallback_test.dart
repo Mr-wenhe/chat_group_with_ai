@@ -24,6 +24,7 @@ class EmptyReplyChatApi extends ScriptedChatApi {
     required ApiProvider provider,
     ApiProtocol apiProtocol = ApiProtocol.defaultValue,
     String? customBaseUrl,
+    String? userAgent,
     required String model,
     required List<Map<String, dynamic>> messages,
     double? temperature,
@@ -40,6 +41,7 @@ class EmptyReplyChatApi extends ScriptedChatApi {
 
   @override
   Stream<ChatStreamEvent> streamChatMessage({
+    String? userAgent,
     required String apiKey,
     required ApiProvider provider,
     ApiProtocol apiProtocol = ApiProtocol.defaultValue,

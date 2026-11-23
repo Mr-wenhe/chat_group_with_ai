@@ -277,6 +277,7 @@ class CharacterGenderLlmInference {
         ),
         apiProtocol: config.protocol,
         customBaseUrl: config.customBaseUrl,
+        userAgent: config.userAgent,
         model: config.modelName,
         temperature: 0,
         maxTokens: 2048,

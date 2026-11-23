@@ -161,7 +161,7 @@ void _registerBackupRestoreServiceTestPart1() {
     ).createBackup(destination: backup);
 
     expect(result.manifest.formatVersion, 1);
-    expect(result.manifest.schemaVersion, 2);
+    expect(result.manifest.schemaVersion, BackupManifest.currentSchemaVersion);
     expect(result.manifest.counts['messages'], 2);
     expect(result.manifest.counts['attachments'], 1);
     expect(result.manifest.missingAttachments, isEmpty);

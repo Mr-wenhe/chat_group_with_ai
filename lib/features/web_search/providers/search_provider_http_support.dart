@@ -137,8 +137,8 @@ void _validateJsonStructure(String text) {
 
 /// Decodes JSON that has already crossed the transport boundary.
 ///
-/// This helper is also used by adapters (such as DuckDuckGo) that may receive
-/// a string from a test adapter or a custom Dio transformer instead of the
+/// Adapters may receive a string from a test adapter or a custom Dio
+/// transformer instead of the
 /// shared [BoundedSearchJsonTransformer]. Keeping the size and shape checks in
 /// one function prevents an alternate decode path from becoming unbounded.
 dynamic decodeBoundedSearchProviderJson(String text) {

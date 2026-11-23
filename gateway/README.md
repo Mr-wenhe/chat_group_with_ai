@@ -1,57 +1,16 @@
-# Search Gateway
+# 伴伴桌面联网辅助进程
 
-Production search endpoint for the Flutter app. The gateway is intentionally a
-fixed upstream proxy, not a general URL fetcher: a client can submit only a
-search query to `POST /v1/search`; it can never choose a destination URL.
+macOS、Windows 的伴伴通过私有标准输入／输出管道启动本目录的辅助进程，不监听 HTTP 端口，不需要部署服务器或配置搜索 Key。运行时由构建脚本随安装包提供，版本与下载摘要固定；Node 许可证随包保留。
 
-## Security properties
-
-- The deployment selects exactly one configured upstream (`brave` or `tavily`)
-  and keeps that Provider key in environment variables.
-- Every upstream request resolves the configured host immediately before use,
-  rejects loopback/private/link-local/reserved IPs, then pins the verified IP
-  in the TLS connection lookup. `https.request` does not follow redirects.
-- Production requires bearer-token authentication. The unauthenticated mode is
-  available only with `NODE_ENV != production` and explicit opt-in.
-- Browser access is disabled by default. A separately authorized browser
-  client may set `ALLOWED_ORIGINS` to exact company HTTPS origins; wildcards,
-  paths, query parameters, and non-HTTPS origins are rejected. The Flutter
-  app intentionally exposes no Web Release search route because browser
-  builds cannot provide the app's native endpoint pinning and credential
-  boundary.
-- A per-token/IP in-memory 60-second rate limit, daily quota, request-size
-  cap, bounded request-body/headers/keep-alive timeouts, upstream timeout,
-  3-failure/30-second circuit breaker, response-size cap, and no-store
-  responses reduce abuse impact.
-- Logs contain only request ID and status; neither query nor credentials nor
-  upstream response bodies are logged or returned on failure.
-
-## Run locally
-
-```bash
-cd gateway
-cp .env.example .env
-# Edit .env with a real provider key and a distinct client token.
-set -a; source .env; set +a
+```sh
 npm test
 npm start
 ```
 
-For a local, unauthenticated smoke test only, set
-`ALLOW_UNAUTHENTICATED_DEV=true`; never use that setting in production.
+`npm start` 仅供协议调试；正式 App 自动管理进程。协议版本为 1，每行一条 JSON，使用请求 id 关联 `hello`、`fetch`、`github.import` 和 `cancel`。响应包含 headers、base64 chunk、done 或结构化 error。最多同时处理 4 个请求；关闭父进程管道即取消请求。
 
-## Deployment
+客户端只把已登记的真实来源交给读取／下载通道。HTTPS 请求逐跳验证公网 DNS，固定已验证 IP，保持 TLS 主机校验；拒绝本机、私网、凭据 URL 和非 HTTPS。搜索仅使用固定 DuckDuckGo／Bing 来源。系统 DNS 不可用或返回 Fake-IP 时，通过固定且验证 TLS 的 Google HTTPS DNS 查询公网 A 记录；不放行目标私网地址。
 
-Run `npm start` under the company's existing process supervisor or platform.
-Inject environment variables through that platform's secret manager; do not
-create or commit a production `.env` file. The process binds to `PORT` on
-`0.0.0.0` and should sit behind the company's HTTPS ingress.
+GitHub 技能导入复用固定提交 SHA、路径、文件大小和摘要校验。辅助进程不接收聊天 Key、智谱 Key、浏览器 Cookie 或任意文件保存路径。
 
-Set `DAILY_QUOTA` to the maximum accepted searches per authenticated principal
-in a rolling 24-hour window (default: 1000). The in-memory quota and circuit
-breaker are per process; production deployments should use a shared store when
-running more than one Gateway instance.
-
-The Flutter Gateway provider expects the configured base URL without the path,
-for example `https://search.example.com`; it calls `/v1/search` and sends its
-credential as `Authorization: Bearer ...`.
+Brave、Tavily、旧 HTTP 搜索服务和相关环境变量已删除。智谱原有专用流程在 App 内独立保留。验证码、限流、断网或来源结构变化均可能导致免费搜索失败，不提供付费回退。

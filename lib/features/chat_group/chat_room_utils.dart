@@ -234,7 +234,9 @@ bool isDuplicateAiReply(
   String content,
   List<Message> recentMessages, {
   String? excludeMessageId,
+  bool hasAttachments = false,
 }) {
+  if (hasAttachments) return false;
   String normalize(String value) =>
       value.replaceAll(RegExp(r'\s+'), '').trim().toLowerCase();
 

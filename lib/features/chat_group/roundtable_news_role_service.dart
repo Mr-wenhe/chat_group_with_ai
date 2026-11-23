@@ -3,8 +3,12 @@ import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/api_provider.dart';
 import 'package:chat_group/core/models/chat_group.dart';
 
-/// Stable identity for the hidden roundtable search assistant.
-const roundtableNewsRoleId = 'builtin-roundtable-news';
+import '../web_search/application/autonomous_web_policy.dart';
+
+// 角色 id 与"能不能自主联网"的判据已经下沉到共享联网策略，这里只做兼容再导出：
+// 现有调用方（群聊、工作模式）按老路径 import 这一个文件仍能拿到常量。
+export '../web_search/application/autonomous_web_policy.dart'
+    show roundtableNewsRoleId;
 
 class RoundtableNewsRoleMembership {
   final ChatGroup group;
@@ -47,6 +51,17 @@ class RoundtableNewsRoleService {
         proactiveChatEnabled: false,
         zhipuSearchAnswerOnly: true,
       );
+      await db.aiCharacterBox.put(character.id, character);
+    } else if (!character.zhipuSearchAnswerOnly ||
+        !character.webSearchEnabled ||
+        character.proactiveChatEnabled ||
+        character.agenticEnabled) {
+      // The stable built-in assistant remains silent after restoring old data.
+      character
+        ..zhipuSearchAnswerOnly = true
+        ..webSearchEnabled = true
+        ..proactiveChatEnabled = false
+        ..agenticEnabled = false;
       await db.aiCharacterBox.put(character.id, character);
     }
 

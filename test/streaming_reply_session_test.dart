@@ -74,4 +74,108 @@ void main() {
     expect(cancelled, isTrue);
     await controller.close();
   });
+
+  // 上游发完响应头就静默：async* 卡在 await 上，订阅取消打断不了它。
+  Stream<ChatStreamEvent> stalledSource() async* {
+    await Completer<void>().future;
+    yield const ChatStreamEvent(type: ChatStreamEventType.done);
+  }
+
+  test('上游卡在 await 时 stop() 仍然立即收尾', () async {
+    final session = StreamingReplySession(flushInterval: Duration.zero);
+    final run = session.run(stalledSource(), onDraft: (_) {});
+    expect(session.isActive, isTrue);
+
+    await session.stop().timeout(const Duration(seconds: 1));
+
+    final result = await run.timeout(const Duration(seconds: 1));
+    expect(result.stopped, isTrue);
+    expect(session.isActive, isFalse);
+  });
+
+  test('正文停滞看门狗把静默流判为失败，而不是永久生成中', () async {
+    final session = StreamingReplySession(
+      flushInterval: Duration.zero,
+      stallTimeout: const Duration(milliseconds: 50),
+    );
+    final run = session.run(stalledSource(), onDraft: (_) {});
+
+    final result = await run.timeout(const Duration(seconds: 2));
+
+    expect(session.isActive, isFalse);
+    expect(result.failed, isTrue);
+    expect(result.stopped, isFalse, reason: '不是用户停止，失败必须能落成可见回复');
+    expect(result.error, contains('超时'));
+  });
+
+  test('停止与看门狗都会通知上游放弃请求', () async {
+    var cancels = 0;
+    final session = StreamingReplySession(
+      flushInterval: Duration.zero,
+      stallTimeout: const Duration(milliseconds: 50),
+      onCancel: () => cancels++,
+    );
+    final run = session.run(stalledSource(), onDraft: (_) {});
+    await run.timeout(const Duration(seconds: 2));
+    expect(cancels, 1);
+
+    var stopCancels = 0;
+    final stopping = StreamingReplySession(
+      flushInterval: Duration.zero,
+      onCancel: () => stopCancels++,
+    );
+    final stoppingRun = stopping.run(stalledSource(), onDraft: (_) {});
+    await stopping.stop();
+    await stoppingRun;
+    expect(stopCancels, 1);
+  });
+
+  test('兼容重试会通知界面，且那一帧不算正文', () async {
+    var notified = 0;
+    final controller = StreamController<ChatStreamEvent>();
+    final session = StreamingReplySession(
+      flushInterval: Duration.zero,
+      onCompatibilityRetry: () => notified++,
+    );
+    final drafts = <String>[];
+    final run = session.run(controller.stream, onDraft: drafts.add);
+
+    controller.add(const ChatStreamEvent(
+      type: ChatStreamEventType.token,
+      delta: '',
+      transportFailure: ChatStreamEvent(
+        type: ChatStreamEventType.error,
+        message: '采样参数不被接受',
+      ),
+    ));
+    controller.add(ChatStreamEvent.done('OK', null, 1, 1, 0));
+    final result = await run.timeout(const Duration(seconds: 1));
+
+    expect(notified, 1);
+    expect(result.content, 'OK');
+    expect(result.failed, isFalse);
+    await controller.close();
+  });
+
+  test('持续有事件到达时看门狗不会误杀', () async {
+    final session = StreamingReplySession(
+      flushInterval: Duration.zero,
+      stallTimeout: const Duration(milliseconds: 400),
+    );
+    final run = session.run(
+      () async* {
+        for (var index = 0; index < 4; index++) {
+          await Future<void>.delayed(const Duration(milliseconds: 50));
+          yield ChatStreamEvent.token('段$index');
+        }
+        yield const ChatStreamEvent(type: ChatStreamEventType.done);
+      }(),
+      onDraft: (_) {},
+    );
+
+    final result = await run.timeout(const Duration(seconds: 2));
+
+    expect(result.failed, isFalse);
+    expect(result.content, contains('段3'));
+  });
 }

@@ -81,8 +81,7 @@ void main() {
     addTearDown(controller.dispose);
 
     controller.initialize();
-    expect(controller.coordinator.providerRoutes.first.id,
-        'native:qwen:qwen-plus');
+    expect(controller.coordinator.providerRoutes, isEmpty);
     expect(controller.coordinator.queryPlanner, isNull);
     expect(resolver.lastConfig, isNull);
 
@@ -99,8 +98,7 @@ void main() {
 
     controller.reloadIfChanged(isBusy: false);
 
-    expect(controller.coordinator.providerRoutes.first.id,
-        'builtin-duckduckgo-fallback');
+    expect(controller.coordinator.providerRoutes, isEmpty);
     expect(controller.coordinator.queryPlanner?.config.provider,
         ApiProvider.deepseek);
     expect(controller.coordinator.queryPlanner?.config.model, 'deepseek-chat');
@@ -194,6 +192,53 @@ void main() {
     final governance = AiGovernanceStore.forDatabase(db);
     final controller = ChatRoomSearchRuntimeController(
       conversationId: 'dm:news-character',
+      governanceStore: governance,
+      aiGateway: AiRequestGateway(store: governance),
+      credentialResolver: _RecordingCredentialResolver(),
+      allCharacters: () => db.aiCharacterBox.values,
+      resolveApiConfig: (value) => db.apiConfigBox.get(value.apiConfigId),
+    );
+    addTearDown(controller.dispose);
+
+    controller.initialize();
+
+    expect(controller.coordinator.providerRoutes.single.id,
+        'native:zhipu:glm-4-flash');
+    expect(controller.coordinator.queryPlanner, isNull);
+  });
+
+  test('Zhipu-only role forces native search even when general search is off',
+      () async {
+    const configId = 'news-zhipu-only-config';
+    final config = ApiConfig(
+      id: configId,
+      name: '新闻角色配置',
+      provider: ApiProvider.zhipu.name,
+      modelName: 'glm-4-flash',
+      credentialId: 'credential.api-config.$configId',
+      hasCredential: true,
+    );
+    final character = AICharacter(
+      id: 'news-zhipu-only-character',
+      name: '新闻角色',
+      avatar: '📰',
+      age: 30,
+      role: '仅智谱搜索',
+      personalityTags: const ['新闻'],
+      systemPrompt: '仅依据智谱搜索结果回答',
+      apiKey: '',
+      apiProvider: ApiProvider.zhipu.name,
+      modelName: 'glm-4-flash',
+      apiConfigId: configId,
+      webSearchEnabled: false,
+      zhipuSearchAnswerOnly: true,
+    );
+    await db.apiConfigBox.put(configId, config);
+    await db.aiCharacterBox.put(character.id, character);
+
+    final governance = AiGovernanceStore.forDatabase(db);
+    final controller = ChatRoomSearchRuntimeController(
+      conversationId: 'dm:news-zhipu-only',
       governanceStore: governance,
       aiGateway: AiRequestGateway(store: governance),
       credentialResolver: _RecordingCredentialResolver(),

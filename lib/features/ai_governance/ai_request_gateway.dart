@@ -53,6 +53,7 @@ class AiRequestGateway {
     required ApiProvider provider,
     ApiProtocol apiProtocol = ApiProtocol.defaultValue,
     String? customBaseUrl,
+    String? userAgent,
     required String model,
     required List<Map<String, dynamic>> messages,
     required AiRequestPurpose purpose,
@@ -90,6 +91,7 @@ class AiRequestGateway {
         apiProtocol: apiProtocol,
         promptCacheKey: promptCacheKey,
         customBaseUrl: customBaseUrl,
+        userAgent: userAgent,
         model: model,
         messages: messages,
         temperature: attempt.temperatureFor(temperature),
@@ -111,6 +113,7 @@ class AiRequestGateway {
     required ApiProvider provider,
     ApiProtocol apiProtocol = ApiProtocol.defaultValue,
     String? customBaseUrl,
+    String? userAgent,
     required String model,
     required List<Map<String, dynamic>> messages,
     required AiRequestPurpose purpose,
@@ -151,6 +154,7 @@ class AiRequestGateway {
         apiProtocol: apiProtocol,
         promptCacheKey: promptCacheKey,
         customBaseUrl: customBaseUrl,
+        userAgent: userAgent,
         model: model,
         messages: messages,
         temperature: attempt.temperatureFor(temperature),
@@ -171,6 +175,7 @@ class AiRequestGateway {
     required ApiProvider provider,
     ApiProtocol apiProtocol = ApiProtocol.defaultValue,
     String? customBaseUrl,
+    String? userAgent,
     required String model,
     required List<Map<String, dynamic>> messages,
     required AiRequestPurpose purpose,
@@ -215,6 +220,7 @@ class AiRequestGateway {
             apiProtocol: apiProtocol,
             promptCacheKey: promptCacheKey,
             customBaseUrl: customBaseUrl,
+            userAgent: userAgent,
             model: model,
             messages: messages,
             temperature: requestTemperature,
@@ -233,6 +239,7 @@ class AiRequestGateway {
           apiProtocol: apiProtocol,
           promptCacheKey: promptCacheKey,
           customBaseUrl: customBaseUrl,
+          userAgent: userAgent,
           model: model,
           messages: messages,
           temperature: requestTemperature,
@@ -254,6 +261,7 @@ class AiRequestGateway {
     required ApiProvider provider,
     required ApiProtocol apiProtocol,
     required String? customBaseUrl,
+    String? userAgent,
     required String model,
     required List<Map<String, dynamic>> messages,
     required double temperature,
@@ -277,6 +285,7 @@ class AiRequestGateway {
       apiProtocol: apiProtocol,
       promptCacheKey: promptCacheKey,
       customBaseUrl: customBaseUrl,
+      userAgent: userAgent,
       model: model,
       messages: messages,
       temperature: temperature,
@@ -297,6 +306,7 @@ class AiRequestGateway {
       apiProtocol: apiProtocol,
       promptCacheKey: promptCacheKey,
       customBaseUrl: customBaseUrl,
+      userAgent: userAgent,
       model: model,
       messages: messages,
       temperature: temperature,
@@ -321,6 +331,7 @@ class AiRequestGateway {
       apiProtocol: apiProtocol,
       promptCacheKey: promptCacheKey,
       customBaseUrl: customBaseUrl,
+      userAgent: userAgent,
       model: model,
       messages: messages,
       temperature: temperature,
@@ -377,6 +388,7 @@ class AiRequestGateway {
     required ApiProvider provider,
     ApiProtocol apiProtocol = ApiProtocol.defaultValue,
     String? customBaseUrl,
+    String? userAgent,
     required String model,
     required List<Map<String, dynamic>> messages,
     required AiRequestPurpose purpose,
@@ -436,72 +448,11 @@ class AiRequestGateway {
     String status = 'cancelled';
     String? failureType;
     String? failureDetail;
-    bool attemptRecorded = false;
-    try {
-      await for (final event in client.streamChatMessage(
-        apiKey: apiKey,
-        provider: provider,
-        apiProtocol: apiProtocol,
-        promptCacheKey: promptCacheKey,
-        customBaseUrl: customBaseUrl,
-        model: model,
-        messages: messages,
-        temperature: temperature,
-        maxTokens: maxTokens,
-        receiveTimeout: receiveTimeout,
-        cancelToken: cancelToken,
-        finishOnTerminalFrame: finishOnTerminalFrame,
-        reasoningEffort: reasoningEffort,
-        onResponseActivity: onResponseActivity,
-      )) {
-        reportedUsage = reportedUsage.merge(event.usage);
-        inputTokens = reportedUsage.inputTokens;
-        cachedTokens = reportedUsage.cachedTokens;
-        outputTokens = reportedUsage.outputTokens;
-        if (event.type == ChatStreamEventType.token) {
-          outputCharacters += event.delta?.length ?? 0;
-        } else if (event.type == ChatStreamEventType.done) {
-          status = 'success';
-        } else if (event.type == ChatStreamEventType.error) {
-          status = 'failed';
-          failureType = _failureType(event.message);
-          failureDetail = event.failureDetail;
-        }
-        if (event.type == ChatStreamEventType.done) {
-          attemptRecorded = true;
-          await _recordAttempt(
-            requestId: rootRequestId,
-            rootRequestId: rootRequestId,
-            provider: provider,
-            model: model,
-            characterId: characterId,
-            conversationId: conversationId,
-            purpose: purpose,
-            taskId: taskId,
-            runBoundary: runBoundary,
-            originPurpose: purpose,
-            capability: prepared.capability!,
-            estimatedInputTokens: prepared.inputTokens,
-            estimatedOutputTokens: (outputCharacters / 4).ceil(),
-            inputTokens: inputTokens,
-            cachedTokens: cachedTokens,
-            outputTokens: outputTokens,
-            reportedUsage: reportedUsage,
-            exactUsage: inputTokens != null && outputTokens != null,
-            latencyMs: stopwatch.elapsedMilliseconds,
-            retryCount: 0,
-            status: status,
-            failureType: failureType,
-            failureDetail: failureDetail,
-          );
-        }
-        yield event;
-      }
-    } finally {
-      guard.release(conversationId, prepared.reservedMicros);
-      if (!attemptRecorded && status != 'success') {
-        await _recordAttempt(
-          requestId: rootRequestId,
+    var transportAttempt = 0;
+    Future<void> recordCurrentAttempt() => _recordAttempt(
+          requestId: transportAttempt == 0
+              ? rootRequestId
+              : '$rootRequestId:transport:$transportAttempt',
           rootRequestId: rootRequestId,
           provider: provider,
           model: model,
@@ -517,6 +468,7 @@ class AiRequestGateway {
           inputTokens: inputTokens,
           cachedTokens: cachedTokens,
           outputTokens: outputTokens,
+          requestedMaxTokens: maxTokens,
           reportedUsage: reportedUsage,
           exactUsage: inputTokens != null && outputTokens != null,
           latencyMs: stopwatch.elapsedMilliseconds,
@@ -525,6 +477,93 @@ class AiRequestGateway {
           failureType: failureType,
           failureDetail: failureDetail,
         );
+    bool attemptRecorded = false;
+    try {
+      await for (final event in client.streamChatMessage(
+        apiKey: apiKey,
+        provider: provider,
+        apiProtocol: apiProtocol,
+        promptCacheKey: promptCacheKey,
+        customBaseUrl: customBaseUrl,
+        userAgent: userAgent,
+        model: model,
+        messages: messages,
+        temperature: temperature,
+        maxTokens: maxTokens,
+        receiveTimeout: receiveTimeout,
+        cancelToken: cancelToken,
+        finishOnTerminalFrame: finishOnTerminalFrame,
+        reasoningEffort: reasoningEffort,
+        onResponseActivity: onResponseActivity,
+      )) {
+        final transportFailure = event.transportFailure;
+        if (transportFailure != null) {
+          reportedUsage = transportFailure.usage;
+          inputTokens = reportedUsage.inputTokens;
+          cachedTokens = reportedUsage.cachedTokens;
+          outputTokens = reportedUsage.outputTokens;
+          status = 'failed';
+          failureType = _failureType(transportFailure.message);
+          failureDetail = transportFailure.failureDetail;
+          await recordCurrentAttempt();
+          transportAttempt++;
+          stopwatch.reset();
+          reportedUsage = const ReportedTokenUsage();
+          inputTokens = null;
+          cachedTokens = null;
+          outputTokens = null;
+          status = 'cancelled';
+          failureType = null;
+          failureDetail = null;
+          continue;
+        }
+        reportedUsage = reportedUsage.merge(event.usage);
+        inputTokens = reportedUsage.inputTokens;
+        cachedTokens = reportedUsage.cachedTokens;
+        outputTokens = reportedUsage.outputTokens;
+        if (event.type == ChatStreamEventType.done &&
+            outputCharacters == 0 &&
+            (event.content ?? '').trim().isEmpty) {
+          // An upstream `[DONE]` can contain only hidden reasoning and no
+          // visible body. Treat that as a failed completion so callers can
+          // retry; reporting success makes networkReplyStream stop before it
+          // can request or execute a tool.
+          status = 'failed';
+          failureType = 'empty_completion';
+          failureDetail = 'empty_stream_completion; '
+              'reportedOutputTokens=${outputTokens ?? '-'}; '
+              'reasoningTokens=${reportedUsage.reasoningTokens ?? '-'}';
+          attemptRecorded = true;
+          await recordCurrentAttempt();
+          yield ChatStreamEvent.error(
+            '模型返回了空内容',
+            sanitized: true,
+            failureDetail: failureDetail,
+            // 结构化标记：下游要据此回退非流式通道（`_collectStreamedOnce`）
+            // 或原样重发一次（群讨论 `emptyResponse`），不能靠匹配文案。
+            emptyCompletion: true,
+          ).withUsage(reportedUsage);
+          return;
+        }
+        if (event.type == ChatStreamEventType.token) {
+          outputCharacters += event.delta?.length ?? 0;
+        } else if (event.type == ChatStreamEventType.done) {
+          status = 'success';
+        } else if (event.type == ChatStreamEventType.error) {
+          status = 'failed';
+          failureType = _failureType(event.message);
+          failureDetail = event.failureDetail;
+        }
+        if (event.type == ChatStreamEventType.done) {
+          attemptRecorded = true;
+          await recordCurrentAttempt();
+        }
+        yield event;
+      }
+    } finally {
+      guard.release(conversationId, prepared.reservedMicros);
+      if (!attemptRecorded && status != 'success') {
+        await recordCurrentAttempt();
       }
     }
   }
@@ -548,6 +587,9 @@ class AiRequestGateway {
     // trail: without it every provider-side hiccup collapses into
     // `provider_error` and the raw cause is no longer recoverable.
     if (result?['failureCode'] == 'emptyResponse') return 'empty_completion';
+    // 流式通道的空完成只带一句文案、没有 failureCode：推理型模型把输出预算
+    // 花光时正文就是空的，同样要归到这一类，别塌进 provider_error。
+    if (value.contains('空内容')) return 'empty_completion';
     return 'provider_error';
   }
 

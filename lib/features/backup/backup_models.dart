@@ -40,8 +40,8 @@ class BackupFileEntry {
 
 class BackupManifest {
   static const currentFormatVersion = 1;
-  static const currentSchemaVersion = 2;
-  static const supportedSchemaVersions = {1, 2};
+  static const currentSchemaVersion = 3;
+  static const supportedSchemaVersions = {1, 2, 3};
   static const formatName = 'chat_group_backup';
 
   final int formatVersion;
@@ -104,6 +104,7 @@ class BackupManifest {
       orElse: () => throw const FormatException('未知备份范围'),
     );
     final kindName = json['backupKind']?.toString();
+    final schemaVersion = (json['schemaVersion'] as num?)?.toInt() ?? -1;
     final backupKind = kindName == null
         ? (scope == BackupScope.conversation
             ? BackupKind.conversation
@@ -114,14 +115,13 @@ class BackupManifest {
           );
     return BackupManifest(
       formatVersion: (json['formatVersion'] as num?)?.toInt() ?? -1,
-      schemaVersion: (json['schemaVersion'] as num?)?.toInt() ?? -1,
+      schemaVersion: schemaVersion,
       appVersion: json['appVersion']?.toString() ?? '',
       createdAt: DateTime.parse(json['createdAt']?.toString() ?? ''),
       scope: scope,
       backupKind: backupKind,
       includesGlobalData: json['includesGlobalData'] as bool? ??
-          ((json['schemaVersion'] as num?)?.toInt() == 2 &&
-              backupKind == BackupKind.full),
+          (schemaVersion >= 2 && backupKind == BackupKind.full),
       conversationId: json['conversationId']?.toString(),
       counts: _intMap(json['counts']),
       files: _fileMap(json['files']),
@@ -154,6 +154,7 @@ class BackupPreview {
   final int packageBytes;
   final int attachmentCount;
   final int credentialsToRebind;
+  final int retiredSearchConfigs;
   final int conflicts;
   final bool checksumsValid;
 
@@ -162,6 +163,7 @@ class BackupPreview {
     required this.packageBytes,
     required this.attachmentCount,
     required this.credentialsToRebind,
+    this.retiredSearchConfigs = 0,
     required this.conflicts,
     required this.checksumsValid,
   });

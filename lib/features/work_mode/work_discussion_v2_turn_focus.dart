@@ -6,7 +6,8 @@ extension _V2DiscussionTurnFocus on _V2DiscussionSession {
   List<Map<String, dynamic>> _formalPlanRevisionChecklist() => [
         for (final issue in state.issues)
           if (issue['status'] == 'open' &&
-              _canReviewFormalPlanIssue(issue, issue['sourceId'] as String))
+              (_canReviewFormalPlanIssue(issue, issue['sourceId'] as String) ||
+                  _formalPlanNeedsRevision(issue)))
             {
               for (final key in const [
                 'id',
@@ -49,7 +50,7 @@ extension _V2DiscussionTurnFocus on _V2DiscussionSession {
           'stage': WorkDiscussionStage.prepareProposal.name,
           'issueId': open['id'],
           'formalPlanRevisionChecklist': _formalPlanRevisionChecklist(),
-          'objective': '提出者已核对当前正式方案，问题仍未解决。先修订完整方案，'
+          'objective': '当前正式方案存在未决口径问题。先修订完整方案，'
               '按 formalPlanRevisionChecklist 中每个 id 核对其完整问题与复测条件，集中补齐全部未决正式方案缺口，不再把同一份方案交提出者重复核对。'
               '保留用户范围、真实问题及已有验收；修改验收仍走关联提案与全员认可。'
               '正式采纳后再由各提出者复核，不代为关闭问题或宣称运行测试通过。',
@@ -90,8 +91,7 @@ extension _V2DiscussionTurnFocus on _V2DiscussionSession {
           state.participantIds.every((id) => _opinion(id, kind, subject))) {
         return {
           'stage': WorkDiscussionStage.reviewApproval.name,
-          'objective':
-              '本轮仅核对当前版本意见并提交一条定案，不重新设计或复制整份方案。'
+          'objective': '本轮仅核对当前版本意见并提交一条定案，不重新设计或复制整份方案。'
               'rulingOpinions 是当前意见索引，完整依据仍在 collaboration。'
               '保留反对与理由，实质失败不能通过；action=decide，'
               'decision.kind=ruling，targetId 逐字复制 rulingSubjectId，options=[]。'
@@ -107,8 +107,7 @@ extension _V2DiscussionTurnFocus on _V2DiscussionSession {
                       a['verificationRevision'] == state.verificationRevision &&
                       a['kind'] == kind &&
                       a['subjectId'] == subject &&
-                      a['iterationId'] ==
-                          (kind == 'delivery' ? subject : '') &&
+                      a['iterationId'] == (kind == 'delivery' ? subject : '') &&
                       a['artifactDigest'] ==
                           (kind == 'delivery'
                               ? state.currentIteration!['artifactDigest']

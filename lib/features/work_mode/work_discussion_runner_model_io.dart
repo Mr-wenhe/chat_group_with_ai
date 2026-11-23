@@ -324,6 +324,7 @@ extension _WorkDiscussionRunnerModelIo on WorkDiscussionRunner {
       apiProtocol: config.protocol,
       promptCacheKey: config.workPromptCacheKey(character.id),
       customBaseUrl: completionBaseUrl,
+      userAgent: config.userAgent,
       model: config.modelName,
       messages: messages,
       purpose: AiRequestPurpose.agent,

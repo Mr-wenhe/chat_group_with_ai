@@ -303,8 +303,8 @@ extension _DefaultWorkTaskRunnerFilePolicy on DefaultWorkTaskRunner {
             command.declaredImpact.any(_isAbsolutePath);
     if (!requiresWritable) return null;
 
-    final paths = <String>[command.workingDirectory];
-    paths.addAll(command.declaredImpact.where(_isAbsolutePath));
+    final paths = evaluation.changePlan?.knownAffectedDirectories ??
+        <String>[command.workingDirectory];
     for (final path in paths) {
       if (await grants.isPathWritableResolved(path)) continue;
       task.executionStateJson =
@@ -346,6 +346,7 @@ extension _DefaultWorkTaskRunnerFilePolicy on DefaultWorkTaskRunner {
     return switch (pending.tool) {
       AgentToolName.workspacePatch ||
       AgentToolName.workspaceRename ||
+      AgentToolName.webDownload ||
       AgentToolName.workspaceDelete =>
         true,
       // command.run is normally classified by WorkCommandPolicy. If a folder

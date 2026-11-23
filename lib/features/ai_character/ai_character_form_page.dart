@@ -655,9 +655,9 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
                     value: _webSearchEnabled,
                     onChanged: (value) =>
                         setState(() => _webSearchEnabled = value),
-                    title: const Text('允许联网搜索'),
+                    title: const Text('允许使用智谱搜索来源'),
                     subtitle: const Text(
-                      '回答时可使用全局搜索设置中的来源；启用“使用模型原生联网搜索”后，将只使用角色模型能力',
+                      '仅控制原有智谱搜索；桌面自动联网由模型按需调用，不受此开关控制',
                     ),
                     secondary: Icon(Icons.public_rounded, color: cs.primary),
                   ),

@@ -75,10 +75,16 @@ extension WorkCollaborationAutonomy on WorkCollaborationState {
       proposalAssignmentError(value) == null;
 
   /// Use the persisted schema for both admission and targeted model repair.
-  static String? proposalAssignmentError(Map<String, dynamic> value) =>
-      value.containsKey('requestRevision')
-          ? 'requestRevision 由运行时生成，提案不得填写'
-          : _assignmentError({...value, 'requestRevision': 1});
+  static String? proposalAssignmentError(Map<String, dynamic> value) {
+    if (value.containsKey('requestRevision')) {
+      return 'requestRevision 由运行时生成，提案不得填写';
+    }
+    final capabilities = value['requiredCapabilities'];
+    if (capabilities is List && capabilities.contains('web.download')) {
+      return 'requiredCapabilities 不能包含 web.download：下载仅用于制作，冻结试用不能新增文件；文档本人读取使用 document.body，web.read 仅辅助核对来源';
+    }
+    return _assignmentError({...value, 'requestRevision': 1});
+  }
 
   static bool _validAssignment(Map<String, dynamic> a) =>
       _assignmentError(a) == null;

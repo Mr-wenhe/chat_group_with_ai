@@ -355,7 +355,7 @@ extension _WorkTaskCoordinatorDiscussionLifecycle on WorkTaskCoordinator {
               ..resumeRequired = false
               ..lastError = '';
             await _save(stored);
-            _conversationReservations.remove(stored.groupId);
+            _releaseConversationReservationFor(stored);
             _enqueueTask(stored);
             await _schedule();
           }
@@ -677,7 +677,7 @@ extension _WorkTaskCoordinatorDiscussionLifecycle on WorkTaskCoordinator {
     try {
       await _serialize(() async {
         _folderWaiters.remove(task.id)?.cancel();
-        _conversationReservations.remove(task.groupId);
+        _releaseConversationReservationFor(task);
         final stored = _taskBox.get(task.id);
         if (stored != null && !stored.isTerminal) {
           final failure = WorkFailure.fromError(

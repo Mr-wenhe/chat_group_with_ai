@@ -233,6 +233,51 @@ class SearchTurnContextController {
     return contextForReply(originalReplyId);
   }
 
+  /// A Zhipu search only role must never regenerate from autonomous or missing
+  /// sources. This explicit path refreshes the user's original turn and only
+  /// returns a Zhipu native snapshot.
+  Future<SearchTurnContext?> prepareZhipuOnlyRegeneration({
+    required String conversationId,
+    required String sourceMessageId,
+    required String turnId,
+    required String userMessage,
+    required SearchConsent requestConsent,
+    SearchStatusListener? onStatus,
+    SearchCategory category = SearchCategory.general,
+    SearchFreshness freshness = SearchFreshness.any,
+    String locale = 'zh-CN',
+    String? country,
+    int maxResults = searchDefaultMaxResults,
+    bool safeSearch = true,
+    bool isSensitive = false,
+    String minimalContext = '',
+    CancelToken? cancelToken,
+  }) async {
+    final context = await prepareUserTurn(
+      conversationId: conversationId,
+      sourceMessageId: sourceMessageId,
+      turnId: turnId,
+      userMessage: userMessage,
+      requestConsent: requestConsent,
+      origin: SearchMessageOrigin.regeneration,
+      onStatus: onStatus,
+      category: category,
+      freshness: freshness,
+      locale: locale,
+      country: country,
+      maxResults: maxResults,
+      safeSearch: safeSearch,
+      forceRefresh: true,
+      forceSearch: true,
+      isSensitive: isSensitive,
+      minimalContext: minimalContext,
+      cancelToken: cancelToken,
+    );
+    return context.snapshot?.provider.trim().toLowerCase() == 'zhipu-native'
+        ? context
+        : null;
+  }
+
   /// Explicitly refreshes the snapshot associated with an AI reply.
   Future<SearchTurnContext?> refreshRegeneration({
     required String originalReplyId,

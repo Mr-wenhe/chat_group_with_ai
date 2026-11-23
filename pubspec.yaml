@@ -107,6 +107,11 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+  licenses:
+    - lib/features/game/othello/LICENSE
+    - lib/features/game/doudizhu/LICENSE
   assets:
     - assets/release_templates/
     - assets/images/roundtable_chat_background.png
+    - lib/features/game/othello/LICENSE
+    - lib/features/game/doudizhu/LICENSE

@@ -151,6 +151,32 @@ extension _DefaultWorkTaskRunnerMutationPolicy on DefaultWorkTaskRunner {
           mutations,
         );
         if (plan == null) {
+          var unsupportedType = false;
+          for (final raw in [
+            invocation.arguments['path'],
+            if (invocation.call.name == AgentToolName.workspaceRename)
+              invocation.arguments['destinationPath'],
+          ]) {
+            if (raw is! String || raw.trim().isEmpty) continue;
+            try {
+              final target = await stage02.pathPolicy.resolve(
+                  _effectivePath(task, stage02.workspaceRoot, raw,
+                      enforceRevision: false),
+                  allowMissing: true);
+              if (target.exists && !target.isFile) {
+                unsupportedType = true;
+              }
+            } on Object {
+              // Unknown or ungranted targets retain the existing path rejection.
+              unsupportedType = false;
+              break;
+            }
+          }
+          if (unsupportedType) {
+            return const WorkToolResult.failed(
+                message: '此工具仅支持普通文件，不支持目录操作；保留空目录不影响文件交付。',
+                failureCode: 'unsupportedFileType');
+          }
           return const WorkToolResult.pathRejected(
             message: '无法在授权目录内解析精确文件路径。',
           );
@@ -327,6 +353,15 @@ extension _DefaultWorkTaskRunnerMutationPolicy on DefaultWorkTaskRunner {
         if (evaluation.isReadOnly || plan == null) return null;
         if (_approvalDecision(task.executionStateJson)?.permitsWithoutUndo ==
             true) {
+          return null;
+        }
+        // 「无撤销执行」确认属于首次建立审批范围，不是每一次运行。计划已被
+        // 本任务已批准范围覆盖时不再重复要求它，否则 scope 放行的命令仍会
+        // 卡在这道快照门禁上，用户看到的还是一个文件改一次要点一次。
+        if (WorkChangePolicy.commandCoveredByApprovedScope(
+          plan: plan,
+          scope: _approvalScope(task.executionStateJson),
+        )) {
           return null;
         }
         task.executionStateJson = _withApprovalPlan(
@@ -602,9 +637,7 @@ extension _DefaultWorkTaskRunnerMutationPolicy on DefaultWorkTaskRunner {
     return state.isValid &&
         state.state?.conversationId == task.groupId &&
         contract?['format'] == 'markdown' &&
-        RegExp(r'测试|验证|回归|验收|\bqa\b|quality assurance|\btest(?:ing)?\b',
-                caseSensitive: false)
-            .hasMatch(scope) &&
+        WorkTaskExecutionPolicy.isQaReportRequest(scope) &&
         RegExp(r'\.(?:md|markdown)$', caseSensitive: false)
             .hasMatch(location is String ? location.trim() : '');
   }

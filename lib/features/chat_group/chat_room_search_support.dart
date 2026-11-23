@@ -114,7 +114,7 @@ extension _ChatRoomSearchSupport on _ChatRoomPageState {
     required String query,
     required String sourceMessageId,
   }) {
-    if (!const SearchIntentDetector().isSourceLinkRequest(query)) return null;
+    if (!const SearchIntentDetector().isSourceLinkFollowUp(query)) return null;
     final currentIndex = _messages.indexWhere(
       (message) => message.id == sourceMessageId,
     );
@@ -237,9 +237,7 @@ extension _ChatRoomSearchSupport on _ChatRoomPageState {
   String get _activeSearchProviderLabel {
     if (_webSearchUnsupported) return '当前平台不支持联网搜索';
     final routes = _searchCoordinator.providerRoutes;
-    return routes.isEmpty
-        ? 'DuckDuckGo Instant Answer'
-        : routes.first.providerName;
+    return routes.isEmpty ? '智谱搜索' : routes.first.providerName;
   }
 
   /// 联网搜索状态对应的用户可读提示文案。
@@ -258,7 +256,7 @@ extension _ChatRoomSearchSupport on _ChatRoomPageState {
         SearchRunStatus.completed => _completedWebSearchStatus,
         SearchRunStatus.noResults => '联网搜索完成，但资料不足',
         SearchRunStatus.failed =>
-          '联网搜索失败 · ${_webSearchState.snapshot?.failure?.type.name ?? 'unknown'}，点击查看诊断',
+          '联网搜索失败，本次未取得可用来源，请稍后重试',
         SearchRunStatus.cancelled => '联网搜索已取消',
       };
 
@@ -284,20 +282,6 @@ extension _ChatRoomSearchSupport on _ChatRoomPageState {
         );
       }
     });
-  }
-
-  void _showWebSearchSources() {
-    final snapshot = _webSearchState.snapshot;
-    if (snapshot == null) return;
-    _showSourcesDialog(snapshot);
-  }
-
-  void _showSourcesForReply(Message message) {
-    final snapshot =
-        _searchTurnController.contextForReply(message.id)?.snapshot ??
-            _snapshotFromMessage(message);
-    if (snapshot == null) return;
-    _showSourcesDialog(snapshot);
   }
 
   web_search.WebSearchSnapshot? _snapshotFromMessage(Message message) {
@@ -327,14 +311,6 @@ extension _ChatRoomSearchSupport on _ChatRoomPageState {
       final context = _persistedSearchContext(message);
       if (context != null) _searchTurnController.bindReply(message.id, context);
     }
-  }
-
-  void _showSourcesDialog(web_search.WebSearchSnapshot snapshot) {
-    SourcesDialog.show(
-      context,
-      snapshot,
-      onOpenSource: (uri) => unawaited(_openSearchSource(uri)),
-    );
   }
 
   Future<void> _openSearchSource(Uri uri) async {
@@ -378,8 +354,7 @@ extension _ChatRoomSearchSupport on _ChatRoomPageState {
     // Keep the usage rules in the system-message block for provider
     // compatibility, but place the evidence immediately before the newest
     // user message. This prevents a long chat history from separating the
-    // Search results from the question they are meant to answer, regardless
-    // of whether the source is Tavily, DuckDuckGo, or another route.
+    // search results from the question they are meant to answer.
     final rules = contextMessages
         .where((message) => message['role'] == 'system')
         .toList(growable: false);
@@ -521,21 +496,45 @@ extension _ChatRoomSearchSupport on _ChatRoomPageState {
 
   Future<SearchTurnContext?> _regenerationSearchContext(
     Message original, {
+    required AICharacter character,
     required bool forceRefresh,
   }) async {
     // A role can be edited while this room remains mounted. Do not reuse or
     // refresh a previously captured snapshot after that role has opted out of
-    //联网搜索; the role-level switch is an explicit capability boundary.
-    final sender = _allGroupCharacters
-        .where((character) => character.id == original.senderId)
-        .firstOrNull;
-    if (sender != null && !sender.webSearchEnabled) return null;
+    // web search; a Zhipu-only role is independently opted in even when the
+    // general web-search switch is off.
+    final zhipuOnly = character.zhipuSearchAnswerOnly;
+    if (!zhipuOnly && !character.webSearchEnabled) return null;
     final existing =
         _searchTurnController.contextForRegeneration(original.id) ??
             _persistedSearchContext(original);
+    final existingIsZhipu =
+        existing?.snapshot?.provider.trim().toLowerCase() == 'zhipu-native' &&
+            existing?.snapshot?.hasResults == true;
     if (existing != null &&
-        _searchTurnController.contextForReply(original.id) == null) {
+        _searchTurnController.contextForReply(original.id) == null &&
+        (!zhipuOnly || existingIsZhipu)) {
       _searchTurnController.bindReply(original.id, existing);
+    }
+    if (zhipuOnly) {
+      if (!forceRefresh && existingIsZhipu) return existing;
+      final source = _userMessageBefore(original);
+      if (source == null || source.content.trim().isEmpty) return null;
+      return _withSearchCancellation(
+        (cancelToken) => _searchTurnController.prepareZhipuOnlyRegeneration(
+          conversationId: widget.groupId,
+          sourceMessageId: source.id,
+          turnId: source.id,
+          userMessage: source.content,
+          requestConsent: _confirmWebSearch,
+          onStatus: _handleWebSearchStatus,
+          locale: _searchRuntimeSettings.locale,
+          country: _searchRuntimeSettings.country,
+          maxResults: _searchRuntimeSettings.maxResults,
+          safeSearch: _searchRuntimeSettings.safeSearch,
+          cancelToken: cancelToken,
+        ),
+      );
     }
     if (!forceRefresh) return existing;
     final refreshed = await _withSearchCancellation(

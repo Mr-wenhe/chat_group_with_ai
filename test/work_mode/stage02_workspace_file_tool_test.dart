@@ -363,6 +363,7 @@ void main() {
 
     final renamed = await tool.rename(source.path, '${root.path}/after.txt');
     expect(renamed['ok'], isTrue);
+    expect(renamed['changed'], isTrue);
     expect(renamed['validation']['valid'], isTrue);
     expect(renamed['validation']['message'], contains('重命名'));
     expect(await source.exists(), isFalse);

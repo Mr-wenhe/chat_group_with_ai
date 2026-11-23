@@ -367,6 +367,7 @@ class MemoryContextSelector {
       MemoryOriginType.direct => '私聊',
       MemoryOriginType.manual => '手动',
       MemoryOriginType.legacyMigration => '历史',
+      MemoryOriginType.game => '棋局',
     };
     final source = memory.workSource;
     if (source?['type'] == 'verifiedMethod') {

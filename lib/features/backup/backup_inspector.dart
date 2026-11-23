@@ -98,15 +98,12 @@ class BackupInspector {
       await _validateManifestFiles(staging, manifest, archive);
       final data = await StagedBackupData.load(staging, manifest);
       _assertNoSecrets(data);
-      var credentials = data.apiConfigs.where((record) {
+      final credentials = data.apiConfigs.where((record) {
         return BackupEntityCodec.value(record)['credentialRequired'] == true;
       }).length;
       final searchConfigs = data.settings[SearchProviderConfigStore.configsKey];
-      if (searchConfigs is List) {
-        credentials += searchConfigs.whereType<Map>().where((record) {
-          return record['credentialRequired'] == true;
-        }).length;
-      }
+      final retiredSearchConfigs =
+          searchConfigs is List ? searchConfigs.whereType<Map>().length : 0;
       return PreparedBackup(
         stagingDirectory: staging,
         validatedData: data,
@@ -115,6 +112,7 @@ class BackupInspector {
           packageBytes: packageBytes,
           attachmentCount: manifest.counts['attachments'] ?? 0,
           credentialsToRebind: credentials,
+          retiredSearchConfigs: retiredSearchConfigs,
           conflicts: data.conflicts(db),
           checksumsValid: true,
         ),

@@ -122,7 +122,7 @@ InputDecoration appInputDecoration(
   );
 }
 
-/// 浮动胶囊底栏：角色 / 群聊 / 私聊 / 设置。
+/// 浮动胶囊底栏：角色 / 群聊 / 私聊 / 游戏 / 设置。
 class AppBottomNav extends ConsumerWidget {
   final int currentIndex;
   final ColorScheme cs;
@@ -215,6 +215,16 @@ class AppBottomNav extends ConsumerWidget {
             _accessibleDestination(
               context: context,
               index: 3,
+              label: '游戏',
+              child: const NavigationDestination(
+                icon: Icon(Icons.sports_esports_outlined, size: 22),
+                selectedIcon: Icon(Icons.sports_esports_rounded, size: 22),
+                label: '游戏',
+              ),
+            ),
+            _accessibleDestination(
+              context: context,
+              index: 4,
               label: '设置',
               child: const NavigationDestination(
                 icon: Icon(Icons.settings_outlined, size: 22),
@@ -253,6 +263,8 @@ class AppBottomNav extends ConsumerWidget {
       Navigator.of(context).pushReplacementNamed('/groups');
     } else if (index == 2) {
       Navigator.of(context).pushReplacementNamed('/direct-chats');
+    } else if (index == 3) {
+      Navigator.of(context).pushReplacementNamed('/games');
     } else {
       Navigator.of(context).pushReplacementNamed('/settings');
     }

@@ -371,12 +371,16 @@ extension _ChatRoomPageSessionSupport on _ChatRoomPageState {
     });
   }
 
-  void _stopStreaming({bool preservePendingReply = false}) {
+  void _stopStreaming(
+      {bool preservePendingReply = false, String cancelReason = 'user-stop'}) {
     final activeMessageId = _activeUserReplyMessageId;
     if (!preservePendingReply && activeMessageId != null) {
       unawaited(_pendingReplyStore.remove(activeMessageId));
     }
     _cancelActiveSearch();
+    // 先 abort 传输层：无论此刻卡在流式正文、失败重试还是别处，停止都必须真的
+    // 把那条请求断开。只停本地订阅时，上游挂住的 await 会让取消失败。
+    _cancelActiveReplyRequest(cancelReason);
     if (!_isStreaming) {
       // 选人阶段没有活跃的 stream，但同样属于"这一轮还在跑"：取消正在飞的
       // 选择请求，让迟到的结果作废（见 `_isReplyRoundInvalidated`）。
@@ -395,9 +399,12 @@ extension _ChatRoomPageSessionSupport on _ChatRoomPageState {
     _flushStreamingUi();
     _conversationController.requestStop();
     unawaited(_streamingSession?.stop());
-    // 若被停的是自动聊天回合，连调度器一起停，否则马上又会自动开口。
+    // 用户停掉的是**这一条**自动消息，不是"自动聊天"本身：只清零本轮 burst 计数，
+    // 让调度器按正常间隔续排。把调度器整个停掉会让空闲自动聊天永久失效——之后
+    // 除了切页/开关翻转，没有任何事件会重启它（现场：一次「停止生成」之后私聊
+    // 再也不主动开口）。
     if (runType == ConversationRunType.automatic) {
-      _stopAutoChat();
+      _autoChatRoundCount = 0;
     }
     if (_canTouchUi) {
       setState(() {
@@ -574,7 +581,7 @@ extension _ChatRoomPageSessionSupport on _ChatRoomPageState {
       if (_conversationController.state.run?.type ==
           ConversationRunType.automatic) {
         if (_isStreaming) {
-          _stopStreaming();
+          _stopStreaming(cancelReason: 'autochat-off');
         } else {
           // 还没进流（选人 / 凭据解析阶段）：取消正在飞的选择请求，剩下的请求由
           // 代际号在真正发出之前拦下。
@@ -617,7 +624,7 @@ extension _ChatRoomPageSessionSupport on _ChatRoomPageState {
         streamActive: _isStreaming,
       )) {
         _discardCurrentStream = true;
-        _stopStreaming();
+        _stopStreaming(cancelReason: 'workmode-on');
       } else {
         // The scheduler may be between bursts. Do not leave a stale latch from
         // an earlier run waiting for the next normal reply.

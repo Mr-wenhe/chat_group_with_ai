@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:chat_group/features/work_mode/work_command_runner.dart';
+import 'package:chat_group/features/work_mode/work_folder_grant_service.dart';
 import 'package:chat_group/features/work_mode/workspace_path_policy.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -54,6 +55,64 @@ WorkCommandPolicy _policy({bool? isMacOS}) => WorkCommandPolicy(
     );
 
 void main() {
+  test('system copy reads a read-only source and writes to its approved target',
+      () async {
+    final temp = await Directory.systemTemp.createTemp('work-copy-test');
+    addTearDown(() => temp.delete(recursive: true));
+    final root = await temp.resolveSymbolicLinks();
+    final readRoot = await Directory('$root/input').create();
+    final workRoot = await Directory('$root/output').create();
+    final input = await File('${readRoot.path}/notes.txt').writeAsString('notes');
+    final output = '${workRoot.path}/result.txt';
+    final policy = WorkCommandPolicy(
+      authorizedRoots: [readRoot.path, workRoot.path],
+      isWindows: false,
+    );
+    final runner = WorkCommandRunner(
+      policy: policy,
+      pathPolicy: WorkspacePathPolicy(grants: [
+        for (final (path, writable) in [
+          (readRoot.path, false),
+          (workRoot.path, true),
+        ])
+          WorkFolderGrant(
+            path: path,
+            displayName: path,
+            addedAt: DateTime.now(),
+            lastValidatedAt: null,
+            available: true,
+            writable: writable,
+          ),
+      ]),
+    );
+    final command = _command(
+      executable: 'cp',
+      arguments: [input.path, output],
+      workingDirectory: readRoot.path,
+      declaredImpact: [output],
+    );
+
+    final plan = policy.evaluate(command, taskId: 'copy').changePlan!;
+    expect(plan.knownAffectedDirectories, [output]);
+    final result = await runner.run(command, taskId: 'copy', approvalGranted: true);
+    expect(result.status, WorkCommandRunStatus.completed, reason: result.message);
+    expect(await File(output).readAsString(), 'notes');
+
+    final readOnlyTarget = '${readRoot.path}/result.txt';
+    final denied = await runner.run(
+      _command(
+        executable: 'cp',
+        arguments: [output, readOnlyTarget],
+        workingDirectory: workRoot.path,
+        declaredImpact: [readOnlyTarget],
+      ),
+      taskId: 'copy-to-read-only',
+      approvalGranted: true,
+    );
+    expect(denied.status, WorkCommandRunStatus.pathRejected);
+    expect(await File(readOnlyTarget).exists(), isFalse);
+  }, skip: Platform.isWindows);
+
   test('streams stdout and stderr, runs without a shell, and scrubs env keys',
       () async {
     final process = _FakeProcess();

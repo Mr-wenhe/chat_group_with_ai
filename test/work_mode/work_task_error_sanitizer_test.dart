@@ -4,6 +4,17 @@ import 'package:chat_group/features/work_mode/work_task_error_sanitizer.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test('internal casts do not leak runtime type syntax into chat', () {
+    final value = <String, dynamic>{}['missing'];
+    try {
+      value as List;
+      fail('The invalid cast must fail');
+    } on TypeError catch (error) {
+      expect(sanitizeWorkTaskError(error),
+          '任务状态或产物合同格式异常，请更新应用后从检查点重试。');
+    }
+  });
+
   test('classifies a timeout from its type, not only from its message', () {
     // `TimeoutException` 的默认文案（Future.timeout 未带 duration 时）里并没有
     // 「超时」二字，信号只在类型名上；剥掉 Dart 前缀再分类会把它判成普通失败。

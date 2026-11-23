@@ -15,6 +15,7 @@ final RegExp _dartExceptionPrefix = RegExp(
 /// credentials. The task record is durable and may be exported, so it must not
 /// become a second raw-error log.
 String sanitizeWorkTaskError(Object? error) {
+  if (error is TypeError) return '任务状态或产物合同格式异常，请更新应用后从检查点重试。';
   final raw = error?.toString().trim() ?? '';
   if (raw.isEmpty) return '任务执行失败';
 

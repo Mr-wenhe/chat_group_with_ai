@@ -28,13 +28,14 @@ class ApiConfigAdapter extends TypeAdapter<ApiConfig> {
       apiProtocol:
           fields[9] == null ? 'openAiChatCompletions' : fields[9] as String,
       enableWorkPromptCaching: fields[10] == null ? false : fields[10] as bool,
+      userAgent: fields[11] == null ? '' : fields[11] as String,
     ).._legacyApiKey = fields[4] == null ? '' : fields[4] as String?;
   }
 
   @override
   void write(BinaryWriter writer, ApiConfig obj) {
     writer
-      ..writeByte(11)
+      ..writeByte(12)
       ..writeByte(0)
       ..write(obj.id)
       ..writeByte(1)
@@ -56,7 +57,9 @@ class ApiConfigAdapter extends TypeAdapter<ApiConfig> {
       ..writeByte(9)
       ..write(obj.apiProtocol)
       ..writeByte(10)
-      ..write(obj.enableWorkPromptCaching);
+      ..write(obj.enableWorkPromptCaching)
+      ..writeByte(11)
+      ..write(obj.userAgent);
   }
 
   @override

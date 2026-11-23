@@ -6,9 +6,6 @@ import 'package:chat_group/core/theme/app_theme.dart';
 
 export 'package:chat_group/core/database/database_service_provider.dart';
 
-export 'package:chat_group/features/web_search/providers/duckduckgo_instant_answer_provider.dart';
-export 'package:chat_group/features/web_search/providers/tavily_search_provider.dart';
-export 'package:chat_group/features/web_search/providers/brave_search_provider.dart';
 export 'package:chat_group/features/web_search/providers/search_provider.dart';
 export 'package:chat_group/features/web_search/models/search_provider_config.dart';
 export 'package:chat_group/features/web_search/data/search_credential_repository.dart';

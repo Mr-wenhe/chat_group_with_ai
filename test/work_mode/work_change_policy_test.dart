@@ -270,17 +270,173 @@ void main() {
       expect(result.requiresPrompt, isTrue);
     });
 
-    test('serializes an explicit task scope without task-wide permission', () {
-      final scope = WorkApprovalScope.fromPlan(_plan());
-      final encoded = scope.toJsonString();
-      final decoded = WorkApprovalScope.fromJsonString(encoded);
+  test('serializes an explicit task scope without task-wide permission', () {
+    final scope = WorkApprovalScope.fromPlan(_plan());
+    final encoded = scope.toJsonString();
+    final decoded = WorkApprovalScope.fromJsonString(encoded);
 
-      expect(jsonDecode(encoded), isA<Map<String, dynamic>>());
-      expect(decoded.taskId, 'task-09');
-      expect(decoded.entries, hasLength(2));
-      expect(encoded, isNot(contains('allTask')));
-      expect(encoded, isNot(contains('全写')));
-      expect(decoded.allows(_plan()), isTrue);
+    expect(jsonDecode(encoded), isA<Map<String, dynamic>>());
+    expect(decoded.taskId, 'task-09');
+    expect(decoded.entries, hasLength(2));
+    expect(encoded, isNot(contains('allTask')));
+    expect(encoded, isNot(contains('全写')));
+    expect(decoded.allows(_plan()), isTrue);
+  });
+
+  group('命令审批继承已批准范围', () {
+    test('同一路径上的第二次命令不再要新审批', () {
+      final scope = WorkApprovalScope.fromPlan(
+        _commandPlan(arguments: const ['-i', 's/a/b/', '/workspace/report.md']),
+      );
+      final result = WorkChangePolicy.evaluate(
+        plan: _commandPlan(
+          arguments: const ['-i', 's/version/ver/g', '/workspace/report.md'],
+        ),
+        scope: scope,
+        settings: const WorkChangePolicySettings(confirmOrdinaryWrites: false),
+      );
+
+      expect(result.requirement, WorkChangeApprovalRequirement.none);
+      expect(result.requiresPrompt, isFalse);
+    });
+
+    test('删除命令即使路径已批准仍需单独确认', () {
+      final scope = WorkApprovalScope.fromPlan(
+        _commandPlan(arguments: const ['-i', 's/a/b/', '/workspace/report.md']),
+      );
+      final result = WorkChangePolicy.evaluate(
+        plan: _commandPlan(executable: 'rm', arguments: const ['report.md']),
+        scope: scope,
+        settings: const WorkChangePolicySettings(confirmOrdinaryWrites: false),
+      );
+
+      expect(result.requirement, WorkChangeApprovalRequirement.alwaysConfirm);
+      expect(result.requiresPrompt, isTrue);
+    });
+
+    test('解释器脚本即使路径已批准仍需单独确认', () {
+      final scope = WorkApprovalScope.fromPlan(
+        _commandPlan(arguments: const ['-i', 's/a/b/', '/workspace/report.md']),
+      );
+      final result = WorkChangePolicy.evaluate(
+        plan: _commandPlan(
+          executable: 'python3',
+          arguments: const ['fix_layout.py'],
+        ),
+        scope: scope,
+        settings: const WorkChangePolicySettings(confirmOrdinaryWrites: false),
+      );
+
+      expect(result.requirement, WorkChangeApprovalRequirement.alwaysConfirm);
+      expect(result.requiresPrompt, isTrue);
+    });
+
+    test('影响范围不确定的命令不会被旧的路径批准放过', () {
+      final scope = WorkApprovalScope.fromPlan(
+        _commandPlan(arguments: const ['-i', 's/a/b/', '/workspace/report.md']),
+      );
+      final result = WorkChangePolicy.evaluate(
+        plan: _commandPlan(
+          arguments: const ['-i', 's/a/b/', '/workspace/report.md'],
+          impactUncertain: true,
+        ),
+        scope: scope,
+        settings: const WorkChangePolicySettings(confirmOrdinaryWrites: false),
+      );
+
+      expect(result.requirement, WorkChangeApprovalRequirement.alwaysConfirm);
+      expect(result.reason, contains('不确定'));
+    });
+
+    test('find -delete 的匹配集不在参数里，不能继承目录批准范围', () {
+      // 回归：find 的可执行名与参数里都没有"危险标志"，规划器会把它归到
+      // "本地变更"，于是只要目录已批准就免审批删除匹配到的任意文件。
+      final scope = WorkApprovalScope.fromPlan(_commandPlan());
+      final result = WorkChangePolicy.evaluate(
+        plan: _commandPlan(
+          executable: 'find',
+          arguments: const ['.', '-name', '*.dart', '-delete'],
+          directories: const ['/workspace/report.md'],
+        ),
+        scope: scope,
+        settings: const WorkChangePolicySettings(confirmOrdinaryWrites: false),
+      );
+
+      expect(result.requirement, WorkChangeApprovalRequirement.alwaysConfirm);
+      expect(result.reason, contains('无法从参数完整枚举'));
+    });
+
+    test('xargs 的影响散在输入里，不能继承已批准范围', () {
+      final scope = WorkApprovalScope.fromPlan(_commandPlan());
+      final result = WorkChangePolicy.evaluate(
+        plan: _commandPlan(
+          executable: 'xargs',
+          arguments: const ['rm', '-f'],
+          directories: const ['/workspace/report.md'],
+        ),
+        scope: scope,
+        settings: const WorkChangePolicySettings(confirmOrdinaryWrites: false),
+      );
+
+      expect(result.requirement, WorkChangeApprovalRequirement.alwaysConfirm);
+    });
+
+    test('sed -i 带通配符会改到没点名的文件，仍需确认', () {
+      final scope = WorkApprovalScope.fromPlan(_commandPlan());
+      final result = WorkChangePolicy.evaluate(
+        plan: _commandPlan(
+          arguments: const ['-i', 's/a/b/', '/workspace/*.md'],
+          directories: const ['/workspace/report.md'],
+        ),
+        scope: scope,
+        settings: const WorkChangePolicySettings(confirmOrdinaryWrites: false),
+      );
+
+      expect(result.requirement, WorkChangeApprovalRequirement.alwaysConfirm);
+    });
+
+    test('只读检索仍然继承已批准范围，不因收紧判据回到逐条审批', () {
+      // 收紧的边界必须只切"影响不可枚举"的命令：把 grep 也切进去，就回到了
+      // 2026-10-23 那次「991 次 grep 全部因正则里的 | 被拦」。
+      final scope = WorkApprovalScope.fromPlan(_commandPlan());
+      final result = WorkChangePolicy.evaluate(
+        plan: _commandPlan(
+          executable: 'grep',
+          arguments: const ['-nE', '<section|</section>', 'report.md'],
+          directories: const ['/workspace/report.md'],
+        ),
+        scope: scope,
+        settings: const WorkChangePolicySettings(confirmOrdinaryWrites: false),
+      );
+
+      expect(result.requirement, WorkChangeApprovalRequirement.none);
     });
   });
+  });
+}
+
+WorkChangePlan _commandPlan({
+  String executable = 'sed',
+  List<String> arguments = const ['-i', 's/a/b/', '/workspace/report.md'],
+  bool impactUncertain = false,
+  List<String> directories = const ['/workspace/report.md'],
+}) {
+  return WorkChangePlan(
+    taskId: 'task-09',
+    actionType: WorkChangeActionType.command,
+    exactPaths: const <String>[],
+    knownAffectedDirectories: directories,
+    estimatedBytes: 0,
+    snapshotAvailable: false,
+    reversible: false,
+    command: WorkChangeCommand(
+      executable: executable,
+      arguments: arguments,
+      workingDirectory: '/workspace',
+      knownFiles: const <String>[],
+      possibleDirectories: directories,
+      impactUncertain: impactUncertain,
+    ),
+    riskReason: '命令可能修改工作区文件。',
+  );
 }

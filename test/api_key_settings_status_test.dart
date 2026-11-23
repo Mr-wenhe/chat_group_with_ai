@@ -4,8 +4,6 @@ import 'package:chat_group/core/audio/voice_service_config.dart';
 import 'package:chat_group/core/images/image_service_config.dart';
 import 'package:chat_group/core/models/api_config.dart';
 import 'package:chat_group/features/settings/api_key_settings_status.dart';
-import 'package:chat_group/features/web_search/models/search_models.dart';
-import 'package:chat_group/features/web_search/models/search_provider_config.dart';
 
 ApiConfig _config(
   String name, {
@@ -17,21 +15,6 @@ ApiConfig _config(
     provider: 'deepseek',
     modelName: model,
     hasCredential: bound,
-  );
-}
-
-SearchProviderConfig _provider(
-  String name, {
-  bool bound = false,
-  bool attention = false,
-}) {
-  return SearchProviderConfig(
-    id: name,
-    name: name,
-    provider: SearchProviderKind.gateway,
-    baseUrl: 'https://search.example.com',
-    hasCredential: bound,
-    requiresAttention: attention,
   );
 }
 
@@ -173,44 +156,21 @@ void main() {
   });
 
   group('searchStatus', () {
-    test('既没有 Provider 也没配智谱原生搜索', () {
-      final entry = searchStatus(
-        const <SearchProviderConfig>[],
-        zhipuNativeConfigured: false,
-      );
+    // 只保留真实存在的两种状态。旧的两条用例构造了 SearchProviderConfig 与
+    // attention 标记，但那个入参早已不参与判定，断言实际只在验"不报 Provider
+    // 状态"——名字与功能相反，已删除。
+    test('未配智谱原生搜索', () {
+      final entry = searchStatus(zhipuNativeConfigured: false);
       expect(entry.id, ApiKeyCategory.search);
       expect(entry.configured, isFalse);
-      expect(entry.summary, '尚未配置 · 联网搜索不可用');
+      expect(entry.summary, '智谱未配置 · 自动联网使用聊天 Key');
     });
 
-    test('只有智谱原生搜索也算已配置', () {
-      final entry = searchStatus(
-        const <SearchProviderConfig>[],
-        zhipuNativeConfigured: true,
-      );
+    test('配了智谱原生搜索', () {
+      final entry = searchStatus(zhipuNativeConfigured: true);
+      expect(entry.id, ApiKeyCategory.search);
       expect(entry.configured, isTrue);
-      expect(entry.summary, '仅智谱原生搜索 · 已绑定 Key');
-    });
-
-    test('部分 Provider 未绑定 Key', () {
-      final entry = searchStatus(
-        [_provider('tavily', bound: true), _provider('brave')],
-        zhipuNativeConfigured: false,
-      );
-      expect(entry.configured, isTrue);
-      expect(entry.summary, '2 个 Provider · 1 个已绑定 Key');
-    });
-
-    test('需要重新验证凭据时优先报出该状态', () {
-      final entry = searchStatus(
-        [
-          _provider('tavily', bound: true, attention: true),
-          _provider('brave', bound: true),
-        ],
-        zhipuNativeConfigured: false,
-      );
-      expect(entry.configured, isTrue);
-      expect(entry.summary, '2 个 Provider · 1 个需要重新验证凭据');
+      expect(entry.summary, '智谱搜索 · 已绑定 Key');
     });
   });
 

@@ -52,6 +52,8 @@ extension _ChatRoomAgenticRoundFailureSupport on _ChatRoomPageState {
     required int roundGeneration,
     int? autoChatGeneration,
     Set<String>? autoPickMentionedIds,
+    CancelToken? cancelToken,
+    bool lowerReasoning = false,
   }) async {
     if (_isReplyRoundInvalidated(
         isAutoChat: isAutoChat,
@@ -80,9 +82,16 @@ extension _ChatRoomAgenticRoundFailureSupport on _ChatRoomPageState {
       provider: provider,
       apiProtocol: config.protocol,
       customBaseUrl: config.customBaseUrl,
+      userAgent: config.userAgent,
       model: config.modelName,
+      // 私聊重试降一档推理，群聊维持原样；step-5-preview 一直用低档。
+      reasoningEffort: lowerReasoning ||
+              config.modelName.trim().toLowerCase() == 'step-5-preview'
+          ? 'low'
+          : null,
       messages: apiMessages,
       temperature: 0.75,
+      cancelToken: cancelToken,
       purpose: AiRequestPurpose.retry,
       conversationId: widget.groupId,
       characterId: character.id,
@@ -105,6 +114,9 @@ extension _ChatRoomAgenticRoundFailureSupport on _ChatRoomPageState {
 String _safeChatFailureMessage(String? error) {
   final value = error?.trim() ?? '';
   if (value.isEmpty) return '请求失败';
+  if (isPublicNetworkReplyError(value)) {
+    return value;
+  }
   if (AiRequestGateway.isBlockedMessage(value)) return '请求被治理策略拦截';
   final status = RegExp(r'\bHTTP\s+(\d{3})\b', caseSensitive: false)
       .firstMatch(value)
@@ -116,5 +128,8 @@ String _safeChatFailureMessage(String? error) {
   if (value.contains('网络') || value.toLowerCase().contains('connection')) {
     return '网络连接失败';
   }
+  // 推理型模型会把输出预算全花在思考上、正文为空；笼统写成"模型请求失败"
+  // 会让人以为是链路问题，实际是模型没有输出。
+  if (value.contains('空内容')) return '模型返回了空内容（推理可能占满了输出预算）';
   return '模型请求失败';
 }

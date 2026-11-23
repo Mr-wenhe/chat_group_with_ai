@@ -41,6 +41,20 @@ void _attachV2(AgentTask task) {
 }
 
 void main() {
+  test('QA labels and test workspaces do not restrict original downloads', () {
+    expect(WorkTaskExecutionPolicy.isQaReportRequest(
+        'QA-WORK-GROUP-1: Download the original README.md. '
+        'Use /tmp/test_workspace as the test workspace.'), isFalse);
+    for (final request in [
+      'Test the existing game.html and create game_test_report.md.',
+      '只验收现有页面，输出测试报告 report.md，不修改页面',
+      'QA-only: inspect existing README.md',
+    ]) {
+      expect(WorkTaskExecutionPolicy.isQaReportRequest(request), isTrue,
+          reason: request);
+    }
+  });
+
   test('only a validated task-bound v2 group loses cumulative limits', () {
     final group = _task('v2-task', 'group-a')
       ..actionCount = 101

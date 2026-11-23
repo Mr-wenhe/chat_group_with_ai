@@ -117,7 +117,7 @@ class WorkTaskUserAction {
     if (metadata.containsKey('uncertainAction')) {
       actions.add(_openAction(task, 'uncertainAction', material: [
         jsonEncode(metadata['uncertainAction']),
-      ]));
+      ], stepScoped: false));
     }
     final discussion = _discussionMap(task.executionStateJson);
     final parsedDiscussion = discussion?['state'] is Map
@@ -135,6 +135,7 @@ class WorkTaskUserAction {
           task,
           'checkpointReview',
           material: <String>['checkpointSchemaUnsupported'],
+          stepScoped: false,
         ),
       );
       checkpointReviewAdded = true;
@@ -273,6 +274,8 @@ class WorkTaskUserAction {
           material: <String>[
             task.pendingToolRequestJson,
           ],
+          // 同一个待安装工具在等用户，不因步骤推进重复落一条提醒。
+          stepScoped: false,
         ),
       );
     }
@@ -287,6 +290,7 @@ class WorkTaskUserAction {
             metadata['folderRequestPath']?.toString() ?? '',
             metadata['folderGrantPending']?.toString() ?? '',
           ],
+          stepScoped: false,
         ),
       );
     }
@@ -301,6 +305,10 @@ class WorkTaskUserAction {
           'commandApproval',
           kind: WorkTaskUserActionKind.approveCommand,
           material: <String>[task.pendingToolRequestJson],
+          // 同一个待审批请求不因步骤推进而换一条提醒。之前 version 里带着
+          // currentStep，于是每一步都生成新的 messageId，聊天里同一个
+          // 「命令待审批」被落成上百条独立卡片（2026-10-23 现场：97 条）。
+          stepScoped: false,
         ),
       );
     }
@@ -378,6 +386,7 @@ class WorkTaskUserAction {
     String blockerId, {
     WorkTaskUserActionKind kind = WorkTaskUserActionKind.openTask,
     Iterable<String> material = const <String>[],
+    bool stepScoped = false,
   }) {
     return WorkTaskUserAction(
       taskId: task.id,
@@ -385,7 +394,15 @@ class WorkTaskUserAction {
       version: _digestVersion(<String>[
         task.id,
         blockerId,
-        task.currentStep.toString(),
+        // 默认不把 `currentStep` 混进摘要：同一个"等你处理"的待办，每推进一步
+        // 就会换一个 messageId，聊天里同一个阻塞被落成上百条独立卡片
+        // （2026-10-23 现场：任务 a9a29693 的「查看审批」110 条，
+        // 「用户操作」也不再是 7 个版本）。
+        //
+        // 只有"提示内容本身随进度变化"的提醒才应传 `stepScoped: true`；
+        // 当前没有这种调用方——阻塞语义由 `isCurrent` 判定，进度推进不会让
+        // 一张仍然指向同一个待办的卡片失效。
+        if (stepScoped) task.currentStep.toString(),
         // A follow-up can change the task request while leaving the same
         // approval/install/folder marker in place. Include the durable request
         // FIFO so an old chat button cannot act on the revised scope.

@@ -196,6 +196,7 @@ class _MemoryDetailPageState extends ConsumerState<MemoryDetailPage> {
   String _emptySourceLabel(MemoryOriginType originType) => switch (originType) {
         MemoryOriginType.manual => '人工记录，无原始消息证据',
         MemoryOriginType.legacyMigration => '旧版迁移记录，无原始消息证据',
+        MemoryOriginType.game => '棋局自动记录，无关联聊天消息',
         _ => '没有关联原始消息',
       };
 

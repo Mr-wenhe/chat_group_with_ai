@@ -70,9 +70,12 @@ class SearchContextFormatter {
       searchedAt: snapshot.searchedAt,
       queries: snapshot.executedQueries,
       provider: snapshot.provider,
-      results: snapshot.results
+      results: snapshot.results.where((result) => snapshot.provider != 'autonomous-web' ||
+          _autonomousCitationId(result.sourceId).isNotEmpty)
           .map(
             (result) => _EvidenceResult(
+              sourceId: snapshot.provider == 'autonomous-web'
+                  ? _autonomousCitationId(result.sourceId) : null,
               title: result.title,
               url: result.hasSourceUrl ? result.url.toString() : '',
               publishedAt: result.publishedAt,
@@ -116,6 +119,7 @@ class SearchContextFormatter {
     int maxTotalCharacters = defaultMaxNumberedContextCharacters,
   }) {
     if (!snapshot.hasResults || maxTotalCharacters <= 0) return '';
+    final searchedAt = snapshot.searchedAt.toUtc().toIso8601String();
     final blocks = <String>[];
     final results = snapshot.results.take(maxSources).toList(growable: false);
     for (var index = 0; index < results.length; index++) {
@@ -124,12 +128,12 @@ class SearchContextFormatter {
       blocks.add(
         '[S${index + 1}] 标题: ${_truncate(result.title, _maxTitleCharacters)}\n'
         '    来源: ${_truncate(result.displayHost, 120)}  '
-        '发布时间: ${publishedAt == null ? '未知' : publishedAt.substring(0, 10)}\n'
+        '发布时间（UTC）: ${publishedAt == null ? '未知' : publishedAt.substring(0, 10)}\n'
         '    链接: ${result.hasSourceUrl ? _truncate(result.url.toString(), _maxUrlCharacters) : '无'}\n'
         '    内容: ${_truncate(result.snippet, maxSnippetCharacters)}',
       );
     }
-    final context = blocks.join('\n\n');
+    final context = '本轮检索时间（UTC）：$searchedAt\n${blocks.join('\n\n')}';
     if (context.length <= maxTotalCharacters) return context;
     const suffix = '\n\n(注: 搜索结果过长，已截断)';
     final contentLimit = (maxTotalCharacters - suffix.length).clamp(
@@ -143,7 +147,28 @@ class SearchContextFormatter {
     String answer,
     domain.WebSearchSnapshot snapshot,
   ) =>
-      _sanitizeCitations(answer, format(snapshot).sourceIds.toSet());
+      _sanitizeCitations(answer, sourceIdsForSnapshot(snapshot).toSet());
+
+  List<MapEntry<String, domain.WebSearchResult>> sourceEntriesForSnapshot(
+      domain.WebSearchSnapshot snapshot) {
+    if (snapshot.hasFailure) return const [];
+    if (snapshot.provider == 'autonomous-web') {
+      final entries = <String, domain.WebSearchResult>{};
+      for (final result in snapshot.results) {
+        final id = _autonomousCitationId(result.sourceId);
+        if (id.isNotEmpty) entries.putIfAbsent(id, () => result);
+      }
+      return entries.entries.toList(growable: false);
+    }
+    final ids = format(snapshot).sourceIds;
+    return [for (var i = 0; i < ids.length; i++) MapEntry(ids[i], snapshot.results[i])];
+  }
+
+  List<String> sourceIdsForSnapshot(domain.WebSearchSnapshot snapshot) =>
+      sourceEntriesForSnapshot(snapshot).map((entry) => entry.key).toList(growable: false);
+
+  static String _autonomousCitationId(String sourceId) =>
+      RegExp(r'^[sS]\d+$').hasMatch(sourceId) ? 'W${sourceId.substring(1)}' : '';
 
   /// Removes citation markers when no snapshot can authorize them.
   ///
@@ -154,8 +179,8 @@ class SearchContextFormatter {
     Iterable<String> sourceIds, {
     bool hideCitations = false,
   }) {
-    if (hideCitations) return _hideZhipuSourceAttribution(answer);
-    return _sanitizeCitations(answer, sourceIds.toSet());
+    final sanitized = _sanitizeCitations(answer, sourceIds.toSet());
+    return hideCitations ? _hideZhipuSourceAttribution(sanitized) : sanitized;
   }
 
   /// Enforces the default of returning citations without raw URLs. The
@@ -322,9 +347,8 @@ class SearchContextFormatter {
     for (var index = 0; index < results.length; index++) {
       final result = results[index];
       sourceMaps.add({
-        // IDs are assigned only from this final snapshot order; no model
-        // output or caller-supplied citation can introduce a source ID.
-        'source_id': 'S${index + 1}',
+        // Autonomous IDs retain the registry mapping; legacy IDs follow the final order.
+        'source_id': result.sourceId ?? 'S${index + 1}',
         'title': _truncate(result.title, _maxTitleCharacters),
         'url': _truncate(result.url, _maxUrlCharacters),
         'published_at': result.publishedAt?.toUtc().toIso8601String(),
@@ -345,7 +369,7 @@ class SearchContextFormatter {
     return _FittedEvidence(
       json: jsonEncode(data),
       sourceIds: List.unmodifiable(
-        List<String>.generate(sourceMaps.length, (index) => 'S${index + 1}'),
+        sourceMaps.map((source) => source['source_id'] as String),
       ),
     );
   }
@@ -417,11 +441,13 @@ class SearchContextFormatter {
     final withoutAttribution = answer
         .replaceAll(_zhipuAttributionPattern, '')
         .replaceAll(_citationGroupPattern, '')
-        .replaceAll(_citationCandidatePattern, '');
+        .replaceAll(_zhipuCitationCandidatePattern, '');
     final cleaned = withoutAttribution
-        .replaceAll(RegExp(r'\s+([，。；：！？,.!?;:、])'), r'$1')
+        .replaceAllMapped(RegExp(r'\s+([，。；：！？,.!?;:、])'),
+            (match) => match[1]!)
         .replaceAll(RegExp(r'([，,、；:：])\s*(?=[。！？.!?])'), '')
-        .replaceAll(RegExp(r'([。！？.!?])\s*[。！？.!?]+'), r'$1')
+        .replaceAllMapped(RegExp(r'([。！？.!?])\s*[。！？.!?]+'),
+            (match) => match[1]!)
         .replaceFirst(RegExp(r'^[\s，。；：、,.!?;:]+'), '')
         .trim();
     return RegExp(r'^[\s，。；：！？、,.!?;:]*$').hasMatch(cleaned)
@@ -431,15 +457,17 @@ class SearchContextFormatter {
 
   static String _canonicalCitationId(String value) {
     final normalized = value.trim();
-    if (normalized.length < 2 || normalized[0].toUpperCase() != 'S') {
+    if (normalized.length < 2 || !const {'S', 'W'}.contains(normalized[0].toUpperCase())) {
       return '';
     }
     final suffix = normalized.substring(1);
     if (!RegExp(r'^\d+$').hasMatch(suffix)) return '';
-    return 'S$suffix';
+    return '${normalized[0].toUpperCase()}$suffix';
   }
 
   static final _citationCandidatePattern =
+      RegExp(r'\[\s*[sSwW](?:\d+|\s[^\]]*)?\s*\]');
+  static final _zhipuCitationCandidatePattern =
       RegExp(r'\[\s*[sS](?:\d+|\s[^\]]*)?\s*\]');
   static final _citationGroupPattern = RegExp(
     r'\s*\[\s*[sS]\d+\s*\](?:\s*[、,，和及]\s*\[\s*[sS]\d+\s*\])*',
@@ -451,6 +479,7 @@ class SearchContextFormatter {
 }
 
 class _EvidenceResult {
+  final String? sourceId;
   final String title;
   final String url;
   final DateTime? publishedAt;
@@ -458,6 +487,7 @@ class _EvidenceResult {
   final String displayHost;
 
   const _EvidenceResult({
+    this.sourceId,
     required this.title,
     required this.url,
     required this.publishedAt,

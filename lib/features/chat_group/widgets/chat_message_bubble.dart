@@ -28,6 +28,7 @@ import 'package:chat_group/features/work_mode/work_task_user_action.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:open_filex/open_filex.dart';
+import '../../web_search/presentation/inline_search_reply.dart';
 
 part 'chat_message_media.dart';
 part 'progress_log_bubble.dart';
@@ -131,6 +132,7 @@ class ChatMessageBubble extends StatelessWidget {
 
   /// 点气泡正文。多选时用来切换勾选，其余时候为 null。
   final VoidCallback? onTap;
+  final ValueChanged<Uri>? onOpenSource;
 
   const ChatMessageBubble({
     super.key,
@@ -161,6 +163,7 @@ class ChatMessageBubble extends StatelessWidget {
     this.userAvatarText = '',
     this.selectionMode = false,
     this.onTap,
+    this.onOpenSource,
     this.entityLabels,
   });
 
@@ -569,6 +572,22 @@ class ChatMessageBubble extends StatelessWidget {
     final textStyle = TextStyle(fontSize: 15, color: textColor, height: 1.45);
 
     final actions = messageActions;
+    if (!isStreaming &&
+        message.senderType == Message.senderTypeAi &&
+        message.webSearchSnapshot != null &&
+        !WorkModeTaskLifecycle.isProgressMessageId(message.id)) {
+      return InlineSearchReply(
+          key: ValueKey('sources-${message.id}'),
+          content: content,
+          snapshot: message.webSearchSnapshot!,
+          style: textStyle,
+          mentionNames: mentionNames,
+          selectionMode: selectionMode,
+          onTap: onTap,
+          onOpenSource: onOpenSource,
+          messageActions:
+              actions == null ? null : () => actions(message, sender));
+    }
     final base = MessageSelectableText(
       content: content,
       style: textStyle,

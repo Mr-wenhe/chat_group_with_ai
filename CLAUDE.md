@@ -24,11 +24,11 @@ flutter run
 
 `build_runner` is not optional after touching a Hive model or a `@JsonSerializable` class — every `*.g.dart` in the repo is generated, and both `analyze` and `test` depend on them being current.
 
-### Search gateway (`gateway/`, Node ≥22.18)
+### Desktop web gateway (`gateway/`, bundled Node 24.14.1)
 
 ```bash
 cd gateway && npm test          # node --test, no dependencies installed
-cd gateway && npm start         # node --experimental-strip-types src/server.ts
+cd gateway && npm start         # private stdio protocol; src/desktop_worker.ts
 ```
 
 The gateway is plain TypeScript executed via Node's type-stripping — there is no build step and no `node_modules`.
@@ -105,6 +105,11 @@ User message → `ChatOrchestrator` / `HumanizedChatOrchestrator` scores eligibl
 - Turning on work mode disables idle auto-chat entirely.
 - Replies stream via `ChatApiService.streamChatMessage` (SSE) or `sendChatMessage`; `SseParser` extracts `usage` for token accounting.
 - Every error exit of `_streamChatMessageInternal` must set `ChatStreamEvent.sanitized: true`. `_collectStreamedOnce` passes a marked message through verbatim and re-sanitizes only an unmarked one (a custom `streamChatMessage` override that yields a provider body). Forgetting the mark re-masks the client's own wording: a Dio receiveTimeout arrives as `连接超时`, and masked it becomes `流式请求失败`, which `RetryHandler.isTransientResult`, `_needsCompletionFallback` and `WorkFailure` can no longer read as a retryable transport failure. `ChatStreamEvent.truncated` (`finish_reason == 'length'`) is set only by the OpenAI-compatible SSE parser — the Anthropic / Responses / Gemini parsers do not produce it yet — work mode compensates by comparing `completionTokens` with the requested `max_tokens` (`requestedMaxTokens`).
+- **聊天室上下文压缩只在「本轮要发的内容放不下」时触发，并优先复用上一次摘要**：判据是本轮 `ContextWindowManager.inputBudget` 与最近窗口（`_recentMessagesForContext()`，20 条）的估算 token 比较，**不再**拿整段已加载历史去比绝对阈值（`shouldSummarize` / `kContextCompressThresholdTokens` 现在没有生产调用者）——请求里只会带最近窗口，用全量历史判阈值等于每条回复都先跑一次压缩请求（现场：自定义中转每次 16-32 秒，用户看到的就是几十秒无输出）。放不下时先看 `_transientContextCompression[characterId]` 的 `checkpoint`（摘要生成时最后一条可见消息）还能不能定位：能定位且「摘要 + checkpoint 之后的增量」也放得下就直接复用、不发请求；定位失败（消息被删）或仍放不下才重新压缩整段可见历史，旧摘要作为「已有压缩摘要」底稿一并喂入。三种去向收口在 `context_compaction_decision.dart` 的 `decideContextCompaction`（纯函数，用例 `test/context_compaction_decision_test.dart`），不要在页面里另写一份判据。压缩摘要仍然只存会话内、刻意不落库。
+- **聊天回复的输出预算跟着模型能力走，不写死 1024**：`ContextWindowManager.replyOutputBudget` 取 `maxOutput`、`chatReplyOutputCeiling`（4096）与窗口一半三者中的最小值——推理型模型在 1024 下会把预算全花在思考上、正文为空（现场：`completionTokens=1024`、`reasoningTokens=1024`、正文 0 字），4096 足够思考 + 正文；小窗口仍按窗口一半收敛，给输入留余量。私聊放宽还有个前提：声明窗口小于 `directChatReplyMinWindowTokens`（16384）时**不放宽**——8k 窗口配 4096 输出会把输入压到 3.8k，人设与共同设定更容易放不下，反而从"能回"变成"设定放不下"。工作模式有各自的大预算与分块写，不读这个上限。重试固定降一档推理（`reasoningEffort: 'low'`）：`_requestBody` 里显式档位对**任何**模型都生效（Chat Completions 的 `reasoning_effort`、Responses 的 `reasoning.effort`、Messages 的 `output_config.effort`），step-5-preview 的短回复自动降档保持不变——这条打破了原先"只对 step-5 发送档位"的约定，代价是重试可能因中转不认该参数而 400；由于只发生在失败后的重试上，不会把本来成功的请求变成失败。`AiRequestGateway._failureType` 与 `_safeChatFailureMessage` 都要把「空内容」归类成 `empty_completion` 与明确的「模型返回了空内容（推理可能占满了输出预算）」，不要再塌成 `provider_error` / 笼统的「模型请求失败」。
+- **窗口被遮挡/失焦不等于离开会话（2026-11-17 用户拍板）**：`_roomSessionVisible`（`_pageActive && _routeVisible`）决定回合存活、结果采纳、自动聊天调度、待回复清理与代 @ 提醒；`_roomWorkAllowed`（额外要求 App 在前台）现在只用于**用户输入派发**（排队消息回到前台再发）。`hidden`/失焦不再停调度器、不推进代际、不取消任何已发出的请求：用户发出的回复跑完并落库，空闲自动聊天也继续按 45 秒间隔、最多 3 条进行——代价是窗口被遮挡时仍会调用 LLM（用户明确选择）。只有真正离开会话（App 内切页、页面销毁）才整轮作废并断开请求，迟到结果不落地，归属不变。`_pauseRoomAutoWork` 在会话仍可见时直接返回；`_resumeRoomAutoWork` 只在 `AutoChatScheduler.isActive` 为假时才 `_startAutoChat`（否则每次失焦/回焦都会把 45 秒间隔往后推）。注：macOS 无法区分"被遮挡"与"最小化"（都是 `hidden`），所以最小化也会继续自动聊天；但**真后台**（`paused`/`detached`，即 `_appPaused` 为真）必须停——移动端退到后台等于无通知设计的后台生成，违反红线。自动聊天的统一闸门是 `_autoChatAllowed = _roomSessionVisible && !_appPaused`。另外「停止生成」停掉的只是当前这条自动消息，不再停调度器（`_stopStreaming` 只清零 `_autoChatRoundCount`）；每个用户回合结束时 `_ensureAutoChatScheduled` 会确认调度器仍在，`_resumeRoomAutoWork` 起的 15 秒看门狗（`Timer.periodic`）兜底，任何把调度器停掉却没重启的路径都会在 15 秒内自愈。
+- **普通聊天的联网工具循环必须有人数和时间上限，且要发心跳**：`networkReplyStream` 每轮工具调用都是一整次模型请求，慢中转上单轮 20–60 秒；没有上限时一句"查下天气"能连跑四五轮、几分钟吐不出正文（现场：18:12–18:14 连续四次）。普通私聊和普通群聊统一最多 6 次工具调用；私聊仍有独立的 `toolBudget: 120s`，群聊不设该时间预算。超限时把「已达上限，请直接用已获得的资料回答」作为工具结果交回模型，下一轮它必须作答。**工具调用期间不产生任何正文 token（协议围栏被隐藏）**，所以每次工具落地后必须 `yield` 一个空 delta 的 token 心跳——否则 `StreamingReplySession` 的 180 秒正文停滞看门狗会把合法的多轮检索判成上游静默、以 `session-abandoned` 取消整轮（现场：18:11 的四次工具调用累计 180 秒无 token，回复被掐掉，用户并未点停止）。断言工具流时记得过滤空 delta 的 token。
+- **聊天室的「停止生成」不能等订阅取消，且必须 abort 传输层**：Dart 的 `async*` 取消**打断不了挂起的 `await`**（`_AsyncStarStreamController.onCancel` 只在生成器停在 `yield` 时才恢复它），而 dio 5.11.1 的 `receiveTimeout` 只包住"等响应头"的 `request.close()`，响应体流没有任何超时。上游发完响应头就静默时，`_streamChatMessageInternal` 卡在 `await lines.moveNext()`，`subscription.cancel()` 永不返回。因此 `StreamingReplySession.stop()` 必须**先 `_finish()` 再发起取消**（`dispose()` 同理，先完成 `run` future 再 await），否则界面永久停在「AI 正在生成...」，再点多少次停止都是同一件事；同时 `StreamingReplySession` 的停滞看门狗（`stallTimeout`，默认 180 秒，任何上游事件重置）判**失败**而不是 `stopped`，让失败能落成可见回复并进入既有的一次重试。真正的断开靠页面级 `CancelToken`（`_beginReplyCancelToken()` 建、`_cancelActiveReplyRequest()` 取消）：流式与会话内失败重试共用同一轮令牌，`_stopStreaming`（在 `_isStreaming` 早退之前）与 `_disposePage` 都取消它，看门狗通过 `onCancel` 回调取消。看门狗或停止取消过的那份令牌不能再带进重试，重试必须现开一份新令牌。
 - Memory summarization fires at ≥8 messages **and** at most once per 10 minutes, and only for groups (never DMs).
 
 Direct chats reuse `Message.groupId` with the stable key `dm:{characterId}` (`DirectChatSession.conversationIdFor`). Lightweight inbox state (`readAt`, source, last proactive timestamp) lives in the `app_settings` box rather than a Hive model class.
@@ -139,11 +144,11 @@ Work mode is the only agentic execution path. The legacy ordinary agentic runtim
 
 ### Web search + gateway
 
-`lib/features/web_search/` is a clean-architecture feature: `application/` (coordinator, query planner, turn cache, snapshot builder, retry policy), `data/` (settings store, credential repository), `models/`, `presentation/`, `providers/` (Tavily, Brave, DuckDuckGo Instant Answer, keyless HTML, gateway, native, visible browser), `security/` (endpoint validator, DNS guard, query sanitizer, secret scanner).
+`lib/features/web_search/` contains two search paths: the existing Zhipu scenes use `application/`, `providers/native_web_search_adapter.dart`, and their dedicated search credential; `desktop/` provides automatic search/read/download using the current chat configuration. Shared `models/`, `presentation/`, and `security/` retain history, citations, endpoint validation and secret scanning. Retired provider metadata remains only for old-data compatibility and credential cleanup; its HTTP providers, configuration form and connection-test service have been removed.
 
-Search is scoped to the **user turn**: multiple AI replies in one round share a single `WebSearchSnapshot`, and `off` / `ask` / `auto` policy is evaluated before any provider call. Search results are treated as untrusted external data (structured evidence + source numbering + prompt-injection defense). Search credentials use their own secure-storage namespace and must not reuse `ApiConfig` fields. See `docs/decisions/ADR-001-production-web-search-provider-gateway.md`.
+Existing Zhipu search is scoped to the **user turn**: multiple AI replies share a `WebSearchSnapshot`, and its `off` / `ask` / `auto` policy remains in force. Its dedicated credential namespace does not reuse `ApiConfig` fields, and a failed Zhipu request has no free fallback. Automatic networking is available without a search switch on macOS/Windows; the model chooses `web.search/read/download`, while chat requests use the existing chat Key and normal Token accounting. Other platforms' automatic tools are unimplemented. Ordinary replies use bounded text tool envelopes; work mode uses its existing strict decision/permission/receipt pipeline. Investigation and review permit search/read, not downloads. Both paths treat external data as untrusted. Autonomous citation `[Wn]` maps to source `sn`; existing Zhipu citation rules are preserved.
 
-`gateway/` is the production backend: a **fixed-upstream proxy**, not a general URL fetcher. The client can only submit a query to `POST /v1/search` and can never choose a destination. It resolves/rejects private IPs and pins the verified IP, requires bearer auth in production, enforces per-token rate limits + daily quota + circuit breaker, and logs neither queries nor credentials.
+`gateway/` is the private desktop stdio worker. Search uses fixed DuckDuckGo/Bing sources; reads/downloads accept app-registered public HTTPS sources only. Public DNS validation, pinned IPs, TLS validation, bounded responses and cancellation remain mandatory. No chat credentials enter the worker; no HTTP server or paid search provider remains.
 
 ### Credentials and storage
 
@@ -164,11 +169,12 @@ Providers are **hand-written** `Provider` / `StateNotifierProvider` — there ar
 | `/` | `AICharacterListPage` |
 | `/groups` | `ChatGroupListPage` |
 | `/direct-chats` | `DirectChatListPage` |
+| `/games` | `GameLobbyPage` |
 | `/settings` | `SettingsPage` |
 | `/chat/{groupId}` | `ChatRoomPage` |
 | `/dm/{characterId}` | `ChatRoomPage` (`dm:{characterId}` as groupId) |
 
-These four named routes plus two `onGenerateRoute` prefixes are the complete route table. Everything else (memory detail, approvals, work panels, global search) is pushed with an anonymous `MaterialPageRoute` — there is no route name to grep for.
+These five named routes plus two `onGenerateRoute` prefixes are the complete route table. Everything else (memory detail, approvals, work panels, global search) is pushed with an anonymous `MaterialPageRoute` — there is no route name to grep for.
 
 ## 关键红线（必须遵守）
 
@@ -176,7 +182,7 @@ These four named routes plus two `onGenerateRoute` prefixes are the complete rou
 - **带凭据的请求不跟随 HTTP 重定向**：凭据（API Key、共享令牌）只能发往用户在配置里填的那个来源，因此**每个**带凭据的请求都必须显式 `followRedirects: false`——模型清单与两条聊天请求（`chat_api_models_support.dart`、`chat_api_service.dart`）、生图、实时、搜索提供商、GitHub 技能各自在自己的 `Options` / `BaseOptions` 上关。dio 自己不做重定向，它把这件事交给 dart:io 的 `HttpClientRequest`（`dio` 的 `io_adapter.dart`），而 dart:io 跟随 302 时会**把整个 headers map 原样重发**：跨来源重定向因此绕过了「凭据只发给用户配置的地址」这条边界（2026-10-15 现场：私有代理的 Key 先被跨主机回落发往官方地址，堵掉之后 302 仍能把 `x-api-key` 带走）。3xx 现在原样回到调用方，由 `_redirectBlockedMessage` 给出「请把 Base URL 改成最终地址」的可操作文案。**不要**改回自动跟随，也**不要**只按主机名放行（同主机不同端口仍是别的来源）；确需支持重定向时，必须逐跳校验目标来源后再自主决定是否重发。回归用例见 `test/chat_api_credential_redirect_test.dart`（用两个本地 HTTP 服务确认凭据没有跟到目标地址）。
 - **凭据存储：macOS 用 Hive，其余平台用系统安全存储**：macOS 的 debug 与 release **一律**把凭据存进本地 Hive 明文库（`dev_credentials` box，判据 `DebugCredentialCache.isPrimaryStore`），读写删都不碰钥匙串。这是刻意拿系统级加密换确定性：本项目 macOS 构建始终是 ad-hoc 签名，钥匙串 ACL 认不出每次重建后的二进制，debug 下**每次读取都弹一次登录密码框**（「始终允许」只对点它时那个二进制有效），release 下未启用 App Sandbox 时 Data Protection Keychain 直接写入失败。**其余平台维持平台安全存储**：非 release 在其前叠一层 `DebugCredentialCache` 镜像——读取命中镜像即返回、未命中才读一次安全存储并落盘；**写入只写镜像、不碰安全存储**；删除先写**墓碑**再尽力删安全存储，且删除失败不报错（没有墓碑，下一次读取会把已删的密钥复活）；release 在这些平台直接落安全存储。`DatabaseService._openDebugCredentialCacheBox` 的打开条件是 `DebugCredentialCache.isRequired`，**不是** `enabled`——macOS 上 release 也必须打开，用 `enabled` 会让 release 用户所有 API Key 读不到；它刻意不走 `_openBoxSafely`，打不开就退化（其余平台退化为直读安全存储，macOS 退化为读不到、写时报错），不让整个启动失败。box 被 gitignore、不进 `_releaseHiveFiles` 与备份、也在工作模式交付物 denylist 里，**不要**改名（改名要同步这几处安全清单）。`LegacyApiCredentialMigrator` 在任何读取之前必须先 `seedDevelopmentCredentialCache`：待迁移配置的明文就在记录自己的 `legacyApiKey` 里，不先镜像就会在仍用钥匙串的平台上每次启动多读一次。非 macOS 平台安全写入失败后仍可仅在非 release 保留 `legacyApiKey`，并以 `hasCredential=true` 且 `credentialId=CredentialRepository.developmentHiveCredentialId` 作为开发回退标记，`ApiCredentialResolver` 与删除流程必须识别该标记；这些平台的 **Release 严禁读取或写入 Hive 明文 Key**。
 - **工作模式连续修改红线**：工作模式开关是新输入进入任务的唯一条件；关闭后新文字和附件走普通聊天，不得加入历史任务，已启动任务继续由全局协调器运行。仅开启工作模式时，新工作输入必须排队并在旧任务结束后派发，禁止取消旧任务后静默丢弃新请求。图片和支持解析的其他附件必须自动进入工作执行与群讨论请求，不能只传名称或依赖模型自行调用工具；视觉能力不足时明确阻塞并提供现有模型选择入口，不得自动换模型。中英文“修改同一/相同/当前/上次文件”等明确修订请求必须覆盖原附件路径；只有新建请求发生重名时才允许自动改名。修订钉定只作用于**同名文件**（`default_work_task_runner_context.dart` 的 `_namesSameFile`）：模型请求的路径与修订目标 basename 相同时才改写为该目标的绝对路径，脚本、素材、分段源文件等其它路径按普通规则解析。把钉定套到每一次写操作会让交付物成为任务里唯一可写的文件——模型要写的脚本静默落到交付物上且工具报 success，`workspace.list` 又看不到它，于是模型换名重写、无限循环（2026-09-30 现场：15 次 patch 全被重定向，`.docx` 被覆盖成 Python 源码，全程 `command.run` 只跑过最初那一次）。流式通道返回空内容时可对同一请求回退一次非流式调用；标准 `content` 为空时才允许读取兼容字段 `reasoning_content`，两者均为空必须报错。源码附件的本地兜底必须有对应语言的可运行模板，否则应明确失败，禁止把说明文本伪装成 `.py/.js/.ts` 等代码附件。
-- **搜索与浏览器安全**：搜索结果一律视为不可信外部数据；生产搜索必须走 `gateway/`，不得让客户端自选目标 URL；浏览器访问默认关闭。Frontend 不得为 Web 构建暴露搜索路由（浏览器端无法提供服务端凭据边界）。
+- **搜索与浏览器安全**：搜索结果一律视为不可信外部数据；生产自动联网必须走 `gateway/` 的私有桌面辅助进程；搜索仅访问固定上游，读取与下载仅接受应用登记的真实来源，模型不得指定任意目标 URL 或文件路径；浏览器访问默认关闭。Frontend 不得为 Web 构建暴露搜索路由（浏览器端无法提供服务端凭据边界）。
 - **前台主动私聊**：允许在 App 运行期间调用已配置的 LLM API，但冷却时间必须保守；没有明确的通知/推送设计前，禁止后台或离线网络生成。
 - **导出/备份内容**：只读展示字段，禁止写入 `apiKey` / `apiProvider` / `apiConfigId`；导出与导入两侧都要断言这一点。
 - **两种「清空」不能合并**：`clearConversation`（菜单「清空对话（含记忆与任务）」）删消息 + 场合记忆 + 关系 + 任务 + 工作区；`clearConversationMessages`（菜单「清空聊天记录（保留记忆与任务）」）只删消息和指向消息的设置（消息索引项、会话摘要、已读位置、该会话的重试记录），记忆、关系、任务、工作区一律保留。旧文案曾把后者叫「清空对话（保留记忆）」，与只删消息的入口并排时会被读成更轻的那个，正好反了。新增任何生命周期操作时**必须**在 `_retryPendingOperation` 里补上对应的 `kind` 分支：漏了它，一次中断的删除会留下永远无法重试的待办标记，而 `hasPendingOperation` 会把此后所有生命周期操作都挡在 `_begin` 之外。
@@ -269,7 +275,7 @@ Large suites are split into `*_part_NN.dart` and `*_helpers_NN.dart` files (back
 `docs/PROJECT_MAP.md` is a shorter orientation doc. Deeper references:
 
 - `docs/decisions/` — ADRs (ADR-001: production web-search provider gateway)
-- `docs/production_web_search_technical_design.md`, `docs/production_web_search_implementation_retrospective.md`
+- `docs/desktop_autonomous_web_design.md`, `docs/desktop_web_acceptance_2026-10-23.md` — current desktop networking design and acceptance boundaries; `docs/production_web_search_technical_design.md`, `docs/production_web_search_implementation_retrospective.md` retain retired-provider history
 - `docs/work_mode_agent_v1_{requirements,technical_design,user_guide}.md`
 - `docs/system_design.md`, `docs/relationship_audit_redesign.md`
 - `docs/group_work_discussion/` — staged design + review docs for the governed discussion workflow

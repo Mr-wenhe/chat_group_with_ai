@@ -127,6 +127,7 @@ extension _WorkDiscussionGroupStream on WorkDiscussionRunner {
       promptCacheKey: member.config!.workPromptCacheKey(member.character.id),
       customBaseUrl:
           WorkDiscussionRunner.structuredDiscussionBaseUrlFor(member.config!),
+      userAgent: member.config!.userAgent,
       model: member.config!.modelName,
       messages: messages,
       purpose: AiRequestPurpose.agent,
@@ -150,6 +151,27 @@ extension _WorkDiscussionGroupStream on WorkDiscussionRunner {
     )) {
       if (token.isCancelled) return {'success': false, 'message': '成员请求已取消'};
       if (event.type == ChatStreamEventType.error) {
+        // 空完成不是「这次请求失败」，而是"这个通道这次没给正文"：网关会把空
+        // `[DONE]` 包装成 error 让普通聊天能看见失败，但群讨论对流式空完成有
+        // 自己的出路——先回退一次非流式通道（`_boundedGroupStream` 按
+        // `failureCode=emptyResponse` 触发），仍空则原样重发一次
+        // （`_requestTurn`）。报成 `discussionStreamFailed` 会把两条路一起吞掉，
+        // 一次上游偶发就直接变成成员失败。
+        if (event.emptyCompletion) {
+          return {
+            'success': false,
+            'message': '模型返回了空内容',
+            'failureCode': 'emptyResponse',
+            'emptyCompletionDetail': {
+              'stream': 'empty',
+              if (event.completionTokens != null)
+                'completionTokens': event.completionTokens,
+              if (event.reasoningTokens != null)
+                'reasoningTokens': event.reasoningTokens,
+              'receivedCharacters': buffer.length,
+            },
+          };
+        }
         return {
           'success': false,
           'message': sanitizeWorkTaskError(event.message),

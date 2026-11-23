@@ -1,3 +1,4 @@
+import "package:chat_group/features/web_search/presentation/zhipu_native_search_settings_card.dart";
 import 'dart:io';
 
 import 'package:chat_group/core/database/database_service.dart';
@@ -8,7 +9,6 @@ import 'package:chat_group/features/settings/api_key_settings_page.dart';
 import 'package:chat_group/features/settings/image_service_settings_page.dart';
 import 'package:chat_group/features/settings/search_credential_settings_page.dart';
 import 'package:chat_group/features/settings/voice_service_settings_page.dart';
-import 'package:chat_group/features/web_search/presentation/web_search_settings_section.dart';
 import 'package:chat_group/providers/providers.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -57,6 +57,9 @@ void main() {
     expect(find.text('语音服务 · 火山引擎'), findsOneWidget);
     expect(find.text('图像服务 · IP 形象生成'), findsOneWidget);
     expect(find.text('搜索服务'), findsOneWidget);
+    expect(find.textContaining('自动联网复用聊天配置，无需搜索 Key 或开关'),
+        findsOneWidget);
+    expect(find.textContaining('Tavily / Brave'), findsNothing);
 
     // 每一类都还没配时，状态与顶部引导一致。
     expect(find.text('密钥已配置 0 / 4 项'), findsOneWidget);
@@ -166,6 +169,6 @@ void main() {
     await tester.pump(const Duration(milliseconds: 400));
 
     expect(find.byType(SearchCredentialSettingsPage), findsOneWidget);
-    expect(find.byType(WebSearchSettingsSection), findsOneWidget);
+    expect(find.byType(ZhipuNativeSearchSettingsCard), findsOneWidget);
   });
 }

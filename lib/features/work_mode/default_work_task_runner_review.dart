@@ -164,10 +164,50 @@ extension _DefaultWorkTaskRunnerReview on DefaultWorkTaskRunner {
       }
       return '正文尚未完整读取或格式解析，不能声称专业审查通过。';
     }
-    if (state.acceptances.any((a) =>
-        RegExp(r'web|browser|network', caseSensitive: false)
-            .hasMatch(a['requiredCapability'] as String))) {
-      return '当前审查入口未接通网络来源核验能力；请补充已有授权工具或人工核验，未伪造来源。';
+    for (final acceptance in state.acceptances) {
+      final capability = acceptance['requiredCapability'] as String;
+      if (!RegExp(r'web|browser|network', caseSensitive: false)
+          .hasMatch(capability)) {
+        continue;
+      }
+      if (!{'web.search', 'web.read'}.contains(capability)) {
+        return '当前审查入口未接通网络来源核验能力；请补充已有授权工具或人工核验，未伪造来源。';
+      }
+      // These receipts are bound to this reviewer, candidate and revision.
+      final observed = review.receipts.any((receipt) {
+        if (receipt['tool'] != capability ||
+            receipt['status'] != WorkToolResultStatus.success.name ||
+            receipt['data'] is! Map) {
+          return false;
+        }
+        final data = receipt['data'] as Map;
+        if (capability == 'web.search') {
+          final sources = data['sources'];
+          return sources is List &&
+              sources.whereType<Map>().any((source) {
+                final url = source['url'];
+                final uri = url is String ? Uri.tryParse(url) : null;
+                return uri?.scheme == 'https' && uri!.host.isNotEmpty;
+              });
+        }
+        final text = data['text'];
+        final sections = data['sections'];
+        final body = text is String && text.trim().isNotEmpty ||
+            sections is List &&
+                sections.whereType<Map>().any((section) =>
+                    section['text'] is String &&
+                    (section['text'] as String).trim().isNotEmpty);
+        return body &&
+            data['source_id'] is String &&
+            RegExp(r'^s[1-9][0-9]*$').hasMatch(data['source_id'] as String) &&
+            data['sha256'] is String &&
+            RegExp(r'^[a-f0-9]{64}$').hasMatch(data['sha256'] as String) &&
+            data['byteLength'] is int &&
+            (data['byteLength'] as int) > 0;
+      });
+      if (!observed) {
+        return '验收项 ${acceptance['id']} 缺少本轮 $capability 成功来源回执；请实际搜索或读取，不得借用制作人证据。';
+      }
     }
     return null;
   }

@@ -122,14 +122,17 @@ extension _V2DiscussionActions on _V2DiscussionSession {
       state.phase == 'clarifying' &&
       state.workItems.every((item) => item['status'] == 'pending');
 
-  bool _canReviewFormalPlanIssue(Map<String, dynamic> issue, String memberId) =>
+  bool _isPreProductionPlanIssue(Map<String, dynamic> issue) =>
       _beforeProduction &&
       runner.eventStore != null &&
       issue['kind'] != 'idea' &&
       !(issue['evidenceRef'] as String).startsWith('work-task-action:') &&
-      issue['sourceId'] == memberId &&
       issue['target'] != 'code' &&
-      !(issue['evidenceRef'] as String).startsWith('investigation:') &&
+      !(issue['evidenceRef'] as String).startsWith('investigation:');
+
+  bool _canReviewFormalPlanIssue(Map<String, dynamic> issue, String memberId) =>
+      _isPreProductionPlanIssue(issue) &&
+      issue['sourceId'] == memberId &&
       (issue['requestRevision'] as int) < state.requestRevision;
 
   bool _knownRef(String ref, String currentResponse) =>
@@ -802,7 +805,8 @@ extension _V2DiscussionActions on _V2DiscussionSession {
           WorkDiscussionState.fromExecutionState(task.executionStateJson)!
               .explicitlyPinnedExecutorId;
       if (makers.length != 1 || executor != null && makers.single != executor) {
-        throw StateError('本轮制作必须由$_discussionSoleExecutorMarker负责，并保持用户指定的执行者。');
+        throw StateError(
+            '本轮制作必须由$_discussionSoleExecutorMarker负责，并保持用户指定的执行者。');
       }
       final maker = makers.single as String;
       final responsibility =

@@ -62,6 +62,7 @@ extension _ObservationEntryDistillation on ObservationEntry {
           provider: provider,
           apiProtocol: config.protocol,
           customBaseUrl: config.customBaseUrl,
+          userAgent: config.userAgent,
           model: config.modelName,
           messages: prompt,
           temperature: 0.3,

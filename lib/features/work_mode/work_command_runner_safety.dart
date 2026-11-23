@@ -8,12 +8,15 @@ extension _WorkCommandRunnerSafety on WorkCommandRunner {
   }) async {
     var executable = command.executable;
     if (_usesDefaultProcessStarter) {
-      executable = await _resolveExecutable(
-        executable,
-        policyResult,
-        workingDirectory: command.workingDirectory,
-        userExplicitlyRequested: userExplicitlyRequested,
-      );
+      // The read/write split for cp is valid only for the system binary.
+      executable = policy.simpleFileCopyPaths(command) != null
+          ? '/bin/cp'
+          : await _resolveExecutable(
+              executable,
+              policyResult,
+              workingDirectory: command.workingDirectory,
+              userExplicitlyRequested: userExplicitlyRequested,
+            );
     }
     final arguments = List<String>.from(command.arguments);
     final name = _commandBasename(executable).toLowerCase();
@@ -275,7 +278,11 @@ extension _WorkCommandRunnerSafety on WorkCommandRunner {
   Future<_CommandBoundaryError?> _validateCommandBoundary(
     WorkCommand command,
   ) async {
-    final resolver = pathPolicy;
+    final copy = policy.simpleFileCopyPaths(command);
+    final resolver = pathPolicy ??
+        (copy == null
+            ? null
+            : WorkspacePathPolicy(authorizedRoots: policy.authorizedRoots));
     if (resolver != null) {
       final cwd = normalizeWorkAbsolutePath(command.workingDirectory);
       for (final rawPath in _commandPathCandidates(command)) {
@@ -296,6 +303,31 @@ extension _WorkCommandRunnerSafety on WorkCommandRunner {
         } on Object catch (error) {
           return _CommandBoundaryError(_safeError(error));
         }
+      }
+    }
+    if (copy != null && resolver != null) {
+      try {
+        final source = await resolver.resolveExisting(copy.source);
+        if (!source.isFile) {
+          return const _CommandBoundaryError('复制来源必须是授权的文件。');
+        }
+        var target = await resolver.resolve(copy.destination);
+        if (target.wasSymbolicLink) {
+          return const _CommandBoundaryError('复制目标不能经过符号链接。');
+        }
+        if (target.isDirectory) {
+          // cp appends the source name when the destination is a directory.
+          target = await resolver.resolve(
+            _joinCommandPath(target.path, _commandBasename(copy.source)),
+          );
+        }
+        if (target.wasSymbolicLink ||
+            (target.exists && !target.isFile) ||
+            !resolver.isPathWritable(target.path)) {
+          return const _CommandBoundaryError('复制目标必须是授权的可写文件。');
+        }
+      } on WorkspacePathException catch (error) {
+        return _CommandBoundaryError(error.reason);
       }
     }
     return _validateNetworkTargets(command);

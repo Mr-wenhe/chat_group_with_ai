@@ -9,7 +9,6 @@ import 'package:chat_group/core/audio/voice_catalog.dart';
 import 'package:chat_group/core/audio/voice_service_config.dart';
 import 'package:chat_group/core/images/image_service_config.dart';
 import 'package:chat_group/core/models/api_config.dart';
-import 'package:chat_group/features/web_search/models/search_provider_config.dart';
 
 /// 凭据类别 id。「AI 接话选人器」不在 [ApiKeyOverview.countedCategories] 里，
 /// 因为它不持有密钥，只引用已有配置的 id。
@@ -198,42 +197,13 @@ ApiKeyStatusEntry imageStatus(ImageServiceConfig config) {
   );
 }
 
-/// 联网搜索凭据：自建 Provider 与智谱原生搜索。
-///
-/// 两者任一条可用即算配置完成 —— 默认关闭的前提下，用户可能只用其中一种。
-ApiKeyStatusEntry searchStatus(
-  List<SearchProviderConfig> providers, {
-  required bool zhipuNativeConfigured,
-}) {
-  if (providers.isEmpty && !zhipuNativeConfigured) {
-    return const ApiKeyStatusEntry(
+/// 搜索 Key 仅指智谱原生搜索；旧 `SearchProviderConfig` 已退役，它的绑定状态
+/// 与这里无关，因此这个方法**不再接收** Provider 列表——留着一个所有调用方都
+/// 恒传 `const []` 的入参，只会让后来人以为 Provider 绑定会影响摘要。
+ApiKeyStatusEntry searchStatus({required bool zhipuNativeConfigured}) =>
+    ApiKeyStatusEntry(
       id: ApiKeyCategory.search,
-      configured: false,
-      summary: '尚未配置 · 联网搜索不可用',
+      configured: zhipuNativeConfigured,
+      summary:
+          zhipuNativeConfigured ? '智谱搜索 · 已绑定 Key' : '智谱未配置 · 自动联网使用聊天 Key',
     );
-  }
-  final bound = providers.where((config) => config.hasCredential).length;
-  final needsAttention =
-      providers.where((config) => config.requiresAttention).length;
-  // 「需要重新验证凭据」比「已绑定几条」更该被看见：恢复备份后绑定会失效，
-  // 只报数量会让用户以为可以用。
-  if (needsAttention > 0) {
-    return ApiKeyStatusEntry(
-      id: ApiKeyCategory.search,
-      configured: bound > 0 || zhipuNativeConfigured,
-      summary: '${providers.length} 个 Provider · $needsAttention 个需要重新验证凭据',
-    );
-  }
-  if (providers.isEmpty) {
-    return const ApiKeyStatusEntry(
-      id: ApiKeyCategory.search,
-      configured: true,
-      summary: '仅智谱原生搜索 · 已绑定 Key',
-    );
-  }
-  return ApiKeyStatusEntry(
-    id: ApiKeyCategory.search,
-    configured: bound > 0 || zhipuNativeConfigured,
-    summary: '${providers.length} 个 Provider · $bound 个已绑定 Key',
-  );
-}

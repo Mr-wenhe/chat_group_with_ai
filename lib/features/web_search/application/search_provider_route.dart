@@ -13,9 +13,8 @@ class SearchProviderRoute {
   final bool isPrimary;
   final bool isFallback;
 
-  /// Native model search returns full web results even when its independent
-  /// fallback is DuckDuckGo. It must not inherit the fallback's
-  /// knowledge-only routing restriction.
+  /// Native model search returns full web results rather than a knowledge-only
+  /// answer. Its failures must not route to an independent provider.
   final bool isNative;
 
   final int priority;

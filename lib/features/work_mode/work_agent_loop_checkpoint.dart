@@ -193,6 +193,56 @@ extension _WorkAgentLoopCheckpoint on WorkAgentLoop {
     );
   }
 
+  List<Map<String, dynamic>> _documentReadProgress(_LoopState state) {
+    final documents =
+        <String, ({String path, String digest, int total, Set<int> chunks})>{};
+    for (final result in state.modelResults) {
+      final data = result['data'];
+      if (result['tool'] != AgentToolName.workspaceDocument.wireName ||
+          result['status'] != WorkToolResultStatus.success.name ||
+          data is! Map) {
+        continue;
+      }
+      final path = data['path'];
+      final digest = data['documentDigest'];
+      final total = data['totalChunkCount'];
+      final indexes = data['chunkIndexes'];
+      if (path is! String ||
+          path.isEmpty ||
+          digest is! String ||
+          !RegExp(r'^[a-f0-9]{64}$').hasMatch(digest) ||
+          total is! int ||
+          total < 1 ||
+          indexes is! List ||
+          indexes.isEmpty ||
+          indexes
+              .any((index) => index is! int || index < 0 || index >= total)) {
+        continue;
+      }
+      final key = jsonEncode([path, digest, total]);
+      final chunks = documents.remove(key)?.chunks ?? <int>{};
+      chunks.addAll(indexes.cast<int>());
+      documents[key] =
+          (path: path, digest: digest, total: total, chunks: chunks);
+    }
+    return documents.values
+        .skip(documents.length > 8 ? documents.length - 8 : 0)
+        .map((document) {
+      var next = 0;
+      while (document.chunks.contains(next)) {
+        next++;
+      }
+      return <String, dynamic>{
+        'path': document.path,
+        'documentDigest': document.digest,
+        'totalChunkCount': document.total,
+        'returnedChunkCount': document.chunks.length,
+        'nextChunkStart': next < document.total ? next : null,
+        'allChunksReturned': next == document.total,
+      };
+    }).toList();
+  }
+
   Map<String, dynamic> _buildContext(_LoopState state) {
     final task = state.task;
     final checkpointSummary = _safeExistingMap(task.contextSummary);
@@ -202,7 +252,10 @@ extension _WorkAgentLoopCheckpoint on WorkAgentLoop {
       checkpointSummary['goal'] = currentScope;
     }
     final singleHtmlDraft = _singleHtmlDraftContext(task);
+    final documentReadProgress = _documentReadProgress(state);
     return <String, dynamic>{
+      if (documentReadProgress.isNotEmpty)
+        'documentReadProgress': documentReadProgress,
       if (WorkTaskExecutionPolicy.isValidatedV2GroupTask(task) &&
           state.modelResults.any((r) =>
               r['tool'] == 'browser.context' &&

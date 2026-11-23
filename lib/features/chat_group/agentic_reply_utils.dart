@@ -1,6 +1,8 @@
 /// Pure utility functions for normal-chat reply sanitization.
 library;
 
+import '../agentic/tool_fence_protocol.dart';
+
 /// Strips tool-call protocol leaks from a non-agentic LLM reply.
 ///
 /// The non-agentic path uses a plain chat completion; it should never contain
@@ -15,11 +17,8 @@ library;
 String sanitizeNonAgenticReply(String text) {
   var result = text;
 
-  // 1. Remove ```agent_tool ... ``` fenced blocks (including fences).
-  result = result.replaceAll(
-    RegExp(r'```agent_tool\s*[\s\S]*?\s*```'),
-    '',
-  );
+  // Classify complete and truncated fences through the streaming predicate.
+  result = _stripToolFences(result);
 
   // 2. Remove <tool_call ... /tool_call> or <tool_call ... /agent_tool>
   //    complete XML blocks (most common LLM output format).
@@ -108,5 +107,41 @@ String sanitizeNonAgenticReply(String text) {
   if (codeBlockMatch != null) {
     result = result.replaceAll(codeBlockMatch.group(0)!, '📎 [代码内容已省略，请查看附件]');
   }
-  return result.trim();
+  final cleaned = result.trim();
+  // A reply that consisted only of a tool request must not become an empty
+  // bubble; say what happened instead of showing either JSON or nothing.
+  if (cleaned.isEmpty && _containsToolProtocol(text)) {
+    return '（这条回复原本要调用联网工具，但请求格式无效，已忽略。）';
+  }
+  return cleaned;
 }
+
+/// Fence label → payload pairs. ` ```json\n{...}\n``` ` and
+/// ` ```agent_tool {...}``` ` both match.
+final RegExp _fencePattern = RegExp(r'```([\s\S]*?)```');
+
+String _stripToolFences(String text) {
+  final out = StringBuffer();
+  var cursor = 0;
+  for (final match in _fencePattern.allMatches(text)) {
+    out.write(text.substring(cursor, match.start));
+    if (ToolFenceProtocol.parse(match.group(1)!).kind == ToolFenceKind.code) {
+      out.write(match.group(0));
+    }
+    cursor = match.end;
+  }
+  final tail = text.substring(cursor);
+  final start = tail.indexOf('```');
+  if (start < 0 ||
+      ToolFenceProtocol.parse(tail.substring(start + 3)).kind ==
+          ToolFenceKind.code) {
+    out.write(tail);
+  } else {
+    out.write(tail.substring(0, start));
+  }
+  return out.toString();
+}
+
+/// True when the raw reply mentions any tool-call protocol marker.
+bool _containsToolProtocol(String text) =>
+    ToolFenceProtocol.containsProtocolMarker(text);

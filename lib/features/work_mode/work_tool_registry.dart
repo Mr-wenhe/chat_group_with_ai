@@ -11,6 +11,7 @@ import 'package:chat_group/features/work_mode/agent_decision.dart';
 import 'package:chat_group/features/agentic/tool_request.dart';
 import 'package:chat_group/features/work_mode/work_task_coordinator.dart';
 import 'package:chat_group/features/work_mode/work_task_error_sanitizer.dart';
+import 'package:chat_group/features/web_search/desktop/desktop_web_service.dart';
 
 /// Whether a registered tool can change local or external state.
 enum WorkToolAccess { readOnly, mutation }
@@ -394,6 +395,8 @@ class WorkToolRegistry {
     AgentToolName.workspaceRead,
     AgentToolName.workspaceSearch,
     AgentToolName.workspaceDocument,
+    AgentToolName.webSearch,
+    AgentToolName.webRead,
   };
   final Map<String, WorkToolDefinition> _definitions =
       <String, WorkToolDefinition>{};
@@ -540,6 +543,18 @@ class WorkToolRegistry {
         );
       }
       return await pipeline.run(invocation, definition.handler);
+    } on DesktopWebToolFailure catch (error) {
+      if (error.retryable) {
+        return WorkToolResult.retryableFailure(
+          message: error.safeMessage,
+          data: error.toSafeMap(),
+        );
+      }
+      return WorkToolResult.failed(
+        message: error.safeMessage,
+        data: error.toSafeMap(),
+        failureCode: 'publicWebSourceFailed',
+      );
     } on Object catch (error) {
       if (RetryHandler.isTransientError(error)) {
         return WorkToolResult.retryableFailure(

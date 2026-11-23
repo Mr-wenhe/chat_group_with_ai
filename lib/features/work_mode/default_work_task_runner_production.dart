@@ -91,7 +91,16 @@ extension _DefaultWorkTaskRunnerProduction on DefaultWorkTaskRunner {
 
   Future<bool> _productionContractAvailable(
       AgentTask task, WorkCollaborationState state) async {
-    if (state.artifactContract['type'] != 'software') return true;
+    if (state.artifactContract['type'] != 'software') {
+      if (state.workItems.every((item) => item['status'] == 'done') ||
+          _productionFileNames(state).isNotEmpty) {
+        return true;
+      }
+      await _productionDecision(task, 'question', '',
+          '产物合同尚未明确可核验的文件位置，请回群确认交付文件名和位置后继续。',
+          persist: false);
+      return false;
+    }
     // 用户只点名一个交付文件时不强制材料工作项：验证力来自 acceptances、下面的
     // verificationCommands 与独立审查，那三样一项没少；材料文档只是过程证据，在
     // 单文件交付上会把任务放大数倍（2026-10-10 现场：一个 HTML 变成五份产物）。
@@ -561,8 +570,7 @@ extension _DefaultWorkTaskRunnerProduction on DefaultWorkTaskRunner {
       if (current.phase == 'ready') {
         await _productionCommit(task, 'workItem', {'phase': 'producing'});
       }
-      final declared = (current.artifactContract['files'] as List? ?? const [])
-          .cast<String>();
+      final declared = _productionFileNames(current);
       final workspace = _workspaceRootForTask(task);
       final paths = declared
           .map((f) => p.isAbsolute(f) ? f : p.join(workspace!, f))

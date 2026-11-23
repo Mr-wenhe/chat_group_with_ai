@@ -31,7 +31,8 @@ void main() {
     if (await root.exists()) await root.delete(recursive: true);
   });
 
-  test('backup stores search metadata only and restore unbinds credentials',
+  test(
+      'legacy backup metadata is secret-free and retired search routes are skipped',
       () async {
     const secret = 'debug-search-secret';
     await db.appSettingsBox.put(
@@ -110,19 +111,17 @@ void main() {
     );
     final prepared = await restoreService.inspect(backup);
     addTearDown(prepared.dispose);
-    await restoreService.restore(
+    expect(prepared.preview.credentialsToRebind, 0);
+    expect(prepared.preview.retiredSearchConfigs, 1);
+    final report = await restoreService.restore(
       prepared,
       strategy: RestoreConflictStrategy.emptyOnly,
     );
 
-    final restored = db.appSettingsBox.get(SearchProviderConfigStore.configsKey)
-        as List<dynamic>;
-    final restoredConfig = Map<String, dynamic>.from(restored.single as Map);
-    expect(restoredConfig['credentialId'], '');
-    expect(restoredConfig['hasCredential'], isFalse);
-    expect(restoredConfig['credentialRequired'], isTrue);
-    expect(restoredConfig['requiresAttention'], isTrue);
-    expect(restoredConfig, isNot(contains('legacyApiKey')));
+    expect(db.appSettingsBox.get(SearchProviderConfigStore.configsKey), isNull);
+    expect(db.appSettingsBox.get(SearchProviderConfigStore.defaultProviderKey),
+        isNull);
+    expect(report.skipped['retiredSearchConfigs'], 1);
     expect(
       db.appSettingsBox.get(SearchProviderConfigStore.runtimeSettingsKey),
       containsPair('locale', 'en-US'),
@@ -138,7 +137,8 @@ void main() {
     );
   });
 
-  test('copy restore remaps search config IDs instead of duplicating them',
+  test(
+      'copy restore skips retired imports and preserves existing device metadata',
       () async {
     await db.appSettingsBox.put(
       SearchProviderConfigStore.configsKey,
@@ -189,7 +189,7 @@ void main() {
 
     final prepared = await service.inspect(backup);
     addTearDown(prepared.dispose);
-    await service.restore(
+    final report = await service.restore(
       prepared,
       strategy: RestoreConflictStrategy.copyWithNewIds,
     );
@@ -198,32 +198,10 @@ void main() {
             .get(SearchProviderConfigStore.configsKey) as List<dynamic>)
         .map((item) => Map<String, dynamic>.from(item as Map))
         .toList();
-    final ids = restored.map((item) => item['id']).toSet();
-    expect(restored, hasLength(2));
-    expect(ids, hasLength(2));
-    final imported = restored.singleWhere((item) => item['name'] == 'Source');
-    expect(imported['credentialId'], '');
-    expect(imported['hasCredential'], isFalse);
+    expect(restored, hasLength(1));
+    expect(restored.single['name'], 'Existing');
+    expect(restored.single['credentialId'], 'credential.web-search.search-1');
+    expect(report.skipped['retiredSearchConfigs'], 1);
   });
 
-  test('release merge normalization removes development Hive credentials', () {
-    final normalized = SearchProviderConfigStore.normalizeExistingValue(
-      const [
-        {
-          'id': 'search-1',
-          'name': 'Brave',
-          'provider': 'brave',
-          'baseUrl': 'https://api.example.com',
-          'credentialId': 'development-hive-web-search',
-          'hasCredential': true,
-          'legacyApiKey': 'debug-secret',
-        },
-      ],
-      isRelease: true,
-    );
-
-    expect(normalized.single['credentialId'], '');
-    expect(normalized.single['hasCredential'], isFalse);
-    expect(normalized.single, isNot(contains('legacyApiKey')));
-  });
 }

@@ -217,6 +217,7 @@ extension _DefaultWorkTaskRunnerModelIo on DefaultWorkTaskRunner {
           apiProtocol: config.protocol,
           promptCacheKey: config.workPromptCacheKey(task.characterId),
           customBaseUrl: config.customBaseUrl,
+          userAgent: config.userAgent,
           model: config.modelName,
           messages: boundedMessages,
           // Deterministic sampling reduces protocol drift; JSON mode is selected
@@ -449,6 +450,7 @@ extension _DefaultWorkTaskRunnerModelIo on DefaultWorkTaskRunner {
         apiProtocol: config.protocol,
         promptCacheKey: config.workPromptCacheKey(task.characterId),
         customBaseUrl: config.customBaseUrl,
+        userAgent: config.userAgent,
         model: config.modelName,
         messages: ContextWindowManager.fitToTokenBudget(
           [

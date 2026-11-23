@@ -101,7 +101,7 @@ void main() {
     await seed();
     final result = await exporter().export();
 
-    expect(result.included.length, 4);
+    expect(result.included.length, 3);
     expect(result.omitted, isEmpty);
 
     final payload = ApiBundleCodec.open(result.code);
@@ -122,8 +122,7 @@ void main() {
     expect(parsed.image!.model, 'glm-image');
     expect(parsed.image!.disableWatermark, isTrue);
 
-    expect(parsed.search.single.apiKey, searchKey);
-    expect(parsed.search.single.isDefault, isTrue);
+    expect(parsed.search, isEmpty);
   });
 
   test('导出的码是「导入侧肯接受」的：解析零跳过、语义与原状态一致', () async {
@@ -136,7 +135,7 @@ void main() {
     // 同一台机器上导了再导：聊天配置形状与名称都没变、默认指向也已到位，判为
     // 「无变化」；语音 / 图像 / 搜索的密钥无法在预览阶段比对，一律走「覆盖」。
     expect(plan.createCount, 0);
-    expect(plan.overwriteCount, 3);
+    expect(plan.overwriteCount, 2);
     expect(plan.skipCount, 1);
 
     // 导出侧自己先跑过一遍 ApiBundle.parse，因此这里不该出现任何**结构性**跳过

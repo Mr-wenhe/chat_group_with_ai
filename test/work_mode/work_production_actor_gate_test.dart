@@ -229,6 +229,17 @@ void main() {
     task.status = AgentTaskStatus.paused;
   }
 
+  test('单文件文档合同没有可选 files 时仍能准备制作并保留基线', () async {
+    await seedProductionReadyTask();
+    expect(await runner.prepareCollaborationWork(task), isTrue);
+    final root = jsonDecode(task.executionStateJson) as Map;
+    final baseline = root['productionBaseline'] as Map;
+    expect(baseline['hashes'], {
+      '${await project.resolveSymbolicLinks()}/report.txt': null,
+    });
+    expect((root['workItemExecution'] as Map)['stage'], 'produce');
+  });
+
   test('冻结后先等用户选择，继续测试只授权当前候选', () async {
     await freezeCandidate();
     expect(WorkTaskCompletionChoice.pending(task), isTrue);

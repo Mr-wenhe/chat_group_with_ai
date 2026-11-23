@@ -177,11 +177,14 @@ class WorkTaskRequirementsConfirmation {
   }
 
   static String _deliverable(String scope, Map<String, dynamic> contract) {
+    final sourceUrl = RegExp(r'https?://', caseSensitive: false);
     final files = RegExp(
             r'(?<![\w/.-])[^\s，,；;。]+\.(?:html|htm|md|txt|json|pdf|docx|xlsx|pptx)',
             caseSensitive: false)
         .allMatches(scope)
         .map((match) => match.group(0)!)
+        // 来源 URL 不能被当成本地交付路径，已声明的合同文件仍原样展示。
+        .where((file) => !sourceUrl.hasMatch(file))
         .toSet();
     final contractFiles = contract['files'];
     if (contractFiles is List) {

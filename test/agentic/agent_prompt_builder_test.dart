@@ -57,6 +57,27 @@ void main() {
     expect(prompt, contains('直接 finish'));
   });
 
+  test('single-file web retrieval prompt bounds retries and gates raw downloads', () {
+    final prompt = AgentPromptBuilder.buildAgentDecisionPrompt(
+      rolePlaySystemPrompt: '你是工作助手。',
+      skills: const [],
+      userRequest: '搜索 Flutter 官方仓库 README 并下载原文件',
+    );
+
+    expect(prompt, contains('单文件查找或原样下载任务'));
+    expect(prompt, contains('遵守用户指定的搜索次数上限'));
+    expect(prompt, contains('一次初始搜索'));
+    expect(prompt, contains('至多一次明确的定向补查'));
+    expect(prompt, contains('raw.githubusercontent.com'));
+    expect(prompt, contains('site:raw.githubusercontent.com/flutter/flutter README.md'));
+    expect(prompt, contains('并同时写明主机、完整仓库路径和目标文件名'));
+    expect(prompt, contains('不得仅搜索泛词 `raw` 或 `README`'));
+    expect(prompt, contains('补查后停止搜索循环'));
+    expect(prompt, contains('只有已登记来源明确指向原文件本身'));
+    expect(prompt, contains('不得下载或命名为 README.md'));
+    expect(prompt, contains('不调用 web.download 或文件写入/改名工具'));
+  });
+
   test('Stage 03 prompt requires chunked writes for long content', () {
     // 回归：用户要 5000+ 字报告时，模型把整篇正文塞进一次 workspace.patch 必然
     // 撞输出上限（实测 8192 token），动作 JSON 被截断、任务失败。提示词必须给出

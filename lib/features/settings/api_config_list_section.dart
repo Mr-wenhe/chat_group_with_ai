@@ -258,6 +258,7 @@ class _ApiConfigListSectionState extends ConsumerState<ApiConfigListSection> {
       provider: provider,
       apiProtocol: config.protocol,
       customBaseUrl: config.customBaseUrl,
+      userAgent: config.userAgent,
       model: config.modelName,
     );
 

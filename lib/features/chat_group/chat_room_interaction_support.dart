@@ -143,10 +143,26 @@ extension _ChatRoomInteractionSupport on _ChatRoomPageState {
 
       final searchTurnContext = await _regenerationSearchContext(
         original,
+        character: character,
         forceRefresh: forceRefresh,
       );
       if (_isReplyRoundInvalidated(
           isAutoChat: false, generation: roundGeneration)) {
+        return;
+      }
+      if (character.zhipuSearchAnswerOnly &&
+          !(searchTurnContext?.snapshot?.hasResults == true &&
+              searchTurnContext?.snapshot?.provider.trim().toLowerCase() ==
+                  'zhipu-native')) {
+        if (!mounted) return;
+        final failure = searchTurnContext?.snapshot?.failure?.safeMessage;
+        AppToast.show(
+          context,
+          failure?.trim().isNotEmpty == true
+              ? failure!
+              : '未获得可用的智谱网页搜索结果，未重新生成。',
+          icon: Icons.info_outline_rounded,
+        );
         return;
       }
       final webSearch = searchTurnContext?.snapshot;
@@ -167,6 +183,9 @@ extension _ChatRoomInteractionSupport on _ChatRoomPageState {
       // 角色的发言。
       final currentUserMessage =
           ChatReplyPromptGuard.lastHumanInput(_regenerateContext);
+      final allowSourceLinks = searchTurnContext?.allowSourceLinks == true ||
+          const SearchIntentDetector()
+              .isSourceLinkRequest(currentUserMessage?.content);
       Object? currentUserTurn;
       final apiMessages = _withWebSearchContext(
         await _buildApiMessages(
@@ -178,11 +197,18 @@ extension _ChatRoomInteractionSupport on _ChatRoomPageState {
           onCurrentUserTurn: (rendered) => currentUserTurn = rendered,
         ),
         webSearch,
-        allowSourceLinks: searchTurnContext?.allowSourceLinks == true,
+        allowSourceLinks: allowSourceLinks,
       );
-      final outputLimit = max(1, capability.contextWindow);
-      final outputTokens =
-          capability.maxOutput.clamp(1, min(1024, outputLimit)).toInt();
+      final outputTokens = ContextWindowManager.replyOutputBudget(
+        contextWindow: capability.contextWindow,
+        maxOutput: capability.maxOutput,
+        completeSourceLinks: allowSourceLinks,
+        isDirectChat: _isDirectChat,
+        modelName: config.modelName,
+        replyCeiling: _isDirectChat
+            ? ContextWindowManager.directChatReplyOutputCeiling
+            : ContextWindowManager.shortReplyMaxOutput,
+      );
       final inputBudget = ContextWindowManager.inputBudget(
         contextWindow: capability.contextWindow,
         maxOutput: outputTokens,
@@ -235,8 +261,16 @@ extension _ChatRoomInteractionSupport on _ChatRoomPageState {
       _beginVoiceReply(character);
       final hideZhipuSourceAttribution =
           webSearch?.provider.trim().toLowerCase() == 'zhipu-native';
-      session = StreamingReplySession();
+      final cancelToken = _beginReplyCancelToken();
+      session = StreamingReplySession(
+        // 与主回复同一纪律：停止/停滞时 abort 上游，而不是只放弃本地订阅。
+        onCancel: () {
+          if (!cancelToken.isCancelled) cancelToken.cancel('watchdog-stall');
+        },
+        onCompatibilityRetry: () => _setReplyCompatibilityRetry(true),
+      );
       _streamingSession = session;
+      _setReplyCompatibilityRetry(false);
       if (_canTouchUi) _setUiState(() {});
       final result = await session.run(
         _aiGateway.streamChatMessage(
@@ -244,9 +278,15 @@ extension _ChatRoomInteractionSupport on _ChatRoomPageState {
           provider: provider,
           apiProtocol: config.protocol,
           customBaseUrl: config.customBaseUrl,
+          userAgent: config.userAgent,
           model: config.modelName,
+          reasoningEffort:
+              config.modelName.trim().toLowerCase() == 'step-5-preview'
+                  ? 'low'
+                  : null,
           messages: boundedApiMessages,
           maxTokens: outputTokens,
+          cancelToken: cancelToken,
           purpose: AiRequestPurpose.reply,
           conversationId: widget.groupId,
           characterId: character.id,
@@ -262,15 +302,16 @@ extension _ChatRoomInteractionSupport on _ChatRoomPageState {
           _feedVoiceReplyDraft(draft);
         },
       );
+      _setReplyCompatibilityRetry(false);
       if (_disposed) return;
       bool shouldDiscardResult() =>
           _discardCurrentStream ||
           roundGeneration != _roomRoundGeneration ||
           shouldDiscardStreamingReply(
             stopped: result.stopped,
-            // 与普通回合同口径：用"用户还在看这个群"而不是"widget 还在树上"，
-            // 切到别的群或别的页面时这一轮结果不该落回旧群。
-            pageActive: _roomWorkAllowed,
+            // 与普通回合同口径：用"用户还在这个会话里"而不是"App 在前台"，
+            // 窗口被遮挡不该让这一轮结果作废。
+            pageActive: _roomSessionVisible,
             conversationStopping: _conversationController.state.phase ==
                 ConversationPhase.stopping,
           );
@@ -292,6 +333,8 @@ extension _ChatRoomInteractionSupport on _ChatRoomPageState {
       if (_canTouchUi) _setUiState(() {});
 
       if (failed && !AiRequestGateway.isBlockedMessage(result.error)) {
+        // 与主回复同一条规则：停滞看门狗已经 abort 过的令牌不能带进重试。
+        final retryCancelToken = _beginReplyCancelToken();
         final retryContent = await _retryFailedReply(
           character: character,
           config: config,
@@ -301,6 +344,8 @@ extension _ChatRoomInteractionSupport on _ChatRoomPageState {
           userInitiated: true,
           isAutoChat: false,
           roundGeneration: roundGeneration,
+          cancelToken: retryCancelToken,
+          lowerReasoning: _isDirectChat,
         );
         if (retryContent != null && retryContent.trim().isNotEmpty) {
           failed = false;
@@ -340,17 +385,17 @@ extension _ChatRoomInteractionSupport on _ChatRoomPageState {
       fullContent = _stripNamePrefix(fullContent, character.name);
       fullContent =
           _chatRoomSearchContextFormatter.sanitizeCitationsWithSourceIds(
-          fullContent,
-          webSearch == null
-              ? const <String>[]
-              : _chatRoomSearchContextFormatter.format(webSearch).sourceIds,
-          hideCitations:
-              webSearch?.provider.trim().toLowerCase() == 'zhipu-native',
-        );
+        fullContent,
+        webSearch == null
+            ? const <String>[]
+            : _chatRoomSearchContextFormatter.format(webSearch).sourceIds,
+        hideCitations:
+            webSearch?.provider.trim().toLowerCase() == 'zhipu-native',
+      );
       if (webSearch != null) {
         fullContent = _chatRoomSearchContextFormatter.sanitizeAnswerLinks(
           fullContent,
-          allowLinks: searchTurnContext?.allowSourceLinks == true,
+          allowLinks: allowSourceLinks,
         );
       }
       temp.content = fullContent;

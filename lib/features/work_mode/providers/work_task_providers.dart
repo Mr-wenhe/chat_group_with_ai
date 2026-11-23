@@ -69,7 +69,7 @@ final workTaskRunnerProvider = Provider<WorkTaskRunner>((ref) {
       mutations = null;
     }
   }
-  return DefaultWorkTaskRunner(
+  final runner = DefaultWorkTaskRunner(
     database: database,
     eventStore: ref.watch(workTaskEventStoreProvider),
     folderGrantService: grants,
@@ -79,6 +79,8 @@ final workTaskRunnerProvider = Provider<WorkTaskRunner>((ref) {
     nativeAppAutomation: ref.watch(macosNativeAppAutomationProvider),
     autoOpenHtml: true,
   );
+  ref.onDispose(runner.closeWebTools);
+  return runner;
 });
 
 /// Production S3 discussion capability. It shares the same database, secure

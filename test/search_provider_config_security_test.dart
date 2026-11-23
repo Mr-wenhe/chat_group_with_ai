@@ -1,14 +1,11 @@
 import 'dart:io';
 
 import 'package:chat_group/core/storage/credential_repository.dart';
-import 'package:chat_group/features/web_search/application/search_provider_config_service.dart';
 import 'package:chat_group/features/web_search/data/search_credential_repository.dart';
 import 'package:chat_group/features/web_search/data/search_settings_store.dart';
 import 'package:chat_group/features/web_search/models/search_provider_config.dart';
 import 'package:chat_group/features/web_search/models/search_runtime_settings.dart';
-import 'package:chat_group/features/web_search/models/search_failure.dart';
 import 'package:chat_group/features/web_search/models/search_models.dart';
-import 'package:chat_group/features/web_search/providers/search_provider.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hive/hive.dart';
 
@@ -59,37 +56,6 @@ class _MemoryCredentialStore implements CredentialStore {
     final callback = afterWrite;
     afterWrite = null;
     if (callback != null) await callback();
-  }
-}
-
-class _FakeSearchProvider implements SearchProvider {
-  final SearchProviderKind providerKind;
-  String? receivedCredential;
-  SearchHealthResult healthResult =
-      const SearchHealthResult(isHealthy: true, latencyMs: 4);
-
-  _FakeSearchProvider(this.providerKind);
-
-  @override
-  SearchProviderKind get kind => providerKind;
-
-  @override
-  Future<SearchProviderResponse> search(
-    request, {
-    required String? credential,
-    cancelToken,
-  }) async {
-    receivedCredential = credential;
-    return SearchProviderResponse(items: const []);
-  }
-
-  @override
-  Future<SearchHealthResult> testConnection({
-    required String? credential,
-    required String probeQuery,
-  }) async {
-    receivedCredential = credential;
-    return healthResult;
   }
 }
 

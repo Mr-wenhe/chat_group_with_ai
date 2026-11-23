@@ -5,9 +5,8 @@ import '../security/search_secret_scanner.dart';
 
 part 'search_snapshot_models.dart';
 
-// Brave rejects queries longer than 400 characters. Keeping the shared
-// request model within that provider limit prevents later coordinators from
-// sending an otherwise valid SearchRequest that the HTTP adapter cannot use.
+// Keep the established request bound for persisted snapshots and shared input
+// validation when retiring providers.
 const int searchQueryMaxLength = 400;
 const int searchTitleMaxLength = 300;
 const int searchSnippetMaxLength = 800;

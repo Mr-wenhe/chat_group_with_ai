@@ -63,6 +63,9 @@ class RetryHandler {
 
   static bool isTransientResult(Map<String, dynamic> result) {
     if (result['success'] == true) return false;
+    // 上游显式标记可重试时尊重该标记（如空响应 failureCode=emptyResponse）。
+    // 否则空响应虽被标 retryable=true，却因 message 不匹配正则而永远只调用一次。
+    if (result['retryable'] == true) return true;
     final statusCode = result['statusCode'];
     if (statusCode is int) return _retryableStatusCodes.contains(statusCode);
     final message = result['message']?.toString().toLowerCase() ?? '';

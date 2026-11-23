@@ -24,6 +24,15 @@ extension _ChatRoomMessageSelectionSupport on _ChatRoomPageState {
   void _enterMessageSelection({Message? seed}) {
     if (_isRealtimeGuest || _messageSelectionActive) return;
     // 与"不跟随滚动"是同一条理由：自动发言在勾选期间冒出新气泡，正好顶动列表。
+    _autoChatRoundGeneration++;
+    if (_conversationController.state.run?.type ==
+        ConversationRunType.automatic) {
+      if (_isStreaming) {
+        _stopStreaming(cancelReason: 'message-selection');
+      } else {
+        _cancelActiveSpeakerPick();
+      }
+    }
     _stopAutoChat();
     _setUiState(() {
       _messageSelectionActive = true;

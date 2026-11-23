@@ -16,7 +16,6 @@ import 'package:chat_group/core/database/database_service_image.dart';
 import 'package:chat_group/core/storage/credential_repository.dart';
 import 'package:chat_group/features/settings/ai_speaker_picker_settings.dart';
 import 'package:chat_group/features/settings/api_bundle_import_models.dart';
-import 'package:chat_group/features/web_search/data/search_credential_repository.dart';
 import 'package:chat_group/features/web_search/data/search_settings_store.dart';
 import 'package:chat_group/features/web_search/data/zhipu_native_search_credential_store.dart';
 
@@ -60,14 +59,11 @@ class ApiBundleExportService {
   ApiBundleExportService({
     required DatabaseService db,
     CredentialRepository? credentials,
-    SearchCredentialRepository? searchCredentials,
   })  : _db = db,
-        _credentials = credentials ?? CredentialRepository(),
-        _searchCredentials = searchCredentials ?? SearchCredentialRepository();
+        _credentials = credentials ?? CredentialRepository();
 
   final DatabaseService _db;
   final CredentialRepository _credentials;
-  final SearchCredentialRepository _searchCredentials;
 
   Future<ApiBundleExportResult> export({
     String secret = defaultBundleSecret,
@@ -89,14 +85,28 @@ class ApiBundleExportService {
     final image = await _collectImage(included, omitted);
     if (image != null) payload['image'] = image;
 
-    final search = await _collectSearch(included, omitted);
-    if (search.isNotEmpty) payload['search'] = search;
+    for (final config in SearchProviderConfigStore(db: _db).configs) {
+      omitted.add(ApiBundleExportEntry(
+          service: BundleService.search,
+          title: config.name,
+          detail: '旧搜索提供商已退役，未读取或导出凭据'));
+    }
 
     final zhipuSearch = await _collectZhipuNativeSearch(included, omitted);
     if (zhipuSearch != null) payload['zhipuNativeSearch'] = zhipuSearch;
 
     // 自检：导出侧拒绝生成一份导入侧不肯接受的包。
-    ApiBundle.parse(payload);
+    final selfCheck = ApiBundle.parse(payload);
+    // 自检只对整包级问题抛异常；条目级问题说明某个**字段**带不走（例如超过
+    // 上限的 User-Agent：解析侧会保留目标机器上的原值并记一条 issue）。把它
+    // 单列进「未导出」，导出结果才不会替用户宣称"这份包和本机一致"。
+    for (final issue in selfCheck.issues) {
+      omitted.add(ApiBundleExportEntry(
+        service: _serviceForLabel(issue.section),
+        title: issue.title,
+        detail: '导出校验：${issue.reason}',
+      ));
+    }
 
     return ApiBundleExportResult(
       code: ApiBundleCodec.seal(payload, secret: secret),
@@ -135,6 +145,7 @@ class ApiBundleExportService {
         'customBaseUrl': config.customBaseUrl,
         'apiProtocol': config.apiProtocol,
         'enableWorkPromptCaching': config.enableWorkPromptCaching,
+        'userAgent': config.userAgent,
         'apiKey': apiKey,
         if (config.id == defaultConfigId) 'makeDefault': true,
       });
@@ -213,53 +224,6 @@ class ApiBundleExportService {
     };
   }
 
-  Future<List<Map<String, dynamic>>> _collectSearch(
-    List<ApiBundleExportEntry> included,
-    List<ApiBundleExportEntry> omitted,
-  ) async {
-    const service = BundleService.search;
-    final result = <Map<String, dynamic>>[];
-
-    for (final config in SearchProviderConfigStore(db: _db).configs) {
-      // 只导出带密钥的提供方。无密钥的那几个（DuckDuckGo / 内置）本来就没有
-      // 可分享的秘密，把它们塞进包里只是噪声——对方自己就能加。
-      if (!config.hasCredential) continue;
-
-      final read = await _searchCredentials.read(config.id);
-      final apiKey = read.value ?? '';
-      if (!read.isAvailable || apiKey.isEmpty) {
-        omitted.add(ApiBundleExportEntry(
-          service: service,
-          title: config.name,
-          detail: '已绑定但令牌读不出来（系统安全存储不可用）',
-        ));
-        continue;
-      }
-      result.add(<String, dynamic>{
-        'id': config.id,
-        'name': config.name,
-        'provider': config.provider.name,
-        'baseUrl': config.baseUrl,
-        'apiKey': apiKey,
-        'enabled': config.enabled,
-        'isDefault': config.isDefault,
-      });
-      included.add(ApiBundleExportEntry(
-        service: service,
-        title: config.name,
-        detail: config.provider.name,
-        fingerprint: apiBundleKeyFingerprint(apiKey),
-      ));
-    }
-    return result;
-  }
-
-  /// 智谱原生 Web Search 走的是**另一套**凭据存储
-  /// （`ZhipuNativeSearchCredentialStore`），上面那个循环看不到它。
-  ///
-  /// 少了这一段，「搜索服务」配成智谱原生的用户导出的包里一条搜索凭据都没有：
-  /// 包能解开、导入也不报错，只是静默少了一整类。所以这里的「读不出来」必须
-  /// 进 [omitted] 带原因，和其余三类服务同一口径。
   Future<Map<String, dynamic>?> _collectZhipuNativeSearch(
     List<ApiBundleExportEntry> included,
     List<ApiBundleExportEntry> omitted,
@@ -285,5 +249,13 @@ class ApiBundleExportService {
       fingerprint: apiBundleKeyFingerprint(apiKey),
     ));
     return <String, dynamic>{'apiKey': apiKey};
+  }
+
+  /// 把解析层的服务名映射回枚举。导入侧有同名实现，两边都只做一次全等匹配。
+  static BundleService _serviceForLabel(String label) {
+    for (final service in BundleService.values) {
+      if (service.label == label) return service;
+    }
+    return BundleService.chat;
   }
 }

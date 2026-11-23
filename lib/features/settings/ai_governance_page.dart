@@ -162,7 +162,7 @@ class _AiGovernancePageState extends ConsumerState<AiGovernancePage> {
     }
     return Column(
       children: [
-        _title('联网搜索'),
+        _title('智谱搜索策略'),
         Card(
           child: Padding(
             padding: const EdgeInsets.all(16),
@@ -186,9 +186,9 @@ class _AiGovernancePageState extends ConsumerState<AiGovernancePage> {
                 ),
                 const SizedBox(height: 12),
                 const Text(
-                  '默认关闭。询问模式每次都需明确同意；启用后，查询会发送给已配置的 '
-                  'Provider 或智谱原生 Web Search。DuckDuckGo 仅作为百科即时答案兜底，'
-                  '不等同于完整 Web 搜索。',
+                  '以下策略仅管理新闻角色、圆桌会议等原有智谱搜索流程。'
+                  '默认关闭；询问模式每次都需明确同意。'
+                  '桌面自动联网复用聊天配置，由模型按需搜索、读取和下载，不受此开关控制。',
                 ),
               ],
             ),
@@ -201,7 +201,7 @@ class _AiGovernancePageState extends ConsumerState<AiGovernancePage> {
           child: ListTile(
             leading: const Icon(Icons.key_outlined),
             title: const Text('搜索服务凭据'),
-            subtitle: const Text('Provider 与智谱原生搜索的 Key、地址和默认服务商'),
+            subtitle: const Text('仅配置智谱专用搜索 Key'),
             trailing: const Icon(Icons.chevron_right_rounded),
             onTap: () => Navigator.of(context).push(
               MaterialPageRoute(

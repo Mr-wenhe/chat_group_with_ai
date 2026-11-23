@@ -52,6 +52,7 @@ ApiBundleChatEntry chatEntry({
   String protocol = '',
   String apiKey = chatKey,
   bool setDefault = false,
+  String? userAgent,
 }) =>
     ApiBundleChatEntry(
       id: id,
@@ -62,6 +63,7 @@ ApiBundleChatEntry chatEntry({
       protocol: protocol,
       apiKey: apiKey,
       setDefault: setDefault,
+      userAgent: userAgent,
     );
 
 ApiBundle fullBundle() => buildBundle(
@@ -113,9 +115,12 @@ void main() {
     await closeLifecycleHive(hiveDirectory, db);
   });
 
-  ApiBundleImportService service({bool secureStorageAvailable = true}) =>
+  ApiBundleImportService service({
+    bool secureStorageAvailable = true,
+    DatabaseService? database,
+  }) =>
       ApiBundleImportService(
-        db: db,
+        db: database ?? db,
         credentials: CredentialRepository(
           store: MemoryCredentialStore(),
           secureStorageAvailable: secureStorageAvailable,
@@ -128,19 +133,20 @@ void main() {
     for (final secret in [chatKey, voiceKey, imageKey, searchKey]) {
       expect(dump.contains(secret), isFalse, reason: 'app_settings 里出现了明文密钥');
     }
-    final configDump =
-        db.apiConfigBox.values.map((c) => c.legacyApiKeyForMigration ?? '').join();
+    final configDump = db.apiConfigBox.values
+        .map((c) => c.legacyApiKeyForMigration ?? '')
+        .join();
     expect(configDump.contains(chatKey), isFalse, reason: '聊天配置记录里留了明文密钥');
   }
 
-  test('四类服务一次导入全部落地，且没有任何明文进 app_settings', () async {
+  test('三类服务导入且旧搜索跳过，明文不进 app_settings', () async {
     final plan = service().plan(fullBundle());
-    expect(plan.createCount, 4);
+    expect(plan.createCount, 3);
     expect(plan.overwriteCount, 0);
 
     final result = await service().apply(fullBundle());
     expect(result.failureCount, 0);
-    expect(result.successCount, 4);
+    expect(result.successCount, 3);
 
     // 聊天：元数据在 api_configs，密钥在凭据存储。
     final chatConfig = db.apiConfigBox.values.single;
@@ -152,7 +158,8 @@ void main() {
       CredentialRepository().credentialIdFor(chatConfig.id),
     );
     expect(
-      credentialBox.get('v:${CredentialRepository().credentialIdFor(chatConfig.id)}'),
+      credentialBox
+          .get('v:${CredentialRepository().credentialIdFor(chatConfig.id)}'),
       chatKey,
     );
     expect(AiSpeakerPickerSettings(db).selectedConfigId(), chatConfig.id);
@@ -160,22 +167,22 @@ void main() {
     // 语音 / 图像：元数据在 app_settings 单 Map，密钥在凭据存储。
     expect(db.voiceServiceConfig.apiKeyBound, isTrue);
     expect(
-      credentialBox.get('v:${CredentialRepository().credentialIdFor('voice.volcengine')}'),
+      credentialBox.get(
+          'v:${CredentialRepository().credentialIdFor('voice.volcengine')}'),
       voiceKey,
     );
     expect(db.imageServiceConfig.apiKeyBound, isTrue);
     expect(db.imageServiceConfig.model, 'glm-image');
     expect(db.imageServiceConfig.disableWatermark, isTrue);
     expect(
-      credentialBox.get('v:${CredentialRepository().credentialIdFor('image.openai-compatible')}'),
+      credentialBox.get(
+          'v:${CredentialRepository().credentialIdFor('image.openai-compatible')}'),
       imageKey,
     );
 
-    // 搜索：独立命名空间 `credential.web-search.`。
-    final search = SearchProviderConfigStore(db: db).findById('tavily-main');
-    expect(search, isNotNull);
-    expect(search!.hasCredential, isTrue);
-    expect(credentialBox.get('v:credential.web-search.tavily-main'), searchKey);
+    expect(SearchProviderConfigStore(db: db).findById('tavily-main'), isNull);
+    expect(credentialBox.get('v:credential.web-search.tavily-main'), isNull);
+    expect(plan.skipCount, 1);
 
     expectNoPlaintextAnywhere();
   });
@@ -269,7 +276,7 @@ void main() {
     ]);
     final plan = service().plan(bundle);
     expect(plan.skipCount, 1);
-    expect(plan.changes.single.detail, contains('访问令牌'));
+    expect(plan.changes.single.detail, contains('已退役'));
     await service().apply(bundle);
     expect(SearchProviderConfigStore(db: db).configs, isEmpty);
   });
@@ -289,25 +296,39 @@ void main() {
     expect(SearchProviderConfigStore(db: db).configs, isEmpty);
   });
 
-  test('搜索单条保存失败不影响其余三类服务', () async {
-    // 预置两条规范化后相同的 id：`_hasAmbiguousProviderIds` 因此为真，
-    // 搜索 store 的每一次 save 都会失败。这是真实存在的拒绝路径，
-    // 不是伪造的异常。
-    await db.appSettingsBox.put(SearchProviderConfigStore.configsKey, [
-      {'id': 'dup', 'name': 'a', 'provider': 'tavily', 'baseUrl': 'https://a.test'},
-      {'id': 'dup', 'name': 'b', 'provider': 'tavily', 'baseUrl': 'https://b.test'},
-    ]);
-
+  test('退役的搜索条目只跳过、不阻塞其余三类服务', () async {
+    // 旧 Provider 的写入入口已删除，包里那一段只进预览的「跳过」行。这条用例
+    // 只证明"跳过不阻塞"；它**不再**具备"搜索单条保存失败"的语义（那种失败
+    // 路径已经不存在），真实的部分失败由下面那条用例覆盖。
     final result = await service().apply(fullBundle());
 
-    final search = result.outcomes
-        .firstWhere((o) => o.service == BundleService.search);
-    expect(search.succeeded, isFalse);
-    expect(search.reason, isNotEmpty);
+    expect(result.outcomes.where((o) => o.service == BundleService.search),
+        isEmpty);
+    expect(SearchProviderConfigStore(db: db).configs, isEmpty);
+    expect(credentialBox.get('v:credential.web-search.tavily-main'), isNull);
 
-    // 其余三类照常成功——一条坏的搜索配置不该挡住整个导入。
+    expect(result.failureCount, 0);
     expect(result.successCount, 3);
     expect(db.apiConfigBox.length, 1);
+    expect(db.voiceServiceConfig.apiKeyBound, isTrue);
+    expect(db.imageServiceConfig.apiKeyBound, isTrue);
+  });
+
+  test('聊天单条保存失败不影响其余服务，并如实报告该条失败', () async {
+    // 真实失败路径：`saveApiConfig` 抛错（release 下凭据写不进去就抛 StateError，
+    // 这里用子类把它稳定复现）。导入必须继续处理语音 / 图像，并把这一条记成
+    // 失败而不是静默丢弃。
+    final result = await service(database: _ChatSaveFailingDatabaseService())
+        .apply(fullBundle());
+
+    final chatOutcome = result.outcomes
+        .singleWhere((o) => o.service == BundleService.chat);
+    expect(chatOutcome.succeeded, isFalse);
+    expect(chatOutcome.reason, isNotEmpty);
+    expect(result.failureCount, 1);
+
+    expect(result.successCount, 2);
+    expect(db.apiConfigBox, isEmpty);
     expect(db.voiceServiceConfig.apiKeyBound, isTrue);
     expect(db.imageServiceConfig.apiKeyBound, isTrue);
   });
@@ -341,7 +362,9 @@ void main() {
     expect(SearchProviderConfigStore(db: db).configs, isEmpty);
     expectNoPlaintextAnywhere();
     expect(
-      db.appSettingsBox.values.map((v) => v.toString()).join('\n')
+      db.appSettingsBox.values
+          .map((v) => v.toString())
+          .join('\n')
           .contains(zhipuKey),
       isFalse,
       reason: 'app_settings 里出现了明文密钥',
@@ -380,13 +403,13 @@ void main() {
     expect(plan.createCount, 0);
     // 聊天那条形状、名称、默认指向都没变，因此是「跳过」而不是「覆盖」；
     // 语音 / 图像 / 搜索比不了密钥，一律覆盖。
-    expect(plan.skipCount, 1);
-    expect(plan.overwriteCount, 3);
+    expect(plan.skipCount, 2);
+    expect(plan.overwriteCount, 2);
 
     final result = await service().apply(fullBundle());
     expect(result.failureCount, 0);
     expect(db.apiConfigBox.length, 1);
-    expect(SearchProviderConfigStore(db: db).configs.length, 1);
+    expect(SearchProviderConfigStore(db: db).configs.length, 0);
   });
 
   test('未知音色不会覆盖现有默认音色', () async {
@@ -407,8 +430,71 @@ void main() {
     expect(db.voiceServiceConfig.apiKeyBound, isTrue);
   });
 
-  test('预览里不出现密钥的任何字符，只给指纹', () {
-    final plan = service().plan(fullBundle());
+  group('User-Agent 三态往返', () {
+    const targetId = 'cfg-relay';
+    const oldUserAgent = 'claude-cli/2.0.0 (external, cli)';
+
+    /// 预置一条已带自定义 UA 的配置，供「覆盖 / 保留」两种路径复用。
+    Future<void> seedTarget() async {
+      await db.apiConfigBox.put(
+        targetId,
+        ApiConfig(
+          id: targetId,
+          name: '主力对话',
+          provider: 'deepseek',
+          modelName: 'deepseek-chat',
+          hasCredential: true,
+          credentialId: CredentialRepository().credentialIdFor(targetId),
+          userAgent: oldUserAgent,
+        ),
+      );
+    }
+
+    test('旧包不带该字段 → 保留目标配置原有 UA，且判为无变化', () async {
+      await seedTarget();
+
+      final plan = service().plan(buildBundle(chat: [chatEntry(id: targetId)]));
+      expect(plan.skipCount, 1);
+      expect(plan.changes.single.detail, contains('一致'));
+
+      await service().apply(buildBundle(chat: [chatEntry(id: targetId)]));
+      expect(db.apiConfigBox.get(targetId)!.userAgent, oldUserAgent);
+    });
+
+    test('显式空串 → 覆盖并清空 UA，回到客户端默认身份', () async {
+      await seedTarget();
+
+      final bundle =
+          buildBundle(chat: [chatEntry(id: targetId, userAgent: '')]);
+      final plan = service().plan(bundle);
+      expect(plan.overwriteCount, 1);
+
+      await service().apply(bundle);
+      expect(db.apiConfigBox.get(targetId)!.userAgent, '');
+    });
+
+    test('非空值 → 覆盖为目标 UA', () async {
+      await seedTarget();
+
+      final bundle = buildBundle(
+          chat: [chatEntry(id: targetId, userAgent: 'my-client/1.0')]);
+      await service().apply(bundle);
+
+      expect(db.apiConfigBox.get(targetId)!.userAgent, 'my-client/1.0');
+    });
+
+    test('程序化构造的超长 UA 被拒绝，不会静默换身份', () async {
+      final long = 'x' * 300;
+      final plan = service().plan(
+          buildBundle(chat: [chatEntry(userAgent: long)]));
+
+      expect(plan.createCount, 0);
+      expect(plan.skipCount, 1);
+      expect(plan.changes.single.detail, contains('过长'));
+    });
+  });
+
+  test('预览里不出现密钥的任何字符，只给指纹', () {    final plan = service().plan(fullBundle());
     final text = jsonEncode([
       for (final change in plan.changes)
         [change.title, change.detail, change.keyFingerprint],
@@ -419,4 +505,14 @@ void main() {
     // 指纹在位，用户仍可三方对照。
     expect(plan.changes.every((c) => c.keyFingerprint.length == 8), isTrue);
   });
+}
+
+/// 让聊天的单条保存稳定失败：release 下凭据写不进去时 `saveApiConfig` 抛
+/// `StateError`，这里在测试里复现同一条异常出口，用来验证"部分失败"是真的
+/// 被吞成单条失败而不是继续跑一遍成功路径。
+class _ChatSaveFailingDatabaseService extends DatabaseService {
+  @override
+  Future<void> saveApiConfig(ApiConfig config) async {
+    throw StateError('simulated credential write failure');
+  }
 }

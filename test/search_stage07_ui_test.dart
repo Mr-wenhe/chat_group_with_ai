@@ -5,13 +5,13 @@ import 'package:chat_group/features/web_search/models/search_models.dart';
 import 'package:chat_group/features/web_search/models/search_runtime_settings.dart';
 import 'package:chat_group/features/web_search/presentation/web_search_audit_card.dart';
 import 'package:chat_group/features/web_search/presentation/web_search_runtime_settings_card.dart';
-import 'package:chat_group/features/web_search/presentation/web_search_sources_dialog.dart';
+import 'package:chat_group/features/web_search/presentation/inline_search_reply.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
   testWidgets(
-      'sources dialog maps formatted source IDs and hides unknown citations',
+      'inline sources retain citation mapping without a technical dialog',
       (tester) async {
     Uri? openedUri;
     final snapshot = WebSearchSnapshot(
@@ -32,19 +32,26 @@ void main() {
     await tester.pumpWidget(
       MaterialApp(
         home: Scaffold(
-          body: SourcesDialog(
-            snapshot: snapshot,
+          body: InlineSearchReply(
+            content: '**Flutter release notes**',
+            style: const TextStyle(),
+            mentionNames: const [],
+            snapshot: snapshot.toMap(),
             onOpenSource: (uri) => openedUri = uri,
           ),
         ),
       ),
     );
 
+    expect(find.text('[S1] Flutter release notes'), findsNothing);
+    await tester.tap(find.text('已联网 · 1 个来源'));
+    await tester.pump();
     expect(find.text('[S1] Flutter release notes'), findsOneWidget);
     expect(find.textContaining('example.com'), findsOneWidget);
-    expect(find.textContaining('未提供发布日期'), findsOneWidget);
-    expect(find.text('Provider：Brave'), findsOneWidget);
-    await tester.tap(find.byTooltip('在外部浏览器打开'));
+    expect(find.textContaining('未提供'), findsNothing);
+    expect(find.textContaining('Provider'), findsNothing);
+    expect(find.byType(AlertDialog), findsNothing);
+    await tester.tap(find.text('[S1] Flutter release notes'));
     expect(openedUri?.host, 'example.com');
 
     final sanitized = const SearchContextFormatter().sanitizeCitations(
@@ -69,7 +76,7 @@ void main() {
     );
   });
 
-  testWidgets('sources dialog keeps safe failure details visible',
+  testWidgets('failed networking shows a readable status without a success badge',
       (tester) async {
     final snapshot = WebSearchSnapshot(
       searchedAt: DateTime.utc(2026, 8, 23),
@@ -88,13 +95,19 @@ void main() {
 
     await tester.pumpWidget(
       MaterialApp(
-        home: Scaffold(body: SourcesDialog(snapshot: snapshot)),
+        home: Scaffold(
+            body: InlineSearchReply(
+                content: '搜索服务连接超时',
+                snapshot: snapshot.toMap(),
+                style: const TextStyle(),
+                mentionNames: const [])),
       ),
     );
 
-    expect(find.text('失败类型：connectionTimeout'), findsOneWidget);
-    expect(find.text('HTTP 状态码：504'), findsOneWidget);
-    expect(find.text('请求耗时：1800ms · 重试 2 次'), findsOneWidget);
+    expect(find.text('未取得联网来源'), findsOneWidget);
+    expect(find.text('搜索服务连接超时'), findsOneWidget);
+    expect(find.textContaining('已联网'), findsNothing);
+    expect(find.textContaining('connectionTimeout'), findsNothing);
   });
 
   testWidgets('persisted audit failure opens a readable detail dialog',

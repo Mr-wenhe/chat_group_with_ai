@@ -20,6 +20,12 @@ class AutoChatScheduler {
 
   bool get isRunning => _running;
 
+  /// 调度器是否还活着：正在跑一轮，或已经排好下一次。
+  ///
+  /// "停止生成"、生命周期暂停、burst 冷却都可能把它停掉；调用方据此判断要不要
+  /// 重新拉起，避免重复排期把计时器不断往后推。
+  bool get isActive => _running || (_timer?.isActive ?? false);
+
   void start({required Duration initialDelay}) {
     if (_disposed) return;
     _stopped = false;

@@ -452,7 +452,16 @@ class WorkCommandPolicy {
       return 'workingDirectory 必须是绝对路径。';
     }
     if (!_isInAuthorizedRoot(cwd)) return 'workingDirectory 不在任何授权目录内。';
-    for (final argument in command.arguments) {
+    // `sed` 的脚本参数是模式文本，不是路径：`sed -n '/contact-box/p' file`
+    // 里的 `/contact-box/p` 会被下面当成越界绝对路径整条拒绝，模型只能改用
+    // 区间打印或反复试参数。脚本内容由 `_isReadOnlySed` 单独判定写形态。
+    final sedScriptIndexes =
+        _basename(command.executable).toLowerCase() == 'sed'
+            ? _sedScriptIndexes(command.arguments).toSet()
+            : const <int>{};
+    for (var index = 0; index < command.arguments.length; index++) {
+      if (sedScriptIndexes.contains(index)) continue;
+      final argument = command.arguments[index];
       final candidate = _argumentPathCandidate(argument);
       if (candidate == null) continue;
       if (_containsParentSegment(candidate)) {
@@ -503,14 +512,21 @@ class WorkCommandPolicy {
     // ponytail: a small conservative heuristic table keeps V1 dependency-free;
     // add a tested per-tool grammar when broader command coverage is needed.
     final executable = _basename(command.executable).toLowerCase();
-    final lower = [executable, ...command.arguments]
-        .map((item) => item.toLowerCase())
-        .join(' ');
-    if (lower.contains('|')) return WorkCommandImpact.impactUncertain;
+    // argv 元素内部的 `|` 与 `<`/`>` 是正则或待匹配文本，例如
+    // `grep -nE "<section|</section>" life.html`。把它们当成 shell 管道/重定向
+    // 会把每一次只读检索都判成"影响范围不确定"，于是模型每读一次文件就要用户
+    // 点一次审批（2026-10-23 现场：991 次 grep 全部因正则里的 `|` 被拦）。
+    // 真正的管道/重定向只能作为独立词元传入，或由 shell 解释——后者已由
+    // 紧随其后的 `_isShellInvocation` 拦下。
+    if (command.arguments.any(_isShellPipeToken)) {
+      return WorkCommandImpact.impactUncertain;
+    }
     if (_isShellInvocation(executable, command.arguments)) {
       return WorkCommandImpact.impactUncertain;
     }
-    if (RegExp(r'[<>]').hasMatch(lower)) return WorkCommandImpact.localMutation;
+    if (command.arguments.any(_isShellRedirectToken)) {
+      return WorkCommandImpact.localMutation;
+    }
     if (_hasLocalOutputFlag(command) || _isFindMutation(command)) {
       return WorkCommandImpact.localMutation;
     }
@@ -518,7 +534,15 @@ class WorkCommandPolicy {
       return WorkCommandImpact.localMutation;
     }
     if (_isInstall(command)) return WorkCommandImpact.localMutation;
-    if (_isInPlaceEdit(command)) return WorkCommandImpact.localMutation;
+    if (_isInPlaceEdit(command)) {
+      // `sed -i '/x/w /etc/passwd' file` 只改 argv 里的文件，但脚本里的
+      // `w`/`e` 命令会写到别处。这种影响范围无法从参数枚举，必须留在
+      // "不确定"一档——否则原地编辑会继承已批准范围，把越界写一起放行。
+      if (executable == 'sed' && _sedScriptWritesToFile(command.arguments)) {
+        return WorkCommandImpact.impactUncertain;
+      }
+      return WorkCommandImpact.localMutation;
+    }
     if (_isDelete(command)) return WorkCommandImpact.localMutation;
     if (_isExternalMutation(command)) {
       return WorkCommandImpact.externalMutation;
@@ -543,6 +567,10 @@ class WorkCommandPolicy {
   bool _isReadOnly(WorkCommand command) {
     final executable = _basename(command.executable).toLowerCase();
     final args = command.arguments.map((item) => item.toLowerCase()).toList();
+    // `sed -n '380,760p' file` 只打印文件内容，但它既不在下面的白名单里，也
+    // 不是 `_isInPlaceEdit` 认得的那几种写法，于是掉进兜底的 impactUncertain，
+    // 每读一段就要一次审批（2026-10-23 现场：994 次 sed 全部被拦）。
+    if (executable == 'sed') return _isReadOnlySed(command.arguments);
     if (executable == 'pwd' ||
         executable == 'ls' ||
         executable == 'dir' ||
@@ -599,6 +627,137 @@ class WorkCommandPolicy {
     }
     return false;
   }
+
+  /// A pipeline or command separator can only reach the runner as its own
+  /// argv token. Text inside a pattern (`a|b`) is not a shell operator.
+  static bool _isShellPipeToken(String argument) {
+    final token = argument.trim();
+    return token == '|' ||
+        token == '|&' ||
+        token == '||' ||
+        token == '&&' ||
+        token == ';' ||
+        token == '&';
+  }
+
+  /// Redirections write a local file, so they stay on the mutation path even
+  /// though they can also arrive as a bare argv token.
+  static bool _isShellRedirectToken(String argument) {
+    final token = argument.trim();
+    return token == '>' ||
+        token == '>>' ||
+        token == '<' ||
+        token == '<<' ||
+        token == '<<<' ||
+        token == '2>' ||
+        token == '2>>' ||
+        token == '&>';
+  }
+
+  /// `sed` is read-only unless it edits in place, loads a script file whose
+  /// contents cannot be inspected, or uses one of the write commands
+  /// (`w` / `W` / `e`).
+  ///
+  /// The previous whitelist had no `sed` entry at all, so the most common way
+  /// a model pages through a large file (`sed -n '1,400p' file`) was classified
+  /// as an uncertain-impact mutation and required a fresh approval each time.
+  bool _isReadOnlySed(List<String> arguments) {
+    for (final argument in arguments) {
+      final lower = argument.toLowerCase();
+      // In-place editing always mutates, including the `-i.bak` spelling.
+      if (lower == '-i' ||
+          (lower.startsWith('-i') && !lower.startsWith('--')) ||
+          lower == '--in-place' ||
+          lower.startsWith('--in-place=')) {
+        return false;
+      }
+      // A script file is opaque: its `w`/`e` commands cannot be ruled out.
+      if (lower == '-f' ||
+          (lower.startsWith('-f') &&
+              lower.length > 2 &&
+              !lower.startsWith('--')) ||
+          lower == '--file' ||
+          lower.startsWith('--file=')) {
+        return false;
+      }
+    }
+    final scriptIndexes = _sedScriptIndexes(arguments);
+    if (scriptIndexes.isEmpty) return false;
+    return !scriptIndexes.any(
+      (index) => _sedWritesToFile(_sedScriptText(arguments[index])),
+    );
+  }
+
+  /// Whether any `sed` script argument uses `w` / `W` / `e`, which write to a
+  /// path that the command arguments do not declare.
+  bool _sedScriptWritesToFile(List<String> arguments) {
+    return _sedScriptIndexes(arguments).any(
+      (index) => _sedWritesToFile(_sedScriptText(arguments[index])),
+    );
+  }
+
+  /// Indexes of the arguments that carry `sed` script text rather than a path.
+  ///
+  /// Both the read-only classification and the path check need this split:
+  /// `sed -n '/contact-box/p' file` passes a *pattern* that starts with `/`,
+  /// and validating it as a filesystem path rejected the command as an
+  /// out-of-scope path.
+  List<int> _sedScriptIndexes(List<String> arguments) {
+    final indexes = <int>[];
+    var sawExplicitScript = false;
+    for (var index = 0; index < arguments.length; index++) {
+      final argument = arguments[index];
+      if (argument.startsWith('-')) {
+        final lower = argument.toLowerCase();
+        if (lower == '-e' || lower == '--expression') {
+          if (index + 1 < arguments.length) {
+            indexes.add(index + 1);
+            sawExplicitScript = true;
+            index++;
+          }
+          continue;
+        }
+        if (lower.startsWith('--expression=')) {
+          indexes.add(index);
+          sawExplicitScript = true;
+        }
+        continue;
+      }
+      if (!sawExplicitScript && indexes.isEmpty) {
+        // The first non-option argument is the implicit script; every later
+        // non-option argument is an input file.
+        indexes.add(index);
+        break;
+      }
+    }
+    return indexes;
+  }
+
+  String _sedScriptText(String argument) {
+    const prefix = '--expression=';
+    return argument.toLowerCase().startsWith(prefix)
+        ? argument.substring(prefix.length)
+        : argument;
+  }
+
+  /// `w`/`W`/`e` are sed commands, and `s///w file` writes through the
+  /// substitute flag. A bare letter inside a pattern or replacement
+  /// (`s/world/planet/g`) must not count.
+  ///
+  /// Addresses may be line numbers, `$`, or `/regex/`; the latter is why a
+  /// plain character class is not enough (`/contact/w out.txt` writes a file).
+  bool _sedWritesToFile(String script) {
+    final normalized = script.replaceAll('\r', '\n');
+    return _sedWriteCommand.hasMatch(normalized) ||
+        _sedSubstituteWriteFlag.hasMatch(normalized);
+  }
+
+  static final RegExp _sedWriteCommand = RegExp(
+    r'(?:^|[;{}\n])\s*(?:(?:\d+|\$|/[^/\n]*/)\s*,?\s*)?'
+    r'(?:(?:\d+|\$|/[^/\n]*/)\s*)?!?\s*[wWe](?:\s|$)',
+  );
+
+  static final RegExp _sedSubstituteWriteFlag = RegExp(r'/[wW]\s+\S');
 
   bool _isAnalysisMutation(WorkCommand command) {
     final executable = _basename(command.executable).toLowerCase();
@@ -1293,6 +1452,30 @@ class WorkCommandPolicy {
                 .contains(command.arguments.first.toLowerCase()));
   }
 
+  /// Only a two-operand system copy has an independently known read source.
+  /// Other copy forms keep the conservative command scope.
+  ({String source, String destination})? simpleFileCopyPaths(
+    WorkCommand command,
+  ) {
+    final arguments = command.arguments;
+    if (isWindows ||
+        command.executable != 'cp' ||
+        arguments.length != 2 ||
+        arguments.any((value) =>
+            value.isEmpty ||
+            value != value.trim() ||
+            value.startsWith('-') ||
+            value.contains(r'\') ||
+            value.contains('://'))) {
+      return null;
+    }
+    final cwd = normalizeWorkAbsolutePath(command.workingDirectory);
+    return (
+      source: _normalizeCommandPath(arguments.first, cwd),
+      destination: _normalizeCommandPath(arguments.last, cwd),
+    );
+  }
+
   WorkChangePlan _changePlan(
     String taskId,
     WorkCommand command,
@@ -1303,20 +1486,36 @@ class WorkCommandPolicy {
     final paths = command.declaredImpact
         .map((path) => _normalizeCommandPath(path, cwd))
         .toList(growable: false);
-    final directories = paths.isEmpty ? [cwd] : paths;
+    final copy = simpleFileCopyPaths(command);
+    // Only the destination of a system file copy needs a write grant and lock.
+    final directories = copy == null
+        ? <String>{cwd, ...paths}
+        : <String>{copy.destination};
+    if (copy == null) {
+      final sedScripts = _basename(command.executable).toLowerCase() == 'sed'
+          ? _sedScriptIndexes(command.arguments).toSet()
+          : const <int>{};
+      for (var i = 0; i < command.arguments.length; i++) {
+        if (sedScripts.contains(i)) continue;
+        final candidate = _argumentPathCandidate(command.arguments[i]);
+        if (candidate != null && _looksLikeLocalPath(candidate)) {
+          directories.add(normalizeWorkAbsolutePath(candidate));
+        }
+      }
+    }
     final structured = WorkChangeCommand(
       executable: command.executable,
       arguments: command.arguments,
       workingDirectory: cwd,
       knownFiles: const [],
-      possibleDirectories: directories,
+      possibleDirectories: directories.toList(growable: false),
       impactUncertain: impact == WorkCommandImpact.impactUncertain,
     );
     return WorkChangePlan(
       taskId: taskId,
       actionType: WorkChangeActionType.command,
       exactPaths: const [],
-      knownAffectedDirectories: directories,
+      knownAffectedDirectories: directories.toList(growable: false),
       estimatedBytes: 0,
       snapshotAvailable: false,
       reversible: false,

@@ -84,7 +84,7 @@ export function parseGitHubSkillImportRequest(
 
 export async function importGitHubSkill(
   value: unknown,
-  config: GatewayConfig,
+  config: Pick<GatewayConfig, 'requestTimeoutMs'>,
   transport: GitHubSkillTransport = requestGitHubJson,
   addressResolver: GitHubAddressResolver = resolvePublicAddresses,
   signal?: AbortSignal,
@@ -267,7 +267,7 @@ function parent(path: string): string {
 
 async function githubGetJson(
   path: string,
-  config: GatewayConfig,
+  config: Pick<GatewayConfig, 'requestTimeoutMs'>,
   transport: GitHubSkillTransport,
   addressResolver: GitHubAddressResolver,
   signal?: AbortSignal,

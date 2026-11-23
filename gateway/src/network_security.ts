@@ -28,8 +28,12 @@ export function pinnedLookup(addresses: readonly string[]) {
   return (
     _hostname: string,
     _options: unknown,
-    callback: (error: Error | null, address?: string, family?: number) => void,
+    callback: (error: Error | null, address?: string | { address: string; family: number }[], family?: number) => void,
   ): void => {
+    if (typeof _options === 'object' && _options !== null && 'all' in _options && _options.all) {
+      callback(null, addresses.map((address) => ({ address, family: isIP(address) })));
+      return;
+    }
     const address = addresses[index++ % addresses.length];
     callback(null, address, isIP(address));
   };

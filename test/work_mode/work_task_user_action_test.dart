@@ -61,6 +61,26 @@ WorkDiscussionState _discussion({
 }
 
 void main() {
+  test('来源 URL 不作为确认卡的本地交付文件，原始范围保留', () {
+    for (final url in [
+      'https://example.com/source.md',
+      'HTTP://example.com/source.DOCX',
+      '[source](https://example.com/source.md)',
+    ]) {
+      final request = 'Read $url and deliver README.md only.';
+      final task = _task(userRequest: request);
+      task.executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
+        '', WorkDiscussionState.forNewTask(task));
+      final card = WorkTaskRequirementsConfirmation.cardFor(task,
+          executorName: '联网作者');
+      final delivery = card.split('\n').singleWhere(
+          (line) => line.startsWith('保存位置与交付：'));
+      expect(delivery, contains('交付文件：README.md'));
+      expect(delivery.toLowerCase(), isNot(contains('http')));
+      expect(WorkDiscussionState.currentRequestScope(task), request);
+    }
+  });
+
   test('确认飞行棋需求时保留明确玩法并只建议未指定的默认玩法', () {
     const request = '制作两人飞行棋，掷出 5 或 6 都可以起飞，交付 game.html';
     final task = _task(userRequest: request);
@@ -565,5 +585,93 @@ void main() {
       WorkTaskUserAction.versionFor(task, 'executorPinConflict'),
       actions.single.version,
     );
+  });
+
+  group('待审批命令的提醒不随步骤重复', () {
+    AgentTask waitingTask({required int step, required String pending}) {
+      return _task(status: AgentTaskStatus.waitingForApproval)
+        ..currentStep = step
+        ..pendingToolRequestJson = pending;
+    }
+
+    test('同一待审批请求在第 12 步和第 40 步是同一个提醒', () {
+      const pending =
+          '{"executable":"sed","arguments":["-n","1,200p","life.html"]}';
+      final earlier = WorkTaskUserAction.forTask(
+        waitingTask(step: 12, pending: pending),
+      ).single;
+      final later = WorkTaskUserAction.forTask(
+        waitingTask(step: 40, pending: pending),
+      ).single;
+
+      expect(earlier.blockerId, 'commandApproval');
+      expect(later.version, earlier.version);
+      expect(later.messageId, earlier.messageId);
+    });
+
+    test('换成另一条待审批命令仍要新的提醒', () {
+      final first = WorkTaskUserAction.forTask(
+        waitingTask(
+          step: 12,
+          pending: '{"executable":"sed","arguments":["-n","1,200p"]}',
+        ),
+      ).single;
+      final second = WorkTaskUserAction.forTask(
+        waitingTask(
+          step: 12,
+          pending: '{"executable":"python3","arguments":["fix.py"]}',
+        ),
+      ).single;
+
+      expect(second.messageId, isNot(first.messageId));
+    });
+
+    test('待回答的澄清同样不随步骤换提醒', () {
+      // 澄清和追问是同一类「等你回答」的阻塞，也不该每推进一步就落一张新卡。
+      // 这里曾漏传 stepScoped:false，现场一次阻塞被写成多个版本。
+      AgentTask clarifying(int step) => _task(
+            id: 'clarification-step-task',
+            executionStateJson: jsonEncode({
+              'clarificationRequired': true,
+              'clarificationQuestion': '请明确要修改的文件路径（a.md、b.md）？',
+            }),
+          )..currentStep = step;
+
+      final earlier = WorkTaskUserAction.forTask(clarifying(3)).single;
+      final later = WorkTaskUserAction.forTask(clarifying(31)).single;
+
+      expect(earlier.blockerId, 'clarificationRequired');
+      expect(later.messageId, earlier.messageId);
+    });
+
+    test('待处理操作（userActionRequired）不随步骤换提醒', () {
+      AgentTask resumable(int step) => _task(
+            id: 'user-action-step-task',
+            status: AgentTaskStatus.paused,
+            executionStateJson: jsonEncode({
+              'workFailure': <String, dynamic>{
+                'type': 'userActionRequired',
+                'title': '需要你处理',
+                'reason': '上一次执行被动中断，可以继续。',
+                'technicalDetail': '',
+                'completedContent': <String>[],
+                'retryable': false,
+                'suggestedAction': '点击“继续”从最近安全检查点继续。',
+              },
+            }),
+          )
+        ..currentStep = step
+        ..resumeRequired = true
+        ..lastError = '上一次执行被动中断，可以继续。';
+
+      final earlier = WorkTaskUserAction.forTask(resumable(5));
+      final later = WorkTaskUserAction.forTask(resumable(45));
+
+      expect(earlier, isNotEmpty);
+      expect(
+        later.map((item) => item.messageId).toList(),
+        earlier.map((item) => item.messageId).toList(),
+      );
+    });
   });
 }

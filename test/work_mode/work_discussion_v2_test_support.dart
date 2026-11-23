@@ -1,5 +1,18 @@
 part of 'work_discussion_v2_test.dart';
 
+class _NetworkEvidenceWorker extends WebWorkerClient {
+  _NetworkEvidenceWorker() : super(executable: '/unused', entryPoint: '/unused');
+  int requests = 0;
+  @override
+  Stream<Map<String, dynamic>> request(Map<String, dynamic> arguments) async* {
+    requests++;
+    final bytes = utf8.encode('UNTRUSTED_NETWORK_NOTE: public reference body.');
+    yield {'status': 'headers', 'url': arguments['url'], 'contentType': 'text/plain'};
+    yield {'status': 'chunk', 'data': base64Encode(bytes)};
+    yield {'status': 'done', 'byteLength': bytes.length};
+  }
+}
+
 class _Credentials implements ApiCredentialResolver {
   @override
   Future<String?> resolve(ApiConfig config) async => 'test-key';
@@ -24,6 +37,7 @@ class _MaterialFinishClient extends ChatApiService {
 
   @override
   Future<Map<String, dynamic>> sendStructuredChatMessageStreamed({
+    String? userAgent,
     required String apiKey,
     required ApiProvider provider,
     ApiProtocol apiProtocol = ApiProtocol.defaultValue,
@@ -120,6 +134,7 @@ class _ModelClient extends ChatApiService {
       this.reportActivity = false});
   @override
   Stream<ChatStreamEvent> streamChatMessage({
+    String? userAgent,
     required String apiKey,
     required ApiProvider provider,
     ApiProtocol apiProtocol = ApiProtocol.defaultValue,
@@ -174,6 +189,7 @@ class _ModelClient extends ChatApiService {
       ApiProtocol apiProtocol = ApiProtocol.defaultValue,
       String? promptCacheKey,
       String? customBaseUrl,
+      String? userAgent,
       required String model,
       required List<Map<String, dynamic>> messages,
       double temperature = 0.85,
@@ -433,13 +449,14 @@ WorkDiscussionRunner modelRunner(
         Future<Map<String, dynamic>> Function(AICharacter, Map<String, dynamic>)
             respond,
         {void Function(AICharacter, List<Map<String, dynamic>>)? onMessages,
+        WorkDiscussionInvestigation? investigate,
         WorkModeWorkspaceService? workspaceService}) =>
     WorkDiscussionRunner(
         database: db,
         credentials: _Credentials(),
         eventStore: events,
         workspaceService: workspaceService,
-        investigate: execution.investigate,
+        investigate: investigate ?? execution.investigate,
         completion: (
             {required character,
             required config,

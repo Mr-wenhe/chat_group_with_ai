@@ -179,6 +179,8 @@ class MemoryOriginTypeAdapter extends TypeAdapter<MemoryOriginType> {
         return MemoryOriginType.manual;
       case 3:
         return MemoryOriginType.legacyMigration;
+      case 4:
+        return MemoryOriginType.game;
       default:
         return MemoryOriginType.group;
     }
@@ -198,6 +200,9 @@ class MemoryOriginTypeAdapter extends TypeAdapter<MemoryOriginType> {
         break;
       case MemoryOriginType.legacyMigration:
         writer.writeByte(3);
+        break;
+      case MemoryOriginType.game:
+        writer.writeByte(4);
         break;
     }
   }

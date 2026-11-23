@@ -155,6 +155,7 @@ extension _WorkspaceMutationIo on WorkspaceMutationService {
         reason: '文件已安全重命名。',
         path: source.path,
         destinationPath: destination.path,
+        contentChanged: true,
       );
     } on FileSystemException {
       return const WorkspaceMutationResult(

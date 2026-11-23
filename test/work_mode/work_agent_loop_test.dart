@@ -740,52 +740,348 @@ void main() {
     expect(mutations, 1);
   });
 
-  test('v2 identical read content stalls despite changing range arguments',
-      () async {
-    final model = _FakeModel();
-    for (var index = 0; index < 12; index++) {
-      model.responses.add(_toolDecision(arguments: {
-        'path': 'part.txt',
-        'byteLength': 1000 + index,
-      }));
+  group('v2 network progress', () {
+    AgentTask networkTask() {
+      final task = candidateTestTask(candidateTestState());
+      final state = jsonDecode(task.executionStateJson) as Map<String, dynamic>;
+      state['workItemExecution'] = {
+        'requestRevision': 1,
+        'teamRevision': 1,
+        'verificationRevision': 1,
+        'actorId': 'a',
+        'stage': 'produce',
+      };
+      task.executionStateJson = jsonEncode(state);
+      return task;
     }
-    final task = candidateTestTask(candidateTestState());
-    final root = jsonDecode(task.executionStateJson) as Map<String, dynamic>;
-    root['workItemExecution'] = {
-      'requestRevision': 1,
-      'teamRevision': 1,
-      'verificationRevision': 1,
-      'actorId': 'a',
-      'stage': 'produce'
+
+    final payloads = <AgentToolName, Map<String, dynamic>>{
+      AgentToolName.webSearch: {
+        'sources': [
+          {'url': 'https://example.com/a', 'title': 'A', 'snippet': 'Source A'},
+          {'url': 'https://example.com/b', 'title': 'B', 'snippet': 'Source B'},
+        ]
+      },
+      AgentToolName.webRead: {
+        'source_id': 's1',
+        'text': 'Actual source body',
+        'sha256': 'a' * 64,
+        'byteLength': 42,
+      },
+      AgentToolName.webDownload: {
+        'source_id': 's1',
+        'url': 'https://example.com/a',
+        'sha256': 'a' * 64,
+        'byteLength': 42,
+      },
     };
-    task.executionStateJson = jsonEncode(root);
-    final registry = WorkToolRegistry(definitions: [
-      WorkToolDefinition(
-        name: AgentToolName.workspaceRead,
-        access: WorkToolAccess.readOnly,
-        schema: const WorkToolSchema(fields: {
-          'path': WorkToolValueType.string,
-          'byteLength': WorkToolValueType.integer,
-        }, required: {
-          'path'
-        }),
-        handler: (invocation) async => WorkToolResult.success(data: {
-          'ok': true,
-          'path': '/work/part.txt',
-          'content': '同一份已读正文',
-          'bytesRead': invocation.arguments['byteLength'],
-          'truncated': false,
-        }),
-      )
-    ]);
-    final result = await _loop(model: model, registry: registry).execute(task);
-    expect(result.status, WorkAgentLoopStatus.paused);
-    expect(task.lastError, contains('任务停滞'));
-    // noProgressResultLimit = 3：第 1 次读取产生新指纹（记为进展），随后连续 3 次
-    // 相同正文（参数变化不算新证据）判停滞，因此共发出 4 次模型请求。
-    expect(model.requests.length, 4);
+
+    WorkToolDefinition definition(
+            AgentToolName name, WorkToolHandler handler) =>
+        WorkToolDefinition(
+            name: name,
+            access: name == AgentToolName.webDownload
+                ? WorkToolAccess.mutation
+                : WorkToolAccess.readOnly,
+            schema: const WorkToolSchema(allowAdditional: true),
+            mutationPipeline: name == AgentToolName.webDownload
+                ? _recordingPipeline([])
+                : null,
+            handler: handler);
+
+    for (final mode in ['verify', 'usage', 'produce', 'mismatched-actor']) {
+      test(
+          'independent consumer owns read evidence without resetting repeats: $mode',
+          () async {
+        final names = [
+          AgentToolName.webSearch,
+          AgentToolName.webRead,
+          AgentToolName.workspaceDocument
+        ];
+        _FakeModel reader() {
+          final model = _FakeModel();
+          for (final name in names) {
+            model.responses.add(_toolDecision(name: name, arguments: {
+              if (name == AgentToolName.webSearch) 'query': 'official',
+              if (name == AgentToolName.webRead) 'sourceId': 's1',
+              if (name == AgentToolName.workspaceDocument) 'path': 'README.md'
+            }));
+          }
+          model.responses.add(_finishDecision());
+          return model;
+        }
+
+        final registry = WorkToolRegistry(definitions: [
+          for (final name in names)
+            definition(
+                name,
+                (_) => WorkToolResult.success(
+                    data: name == AgentToolName.workspaceDocument
+                        ? {
+                            'path': '/work/README.md',
+                            'content': 'Complete original body',
+                            'documentDigest': 'a' * 64,
+                            'chunkIndexes': [0],
+                            'totalChunkCount': 1,
+                            'truncated': false,
+                          }
+                        : payloads[name]!)),
+        ]);
+        final task = networkTask();
+        final producer = reader();
+        expect(
+            (await _loop(model: producer, registry: registry).execute(task))
+                .status,
+            WorkAgentLoopStatus.workItemCompleted);
+        final root =
+            jsonDecode(task.executionStateJson) as Map<String, dynamic>;
+        expect((root['v2ProgressGuard'] as Map)['progressFingerprints'],
+            hasLength(3));
+        root['workItemExecution'] = {
+          ...root['workItemExecution'] as Map,
+          'stage': mode == 'mismatched-actor' ? 'verify' : mode,
+          'actorId': mode == 'mismatched-actor' ? 'a' : 'b',
+          'workItemId': 'r001',
+          'iterationId': 'r001',
+        };
+        task
+          ..characterId = 'b'
+          ..executionStateJson = jsonEncode(root)
+          ..contextSummary = ''
+          ..status = AgentTaskStatus.queued;
+        final reviewer = reader();
+        final result =
+            await _loop(model: reviewer, registry: registry).execute(task);
+        expect(
+            result.status,
+            {'verify', 'usage'}.contains(mode)
+                ? WorkAgentLoopStatus.workItemCompleted
+                : WorkAgentLoopStatus.paused,
+            reason: result.message);
+        if (!{'verify', 'usage'}.contains(mode)) return;
+        expect(reviewer.requests.length, 4);
+        final repeated = _FakeModel();
+        for (var index = 0; index < 12; index++) {
+          repeated.responses.add(_toolDecision(
+              name: AgentToolName.webRead,
+              arguments: {'sourceId': 's1', 'startSection': index}));
+        }
+        task
+          ..status = AgentTaskStatus.queued
+          ..contextSummary = '';
+        final stopped =
+            await _loop(model: repeated, registry: registry).execute(task);
+        expect(stopped.status, WorkAgentLoopStatus.paused,
+            reason: stopped.message);
+        expect(repeated.requests.length, 3);
+      });
+    }
+
+    test('search, text, document sections and download keep the task moving',
+        () async {
+      final model = _FakeModel();
+      for (final name in [
+        AgentToolName.webSearch,
+        AgentToolName.webRead,
+        AgentToolName.webRead,
+        AgentToolName.webDownload
+      ]) {
+        model.responses.add(_toolDecision(name: name, arguments: {
+          if (name == AgentToolName.webSearch)
+            'query': 'official source'
+          else
+            'sourceId': 's1',
+          if (name == AgentToolName.webRead)
+            'startSection': model.responses.length,
+        }));
+      }
+      model.responses.add(_finishDecision());
+      var reads = 0;
+      final registry = WorkToolRegistry(definitions: [
+        for (final name in payloads.keys)
+          definition(
+              name,
+              (_) => WorkToolResult.success(
+                    committed: name == AgentToolName.webDownload,
+                    data: name == AgentToolName.webRead && ++reads == 2
+                        ? {
+                            'source_id': 's1',
+                            'sections': [
+                              {'text': 'Document body', 'page': 1}
+                            ]
+                          }
+                        : payloads[name]!,
+                  )),
+      ]);
+      final result =
+          await _loop(model: model, registry: registry).execute(networkTask());
+      expect(result.status, WorkAgentLoopStatus.workItemCompleted,
+          reason: result.message);
+      expect(model.requests.length, 5);
+    });
+
+    test(
+        'changed original bytes are evidence even when parsed text is identical',
+        () async {
+      final model = _FakeModel();
+      for (var index = 0; index < 4; index++) {
+        model.responses.add(_toolDecision(
+            name: AgentToolName.webRead, arguments: {'sourceId': 's1'}));
+      }
+      model.responses.add(_finishDecision());
+      var reads = 0;
+      final registry = WorkToolRegistry(definitions: [
+        definition(
+            AgentToolName.webRead,
+            (_) => WorkToolResult.success(data: {
+                  ...payloads[AgentToolName.webRead]!,
+                  'sha256': String.fromCharCode(97 + reads++) * 64,
+                })),
+      ]);
+      final result =
+          await _loop(model: model, registry: registry).execute(networkTask());
+      expect(result.status, WorkAgentLoopStatus.workItemCompleted,
+          reason: result.message);
+      expect(model.requests.length, 5);
+    });
+
+    for (final name in payloads.keys) {
+      test(
+          'repeated ${name.wireName} evidence stalls despite changing arguments and metadata',
+          () async {
+        final model = _FakeModel();
+        for (var index = 0; index < 12; index++) {
+          model.responses.add(_toolDecision(name: name, arguments: {
+            if (name == AgentToolName.webSearch)
+              'query': 'query $index'
+            else
+              'sourceId': 's1',
+            if (name == AgentToolName.webRead) 'startSection': index,
+            if (name == AgentToolName.webDownload)
+              'fileName': 'copy-$index.txt',
+          }));
+        }
+        var calls = 0;
+        final registry = WorkToolRegistry(definitions: [
+          definition(name, (_) {
+            calls++;
+            return WorkToolResult.success(
+                committed: name == AgentToolName.webDownload,
+                data: {
+                  ...payloads[name]!,
+                  'path': '/work/downloads/random-$calls/file.txt',
+                  'startSection': calls,
+                  if (name == AgentToolName.webSearch)
+                    'sources': [
+                      for (final source in (calls.isEven
+                          ? (payloads[name]!['sources'] as List).reversed
+                          : payloads[name]!['sources'] as List))
+                        {
+                          ...source as Map,
+                          'provider': 'provider-$calls',
+                          'source_id': 'id-$calls'
+                        },
+                    ],
+                });
+          })
+        ]);
+        final task = networkTask();
+        final result =
+            await _loop(model: model, registry: registry).execute(task);
+        expect(result.status, WorkAgentLoopStatus.paused);
+        expect(task.lastError, contains('任务停滞'));
+        expect(model.requests.length, 4);
+      });
+
+      test('empty ${name.wireName} result is not evidence', () async {
+        final model = _FakeModel();
+        for (var index = 0; index < 8; index++) {
+          model.responses.add(_toolDecision(name: name, arguments: {
+            if (name == AgentToolName.webSearch)
+              'query': 'empty $index'
+            else
+              'sourceId': 's1',
+            if (name == AgentToolName.webRead) 'startSection': index,
+            if (name == AgentToolName.webDownload)
+              'fileName': 'empty-$index.txt',
+          }));
+        }
+        final registry = WorkToolRegistry(definitions: [
+          definition(name, (_) => const WorkToolResult.success()),
+        ]);
+        final task = networkTask();
+        final result =
+            await _loop(model: model, registry: registry).execute(task);
+        expect(result.status, WorkAgentLoopStatus.paused);
+        expect(task.lastError, contains('任务停滞'));
+        expect(model.requests.length, 3);
+      });
+    }
   });
 
+  for (final name in [
+    AgentToolName.workspaceRead,
+    AgentToolName.workspaceDocument
+  ]) {
+    test(
+        'v2 identical read content stalls despite changing range arguments: ${name.wireName}',
+        () async {
+      final model = _FakeModel();
+      for (var index = 0; index < 12; index++) {
+        model.responses.add(_toolDecision(name: name, arguments: {
+          'path': 'part.txt',
+          if (name == AgentToolName.workspaceRead) 'byteLength': 1000 + index,
+          if (name == AgentToolName.workspaceDocument) 'query': 'query $index',
+        }));
+      }
+      final task = candidateTestTask(candidateTestState());
+      final root = jsonDecode(task.executionStateJson) as Map<String, dynamic>;
+      root['workItemExecution'] = {
+        'requestRevision': 1,
+        'teamRevision': 1,
+        'verificationRevision': 1,
+        'actorId': 'a',
+        'stage': 'produce'
+      };
+      task.executionStateJson = jsonEncode(root);
+      final registry = WorkToolRegistry(definitions: [
+        WorkToolDefinition(
+          name: name,
+          access: WorkToolAccess.readOnly,
+          schema: WorkToolSchema(fields: {
+            'path': WorkToolValueType.string,
+            if (name == AgentToolName.workspaceRead)
+              'byteLength': WorkToolValueType.integer,
+            if (name == AgentToolName.workspaceDocument)
+              'query': WorkToolValueType.string,
+          }, required: {
+            'path'
+          }),
+          handler: (invocation) async => WorkToolResult.success(data: {
+            'ok': true,
+            'path': '/work/part.txt',
+            'content': name == AgentToolName.workspaceDocument
+                ? '同一份已读正文，查询回显：${invocation.arguments['query']}'
+                : '同一份已读正文',
+            'bytesRead': invocation.arguments['byteLength'],
+            'truncated': false,
+            if (name == AgentToolName.workspaceDocument) ...{
+              'documentDigest': 'a' * 64,
+              'chunkIndexes': [0],
+              'totalChunkCount': 1,
+            },
+          }),
+        )
+      ]);
+      final result =
+          await _loop(model: model, registry: registry).execute(task);
+      expect(result.status, WorkAgentLoopStatus.paused);
+      expect(task.lastError, contains('任务停滞'));
+      // noProgressResultLimit = 3：第 1 次读取产生新指纹（记为进展），随后连续 3 次
+      // 相同正文（参数变化不算新证据）判停滞，因此共发出 4 次模型请求。
+      expect(model.requests.length, 4);
+    });
+  }
   test('discussion gate blocks model decisions and tools before readiness',
       () async {
     final model = _FakeModel();
@@ -904,6 +1200,71 @@ void main() {
     expect(model.requests.single.context['committedWrites'], isEmpty);
     expect(model.requests.single.context['publicUpdates'], isEmpty);
   });
+
+  for (final mode in ['same', 'changed', 'invalid']) {
+    final changedDigest = mode == 'changed';
+    final invalidChunk = mode == 'invalid';
+    test('文档分块索引不因最近八次工具窗口丢失且不混合版本：$mode', () async {
+      final model = _FakeModel();
+      for (var i = 0; i < 10; i++) {
+        model.responses.add(_toolDecision(
+          name: AgentToolName.workspaceDocument,
+          arguments: {'path': 'README.md', 'startChunk': i},
+        ));
+      }
+      model.responses.add(_finishDecision());
+      final tool = _FakeTool()
+        ..behavior = (invocation) {
+          final index = invocation.arguments['startChunk'] as int;
+          return WorkToolResult.success(data: {
+            'path': '/frozen/README.md',
+            'content': '正文片段 $index',
+            'documentDigest': (changedDigest && index == 9 ? 'b' : 'a') * 64,
+            'totalChunkCount': 10,
+            'chunkIndexes': [invalidChunk && index == 9 ? 10 : index],
+          });
+        };
+      final result = await _loop(
+        model: model,
+        registry: WorkToolRegistry(definitions: [
+          WorkToolDefinition(
+            name: AgentToolName.workspaceDocument,
+            access: WorkToolAccess.readOnly,
+            schema: const WorkToolSchema(fields: {
+              'path': WorkToolValueType.string,
+              'startChunk': WorkToolValueType.integer,
+            }, required: {
+              'path'
+            }),
+            handler: tool.call,
+          ),
+        ]),
+      ).execute(_task(id: 'document-progress-$mode', actionLimit: 100));
+      expect(result.status, WorkAgentLoopStatus.completed);
+      final context = model.requests.last.context;
+      expect(context['recentToolResults'], hasLength(8));
+      final progress = (context['documentReadProgress'] as List).cast<Map>();
+      final checkpoint = model.requests.last.messages.lastWhere(
+          (message) => (message['content'] as String).startsWith('公开任务检查点：'));
+      final sent = jsonDecode(
+              (checkpoint['content'] as String).substring('公开任务检查点：'.length))
+          as Map;
+      expect(sent['documentReadProgress'], progress);
+      final original =
+          progress.singleWhere((p) => p['documentDigest'] == 'a' * 64);
+      expect(original['returnedChunkCount'],
+          changedDigest || invalidChunk ? 9 : 10);
+      expect(
+          original['nextChunkStart'], changedDigest || invalidChunk ? 9 : null);
+      expect(original['allChunksReturned'], !changedDigest && !invalidChunk);
+      if (changedDigest) {
+        final changed =
+            progress.singleWhere((p) => p['documentDigest'] == 'b' * 64);
+        expect(changed['returnedChunkCount'], 1);
+        expect(changed['nextChunkStart'], 0);
+      }
+    });
+  }
 
   test('超过压缩预算时按结构化收缩提示词，检查点仍是合法 JSON', () async {
     final model = _FakeModel()..responses.add(_finishDecision());

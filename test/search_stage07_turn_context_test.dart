@@ -11,6 +11,19 @@ import 'package:flutter_test/flutter_test.dart';
 import 'helpers/memory_governance_store.dart';
 
 void main() {
+  test('a new search requesting links cannot reuse unrelated previous evidence',
+      () {
+    const detector = SearchIntentDetector();
+    expect(detector.isSourceLinkRequest('搜下 今天的热搜前10 帮我列出来，给出链接'), isTrue);
+    expect(detector.isSourceLinkFollowUp('搜下 今天的热搜前10 帮我列出来，给出链接'), isFalse);
+    expect(detector.isSourceLinkFollowUp('给我来源链接'), isTrue);
+    expect(detector.isSourceLinkFollowUp('刚才搜索结果的来源链接'), isTrue);
+    expect(detector.isSourceLinkFollowUp('查一下另一家公司的官网链接'), isFalse);
+    expect(detector.isSourceLinkFollowUp('给我 OpenAI 的官网链接'), isFalse);
+    expect(detector.isSourceLinkFollowUp('微博热搜前10加链接'), isFalse);
+    expect(detector.isSourceLinkFollowUp('请把刚才搜索的链接发我'), isTrue);
+    expect(detector.isSourceLinkFollowUp('please show me the links'), isTrue);
+  });
   test('reply message preserves its search snapshot for restart recovery', () {
     final dynamic snapshot = WebSearchSnapshot(
       requestId: 'request-1',
@@ -158,6 +171,48 @@ void main() {
     expect(provider.searchCount, 2);
     expect(refreshed?.snapshot, isNot(same(turn.snapshot)));
     expect(provider.requests.last.forceRefresh, isTrue);
+  });
+
+  test('Zhipu-only regeneration forces search and rejects other providers',
+      () async {
+    final zhipu = _CountingProvider(
+      providerKind: SearchProviderKind.nativeModel,
+      sourceProvider: 'zhipu-native',
+    );
+    final zhipuController = SearchTurnContextController(
+      coordinator: SearchCoordinator(
+        store: MemoryGovernanceStore(globalSearchPolicy: WebSearchPolicy.auto),
+        routes: [
+          SearchProviderRoute(
+              provider: zhipu, id: 'zhipu-native', isNative: true)
+        ],
+      ),
+    );
+    final zhipuContext = await zhipuController.prepareZhipuOnlyRegeneration(
+      conversationId: 'dm:news-role',
+      sourceMessageId: 'user-message-1',
+      turnId: 'user-message-1',
+      userMessage: 'hello',
+      requestConsent: (_) async => true,
+    );
+
+    expect(zhipu.searchCount, 1, reason: '短消息也必须按仅智谱角色策略强制检索');
+    expect(zhipuContext?.snapshot?.provider, 'zhipu-native');
+
+    final other = _CountingProvider();
+    final otherController = SearchTurnContextController(
+      coordinator: _coordinator(other),
+    );
+    final otherContext = await otherController.prepareZhipuOnlyRegeneration(
+      conversationId: 'dm:news-role',
+      sourceMessageId: 'user-message-2',
+      turnId: 'user-message-2',
+      userMessage: 'hello',
+      requestConsent: (_) async => true,
+    );
+
+    expect(other.searchCount, 1);
+    expect(otherContext, isNull, reason: '任何非智谱结果都不能交给仅智谱角色使用');
   });
 
   test('source follow-up reuses evidence without a second provider request',
@@ -315,12 +370,19 @@ SearchCoordinator _coordinator(_CountingProvider provider) {
 }
 
 class _CountingProvider implements SearchProvider {
+  _CountingProvider({
+    this.providerKind = SearchProviderKind.brave,
+    this.sourceProvider,
+  });
+
+  final SearchProviderKind providerKind;
+  final String? sourceProvider;
   final List<SearchRequest> requests = [];
 
   int get searchCount => requests.length;
 
   @override
-  SearchProviderKind get kind => SearchProviderKind.brave;
+  SearchProviderKind get kind => providerKind;
 
   @override
   Future<SearchProviderResponse> search(
@@ -337,6 +399,7 @@ class _CountingProvider implements SearchProvider {
           url: Uri.parse('https://example.com/flutter-release'),
         ),
       ],
+      sourceProvider: sourceProvider,
     );
   }
 

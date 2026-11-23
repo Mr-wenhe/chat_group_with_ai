@@ -299,8 +299,101 @@ class WorkTaskActionMessageService {
       WorkTaskUserActionKind.confirmRequirements => '需求版本需要你确认。',
       WorkTaskUserActionKind.openTask => '任务在等待你的处理。',
     };
-    return '$mention $prefix：$taskName $reason '
+    // 提醒正文必须写明「到底要执行什么」。以前所有命令审批共用一句固定话术，
+    // 而每个新请求都会生成新的 messageId，结果聊天里堆了上百条看起来一模一样
+    // 的「查看审批」（2026-10-23 现场：任务 a9a29693 110 条）。摘要解析失败时
+    // 退化成原来的固定文案，不影响提醒可用性。
+    final pendingSummary = action.kind == WorkTaskUserActionKind.approveCommand
+        ? _pendingRequestSummary(task.pendingToolRequestJson)
+        : '';
+    final detail = pendingSummary.isEmpty ? '' : '待确认：$pendingSummary。';
+    return '$mention $prefix：$taskName $reason $detail'
         '请点击“${action.label}”打开对应任务（${task.id.substring(0, _shortIdLength(task.id))}）。';
+  }
+
+  /// 把待审批请求压成一行可读摘要：工具 + 参数 + 目标文件。
+  ///
+  /// `pendingToolRequestJson` 是落盘前的安全检查点格式（可能是 `command.run`
+  /// 的结构化命令，也可能是 `workspace.patch` 之类只需路径的工具），字段可能
+  /// 被裁剪。任何解析异常都返回空串，由调用方退化为固定文案。
+  static String _pendingRequestSummary(String raw) {
+    final trimmed = raw.trim();
+    if (trimmed.isEmpty) return '';
+    Object? decoded;
+    try {
+      decoded = jsonDecode(trimmed);
+    } on Object {
+      return '';
+    }
+    if (decoded is! Map) return '';
+    final tool =
+        decoded['tool'] is String ? (decoded['tool'] as String).trim() : '';
+    final args = decoded['args'] is Map
+        ? Map<String, dynamic>.from(decoded['args'] as Map)
+        : const <String, dynamic>{};
+
+    final parts = <String>[];
+    final executable = args['executable'];
+    final arguments = args['arguments'];
+    if (executable is String && executable.trim().isNotEmpty) {
+      parts.add(executable.trim());
+      if (arguments is List) {
+        // macOS 的 `sed -i ''` 依赖空参数，展示时保留成 `''`，否则用户看到的
+        // 命令和真正要执行的不是同一条。
+        parts.addAll(
+          arguments.whereType<String>().map(
+                (item) => item.isEmpty ? "''" : item.trim(),
+              ),
+        );
+      }
+    } else if (tool.isNotEmpty && tool != 'command.run') {
+      // 非命令类工具（workspace.patch / folder.* 等）只展示工具名与目标。
+      // 裸的 `command.run` 没带参数时不写进正文，避免出现「待确认：command.run」。
+      parts.add(tool);
+      final path = args['path'];
+      if (path is String && path.trim().isNotEmpty) parts.add(path.trim());
+    }
+    final command = parts.join(' ');
+
+    final targets = <String>[];
+    void addTarget(Object? value) {
+      if (value is! String || value.trim().isEmpty) return;
+      final name = _baseName(value.trim());
+      if (!targets.contains(name)) targets.add(name);
+    }
+
+    final declaredImpact = args['declaredImpact'];
+    if (declaredImpact is List) {
+      for (final item in declaredImpact.take(3)) {
+        addTarget(item);
+      }
+    }
+    if (targets.isEmpty) addTarget(args['path']);
+
+    if (command.isEmpty && targets.isEmpty) return '';
+    final summary = StringBuffer(command.isEmpty ? '命令' : command);
+    // 命令本身已经写了目标文件时不再重复一遍（`sed -i ... life.html（目标 life.html）`）。
+    final extraTargets = targets
+        .where((name) => !command.contains(name))
+        .toList(growable: false);
+    if (extraTargets.isNotEmpty) {
+      summary.write('（目标 ${extraTargets.join('、')}）');
+    }
+    return _truncateSummary(summary.toString());
+  }
+
+  static String _baseName(String path) {
+    final normalized = path.replaceAll('\\', '/');
+    final index = normalized.lastIndexOf('/');
+    return index < 0 ? normalized : normalized.substring(index + 1);
+  }
+
+  /// 压平空白并截断，避免一段超长命令把聊天正文撑开。
+  static String _truncateSummary(String value, {int maximum = 160}) {
+    final collapsed = value.replaceAll(RegExp(r'\s+'), ' ').trim();
+    final runes = collapsed.runes.toList(growable: false);
+    if (runes.length <= maximum) return collapsed;
+    return '${String.fromCharCodes(runes.take(maximum))}…';
   }
 
   /// 私聊没有群名，必须说「当前对话」而不是「当前群聊」，否则提醒看起来像是

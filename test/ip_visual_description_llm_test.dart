@@ -33,6 +33,7 @@ class _FakeChatApiService extends ChatApiService {
     required ApiProvider provider,
     ApiProtocol apiProtocol = ApiProtocol.defaultValue,
     String? customBaseUrl,
+    String? userAgent,
     required String model,
     required List<Map<String, dynamic>> messages,
     double temperature = 0.85,

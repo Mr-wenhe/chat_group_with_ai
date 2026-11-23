@@ -12,6 +12,55 @@ void main() {
   );
 
   group('Stage 03 AgentDecision strict protocol', () {
+    test('network tools parse with closed argument schemas', () {
+      for (final entry in {
+        'web.search': {'query': 'Flutter documentation'},
+        'web.read': {'sourceId': 's1', 'startSection': 0},
+        'web.download': {'sourceId': 's1', 'fileName': 'README.md'},
+      }.entries) {
+        String decision(Map<String, Object> arguments) => _json({
+              'action': 'tool',
+              'public_update': '正在处理公开来源。',
+              'tool': {'name': entry.key, 'arguments': arguments},
+              'completion': null,
+            });
+        final valid = parser.parseJson(decision(entry.value));
+        expect(valid.isSuccess, isTrue, reason: valid.detail);
+        expect(valid.decision, isA<AgentToolDecision>());
+        expect(
+            parser
+                .parseJson(
+                    decision({...entry.value, 'url': 'https://example.com/'}))
+                .isFailure,
+            isTrue);
+        expect(
+            parser
+                .parseJson(decision({...entry.value, 'path': '/tmp/elsewhere'}))
+                .isFailure,
+            isTrue);
+      }
+    });
+    test('web.search drops read pagination fields leaked by the model', () {
+      final result = parser.parseJson(_json({
+        'action': 'tool',
+        'public_update': '正在搜索公开资料。',
+        'tool': {
+          'name': 'web.search',
+          'arguments': {
+            'query': 'site:flutter.dev/blog Flutter',
+            'startSection': 0,
+            'nextSection': 1,
+          },
+        },
+        'completion': null,
+      }));
+
+      expect(result.isSuccess, isTrue, reason: result.detail);
+      final decision = result.decision! as AgentToolDecision;
+      expect(decision.tool.arguments, {
+        'query': 'site:flutter.dev/blog Flutter',
+      });
+    });
     final validCases = <({
       String name,
       String raw,
@@ -773,7 +822,8 @@ void main() {
     }
   });
 
-  test('skill.create accepts a single string body and the steps/content aliases',
+  test(
+      'skill.create accepts a single string body and the steps/content aliases',
       () async {
     // 回归（任务 ab8549a1）：模型把技能正文写成 `steps` / `content`，旧校验
     // 报「tool.arguments 不支持字段 steps」，只能换个名字再试，每次创建技能

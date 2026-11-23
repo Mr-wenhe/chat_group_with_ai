@@ -22,6 +22,9 @@ class SearchPlannerConfig {
   final ApiProtocol apiProtocol;
   final String model;
   final String? customBaseUrl;
+
+  /// 该配置的 `User-Agent` 覆盖值；空串/缺省表示用客户端默认身份。
+  final String? userAgent;
   final String conversationId;
   final String characterId;
 
@@ -32,6 +35,7 @@ class SearchPlannerConfig {
     this.apiProtocol = ApiProtocol.defaultValue,
     required this.model,
     this.customBaseUrl,
+    this.userAgent,
     required this.conversationId,
     this.characterId = 'search-planner',
   });
@@ -248,6 +252,7 @@ class SearchQueryPlanner {
             provider: config.provider,
             apiProtocol: config.apiProtocol,
             customBaseUrl: config.customBaseUrl,
+            userAgent: config.userAgent,
             model: config.model,
             messages: [
               {'role': 'system', 'content': systemPrompt},

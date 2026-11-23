@@ -431,6 +431,11 @@ class AiRequestDiagnostic {
   final int? inputTokens;
   final int? cachedInputTokens;
   final int? outputTokens;
+  /// Output cap passed to the transport for this model request.
+  ///
+  /// This is a safe numeric diagnostic; it intentionally does not persist the
+  /// request body or prompt. Null is retained for older/blocked records.
+  final int? requestedMaxTokens;
   final int? estimatedCostMicros;
   final String? currency;
   final bool? exactUsage;
@@ -458,6 +463,7 @@ class AiRequestDiagnostic {
     required this.inputTokens,
     required this.cachedInputTokens,
     required this.outputTokens,
+    this.requestedMaxTokens,
     required this.estimatedCostMicros,
     required this.currency,
     this.exactUsage,
@@ -487,6 +493,7 @@ class AiRequestDiagnostic {
       inputTokens: (map['inputTokens'] as num?)?.toInt(),
       cachedInputTokens: (map['cachedInputTokens'] as num?)?.toInt(),
       outputTokens: (map['outputTokens'] as num?)?.toInt(),
+      requestedMaxTokens: (map['requestedMaxTokens'] as num?)?.toInt(),
       estimatedCostMicros: (map['estimatedCostMicros'] as num?)?.toInt(),
       currency: map['currency']?.toString(),
       exactUsage: map['exactUsage'] is bool ? map['exactUsage'] as bool : null,
@@ -513,6 +520,8 @@ class AiRequestDiagnostic {
         'inputTokens': inputTokens,
         'cachedInputTokens': cachedInputTokens,
         'outputTokens': outputTokens,
+        if (requestedMaxTokens != null)
+          'requestedMaxTokens': requestedMaxTokens,
         'estimatedCostMicros': estimatedCostMicros,
         'currency': currency,
         'exactUsage': exactUsage,
@@ -534,6 +543,7 @@ class AiRequestDiagnostic {
         'latencyMs=$latencyMs',
         'retryCount=$retryCount',
         'tokens=${inputTokens ?? '-'}+${outputTokens ?? '-'}',
+        'requestedMaxTokens=${requestedMaxTokens ?? '-'}',
         'exactUsage=${exactUsage ?? '-'}',
         'cachedTokens=${cachedInputTokens ?? '-'}',
         'reportedUsage=${reportedUsage?.toMap() ?? 'legacy'}',

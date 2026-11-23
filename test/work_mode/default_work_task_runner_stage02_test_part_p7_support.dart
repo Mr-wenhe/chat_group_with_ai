@@ -47,6 +47,7 @@ class _P7Gateway extends AiRequestGateway {
   @override
   Future<Map<String, dynamic>> sendChatMessageStreamed(
       {required String apiKey,
+      String? userAgent,
       required ApiProvider provider,
       ApiProtocol apiProtocol = ApiProtocol.defaultValue,
       String? promptCacheKey,

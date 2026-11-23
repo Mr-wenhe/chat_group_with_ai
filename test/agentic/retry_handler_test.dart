@@ -45,6 +45,25 @@ void main() {
     expect(calls, 3);
   });
 
+  test('上游标记 retryable 的空响应会重试', () {
+    expect(
+      RetryHandler.isTransientResult(const {
+        'success': false,
+        'message': '模型返回了空内容',
+        'failureCode': 'emptyResponse',
+        'retryable': true,
+      }),
+      isTrue,
+    );
+    // 普通空内容（无 retryable 标记、message 不匹配）仍不重试。
+    expect(
+      RetryHandler.isTransientResult(
+        const {'success': false, 'message': '模型返回了空内容'},
+      ),
+      isFalse,
+    );
+  });
+
   test('400 客户端错误不重试而 429 会重试', () {
     expect(
       RetryHandler.isTransientResult(

@@ -30,6 +30,7 @@ void main() {
             packageBytes: 2048,
             attachmentCount: 4,
             credentialsToRebind: 2,
+            retiredSearchConfigs: 3,
             conflicts: 5,
             checksumsValid: true,
           ),
@@ -42,5 +43,6 @@ void main() {
     expect(find.textContaining('5 个冲突'), findsOneWidget);
     expect(find.textContaining('缺失附件：1 个'), findsOneWidget);
     expect(find.textContaining('2 个 API 配置需要重新绑定 Key'), findsOneWidget);
+    expect(find.textContaining('3 个已移除的搜索配置将跳过'), findsOneWidget);
   });
 }

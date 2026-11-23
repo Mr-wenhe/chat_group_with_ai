@@ -1,5 +1,7 @@
 # 生产级 AI 联网搜索：实施复盘与修复记录
 
+> 历史复盘：旧第三方提供商已退役。当前实现见 [桌面自动联网设计](desktop_autonomous_web_design.md)，本文保留原实施记录。
+
 状态：已实现（2026-08-27）
 
 关联设计：[production_web_search_technical_design.md](production_web_search_technical_design.md)

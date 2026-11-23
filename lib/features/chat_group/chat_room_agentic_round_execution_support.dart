@@ -82,8 +82,14 @@ extension _ChatRoomAgenticRoundExecutionSupport on _ChatRoomPageState {
         if (!isAutoChat) _activeUserReplyMessageId = null;
         normalRunGuard?.finish();
         autoRunGuard?.finish();
+        // The guard changes controller state outside widget state. Refresh after
+        // releasing it so the final message cannot leave the busy indicator stale.
+        if (_canTouchUi) _setUiState(() {});
       }
       if (!isAutoChat) _consecutiveRound = 0;
+      // 用户回合结束后确认空闲自动聊天仍在调度：停止按钮或生命周期暂停都可能
+      // 把它停掉，而此后没有别的事件会重启它。
+      if (!isAutoChat) _ensureAutoChatScheduled();
       // A silent/short-circuited round can return from the try block before
       // reaching the normal tail. Drain here as well so queued user input is
       // never stranded while the page remains active.
@@ -383,7 +389,7 @@ extension _ChatRoomAgenticRoundExecutionSupport on _ChatRoomPageState {
     required List<String>? mentionedIds,
     required List<String> repliedIds,
   }) async {
-    if (!_roomWorkAllowed) return;
+    if (!_roomSessionVisible) return;
     if (_isDirectChat ||
         mentionedIds == null ||
         mentionedIds.isEmpty ||

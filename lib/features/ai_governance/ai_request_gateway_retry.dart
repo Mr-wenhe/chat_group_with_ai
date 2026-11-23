@@ -16,120 +16,128 @@ extension _AiRequestGatewayRetrySupport on AiRequestGateway {
     required bool requiresTools,
     required bool userInitiated,
     required RetryOperation<Map<String, dynamic>> operation,
-  }) async {
-    final rootRequestId = const Uuid().v4();
-    var attempts = 0;
-    final result = await RetryHandler.executeWithRetry<Map<String, dynamic>>(
-      maxRetries: maxRetries,
-      sleep: retrySleep,
-      shouldRetryResult: RetryHandler.isTransientResult,
-      operation: (attempt) async {
-        attempts = attempt.retryNumber + 1;
-        final prepared = guard.check(
-          provider: provider,
-          model: model,
-          messages: messages,
-          purpose: purpose,
-          conversationId: conversationId,
-          maxTokens: maxTokens,
-          streaming: streaming,
-          requiresTools: requiresTools,
-          userInitiated: userInitiated,
-        );
-        try {
-          final requestId = attempt.retryNumber == 0
-              ? rootRequestId
-              : '$rootRequestId:${attempt.retryNumber}';
-          if (!prepared.allowed) {
-            await _recordBlocked(
-              requestId: requestId,
-              rootRequestId: rootRequestId,
+  }) =>
+      ChatApiService.withSamplingCompatibility(() async {
+        final rootRequestId = const Uuid().v4();
+        var attempts = 0;
+        final result =
+            await RetryHandler.executeWithRetry<Map<String, dynamic>>(
+          maxRetries: maxRetries,
+          sleep: retrySleep,
+          shouldRetryResult: RetryHandler.isTransientResult,
+          operation: (attempt) async {
+            attempts = attempt.retryNumber + 1;
+            final prepared = guard.check(
               provider: provider,
               model: model,
-              purpose:
-                  attempt.retryNumber == 0 ? purpose : AiRequestPurpose.retry,
-              taskId: taskId,
-              runBoundary: runBoundary,
-              reason: prepared.reason!,
-              retryCount: attempt.retryNumber,
-            );
-            return {
-              'success': false,
-              'message': '${AiRequestGateway.blockedPrefix}${prepared.reason}',
-              'governanceBlocked': true,
-              'requestId': rootRequestId,
-            };
-          }
-          if (attempt.retryNumber == 0 &&
-              (prepared.warning?.contains('软阈值') ?? false)) {
-            onWarning?.call(prepared.warning!);
-          }
-
-          final stopwatch = Stopwatch()..start();
-          final response = await operation(attempt);
-          final responses = _transportUsageAttempts(response);
-          for (var transport = 0; transport < responses.length; transport++) {
-            final response = responses[transport];
-            final success = response['success'] == true;
-            final inputTokens = response['promptTokens'] as int?;
-            final outputTokens = response['completionTokens'] as int?;
-            final cachedTokens = response['cachedTokens'] as int?;
-            final responseText = response['message']?.toString() ?? '';
-            await _recordAttempt(
-              requestId: transport == 0
-                  ? requestId
-                  : '$requestId:transport:$transport',
-              rootRequestId: rootRequestId,
-              provider: provider,
-              model: response['model']?.toString() ?? model,
-              characterId: characterId,
+              messages: messages,
+              purpose: purpose,
               conversationId: conversationId,
-              purpose:
-                  attempt.retryNumber == 0 ? purpose : AiRequestPurpose.retry,
-              taskId: taskId,
-              runBoundary: runBoundary,
-              originPurpose: purpose,
-              capability: prepared.capability!,
-              estimatedInputTokens: prepared.inputTokens,
-              estimatedOutputTokens:
-                  success ? (responseText.length / 4).ceil() : 0,
-              inputTokens: inputTokens,
-              cachedTokens: cachedTokens,
-              outputTokens: outputTokens,
-              reportedUsage: ReportedTokenUsage.fromMap(response),
-              exactUsage: inputTokens != null && outputTokens != null,
-              latencyMs: stopwatch.elapsedMilliseconds,
-              retryCount: attempt.retryNumber,
-              status: success ? 'success' : 'failed',
-              failureType: success
-                  ? null
-                  : AiRequestGateway._failureType(responseText, response),
-              failureDetail:
-                  success ? null : response['failureDetail']?.toString(),
+              maxTokens: maxTokens,
+              streaming: streaming,
+              requiresTools: requiresTools,
+              userInitiated: userInitiated,
             );
-          }
-          final publicResponse = Map<String, dynamic>.from(response)
-            ..remove('usageAttempts');
+            try {
+              final requestId = attempt.retryNumber == 0
+                  ? rootRequestId
+                  : '$rootRequestId:${attempt.retryNumber}';
+              if (!prepared.allowed) {
+                await _recordBlocked(
+                  requestId: requestId,
+                  rootRequestId: rootRequestId,
+                  provider: provider,
+                  model: model,
+                  purpose: attempt.retryNumber == 0
+                      ? purpose
+                      : AiRequestPurpose.retry,
+                  taskId: taskId,
+                  runBoundary: runBoundary,
+                  reason: prepared.reason!,
+                  retryCount: attempt.retryNumber,
+                );
+                return {
+                  'success': false,
+                  'message':
+                      '${AiRequestGateway.blockedPrefix}${prepared.reason}',
+                  'governanceBlocked': true,
+                  'requestId': rootRequestId,
+                };
+              }
+              if (attempt.retryNumber == 0 &&
+                  (prepared.warning?.contains('软阈值') ?? false)) {
+                onWarning?.call(prepared.warning!);
+              }
+
+              final stopwatch = Stopwatch()..start();
+              final response = await operation(attempt);
+              final responses = _transportUsageAttempts(response);
+              for (var transport = 0;
+                  transport < responses.length;
+                  transport++) {
+                final response = responses[transport];
+                final success = response['success'] == true;
+                final inputTokens = response['promptTokens'] as int?;
+                final outputTokens = response['completionTokens'] as int?;
+                final cachedTokens = response['cachedTokens'] as int?;
+                final responseText = response['message']?.toString() ?? '';
+                await _recordAttempt(
+                  requestId: transport == 0
+                      ? requestId
+                      : '$requestId:transport:$transport',
+                  rootRequestId: rootRequestId,
+                  provider: provider,
+                  model: response['model']?.toString() ?? model,
+                  characterId: characterId,
+                  conversationId: conversationId,
+                  purpose: attempt.retryNumber == 0
+                      ? purpose
+                      : AiRequestPurpose.retry,
+                  taskId: taskId,
+                  runBoundary: runBoundary,
+                  originPurpose: purpose,
+                  capability: prepared.capability!,
+                  estimatedInputTokens: prepared.inputTokens,
+                  estimatedOutputTokens:
+                      success ? (responseText.length / 4).ceil() : 0,
+                  inputTokens: inputTokens,
+                  cachedTokens: cachedTokens,
+                  outputTokens: outputTokens,
+                  requestedMaxTokens: maxTokens,
+                  reportedUsage: ReportedTokenUsage.fromMap(response),
+                  exactUsage: inputTokens != null && outputTokens != null,
+                  latencyMs: stopwatch.elapsedMilliseconds,
+                  retryCount: attempt.retryNumber,
+                  status: success ? 'success' : 'failed',
+                  failureType: success
+                      ? null
+                      : AiRequestGateway._failureType(responseText, response),
+                  failureDetail:
+                      success ? null : response['failureDetail']?.toString(),
+                );
+              }
+              final publicResponse = Map<String, dynamic>.from(response)
+                ..remove('usageAttempts');
+              return {
+                ...publicResponse,
+                'requestId': rootRequestId,
+                if (prepared.warning != null) 'budgetWarning': prepared.warning,
+              };
+            } finally {
+              // 无论成功/失败/被拦截，都释放 check 时预留的预算，避免并发预留计数泄漏。
+              guard.release(conversationId, prepared.reservedMicros);
+            }
+          },
+        );
+        if (result['success'] != true && attempts > 1) {
           return {
-            ...publicResponse,
-            'requestId': rootRequestId,
-            if (prepared.warning != null) 'budgetWarning': prepared.warning,
+            ...result,
+            'retryExhausted': true,
+            'retryCount': attempts - 1,
           };
-        } finally {
-          // 无论成功/失败/被拦截，都释放 check 时预留的预算，避免并发预留计数泄漏。
-          guard.release(conversationId, prepared.reservedMicros);
         }
-      },
-    );
-    if (result['success'] != true && attempts > 1) {
-      return {
-        ...result,
-        'retryExhausted': true,
-        'retryCount': attempts - 1,
-      };
-    }
-    return {...result, 'retryCount': attempts - 1};
-  }
+        return {...result, 'retryCount': attempts - 1};
+      });
 
   Future<void> _recordAttempt({
     required String requestId,
@@ -148,6 +156,7 @@ extension _AiRequestGatewayRetrySupport on AiRequestGateway {
     required int? inputTokens,
     required int? cachedTokens,
     required int? outputTokens,
+    required int requestedMaxTokens,
     required bool exactUsage,
     required ReportedTokenUsage reportedUsage,
     required int latencyMs,
@@ -242,6 +251,7 @@ extension _AiRequestGatewayRetrySupport on AiRequestGateway {
           : hasValidReportedUsage
               ? outputTokens
               : null,
+      requestedMaxTokens: requestedMaxTokens,
       estimatedCostMicros:
           status == 'success' || hasValidReportedUsage ? cost : null,
       currency:

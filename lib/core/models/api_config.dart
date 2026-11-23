@@ -48,6 +48,15 @@ class ApiConfig extends HiveObject {
   @HiveField(10, defaultValue: false)
   bool enableWorkPromptCaching;
 
+  /// 覆盖请求的 `User-Agent`；空串表示沿用客户端默认（`Dart/x.y (dart:io)`）。
+  ///
+  /// 有的中转按 UA 白名单放行（例如只认 `claude-cli/...`），与 Key 是否有效无关。
+  /// 这个值是**每条配置自己的身份**：请求点必须把它（连同空串语义）一路传到
+  /// `ChatApiService` 的 `userAgent` 参数，不能按 Base URL 反查——同一中转地址
+  /// 上可以有多条配置，按地址查只能命中其中一条。
+  @HiveField(11, defaultValue: '')
+  String userAgent;
+
   String? workPromptCacheKey(String characterId) => enableWorkPromptCaching
       ? sha256
           .convert(
@@ -59,6 +68,12 @@ class ApiConfig extends HiveObject {
   String get apiKey => CredentialRepository.cached(id) ?? '';
 
   ApiProtocol get protocol => ApiProtocol.fromName(apiProtocol);
+
+  /// 非空时才覆盖 `User-Agent`；空白值等于没填。
+  String? get userAgentOverride {
+    final value = userAgent.trim();
+    return value.isEmpty ? null : value;
+  }
 
   /// Returns true when a non-empty credential is configured.
   bool get hasApiKey =>
@@ -89,6 +104,7 @@ class ApiConfig extends HiveObject {
     // field default so old records remain backwards compatible.
     this.apiProtocol = 'openAiChatCompletions',
     this.enableWorkPromptCaching = false,
+    this.userAgent = '',
   })  : id = id ?? const Uuid().v4(),
         _legacyApiKey = apiKey,
         modelName = modelName ?? ApiProvider.defaultModels[provider] ?? '',

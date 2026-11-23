@@ -43,9 +43,9 @@ extension _ChatRoomMessageActionSupport on _ChatRoomPageState {
   /// 需要发送者身份的入口；真人成员与系统提示没有 sender，一项都不给。
   ///
   /// 客人端一律不调用 LLM，所以直接触发本机生成的入口都要藏掉，但
-  /// 「@角色」「查看本条来源」保留：前者只是把文本发出去，真正的生成发生在
+  /// 「@角色」保留：它只是把文本发出去，真正的生成发生在
   /// 主人端——客人 @ 某个角色，主人端会看到这条消息并让该角色接话；
-  /// 「查看来源」是纯本地读取。
+  /// 来源展示已移至气泡内，不再提供弹窗菜单。
   List<MessageActionItem> _aiOnlyActionsFor(
     Message message,
     AICharacter? sender,
@@ -66,12 +66,6 @@ extension _ChatRoomMessageActionSupport on _ChatRoomPageState {
           onSelected: () =>
               _regenerateAiReply(message, sender, forceRefresh: true),
         ),
-      if (_canViewSourcesFor(message))
-        MessageActionItem(
-          icon: Icons.library_books_outlined,
-          label: '查看本条来源',
-          onSelected: () => _showSourcesForReply(message),
-        ),
       MessageActionItem(
         icon: Icons.alternate_email_rounded,
         label: '@${sender.name}',
@@ -85,14 +79,6 @@ extension _ChatRoomMessageActionSupport on _ChatRoomPageState {
       _searchTurnController.contextForRegeneration(message.id) != null ||
       _snapshotFromMessage(message) != null ||
       _userMessageBefore(message) != null;
-
-  /// 「查看本条来源」是否可用：读的是"这条回复当时用了哪些来源"。
-  ///
-  /// 与可刷新不是同一个判据：能重跑生成不代表这条已有的回复带过来源，
-  /// 并成一个就会给出一个点下去没有来源可看的入口。
-  bool _canViewSourcesFor(Message message) =>
-      _searchTurnController.contextForReply(message.id) != null ||
-      _snapshotFromMessage(message) != null;
 
   MessageActionItem _speechActionFor(Message message) {
     final isSpeakingThis = _isSpeaking && _speakingMessageId == message.id;

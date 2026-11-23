@@ -4,6 +4,18 @@ import 'package:flutter_test/flutter_test.dart';
 void main() {
   const policy = WorkFollowUpPolicy();
 
+  test('unchanged original download is a new deliverable, not a change verb', () {
+    final decision = policy.resolve(
+      request: 'Create a new deliverable flutter-original.md: search for the '
+          'official Flutter GitHub repository, read its README, then download '
+          'https://raw.githubusercontent.com/flutter/flutter/master/README.md '
+          'unchanged. Deliver only that original file.',
+      lastArtifactPaths: const ['/workspace/qa-work-group-readme.md'],
+    );
+    expect(decision.kind, WorkFollowUpKind.newArtifact);
+    expect(decision.artifactPath, isNull);
+  });
+
   test('explicit current/previous/same wording targets structured artifact',
       () {
     for (final request in const [

@@ -40,6 +40,7 @@ class FakeCompletionClient extends ChatApiService {
     required ApiProvider provider,
     ApiProtocol apiProtocol = ApiProtocol.defaultValue,
     String? customBaseUrl,
+    String? userAgent,
     required String model,
     required List<Map<String, dynamic>> messages,
     double temperature = 0.85,
@@ -69,6 +70,7 @@ class FakeCompletionClient extends ChatApiService {
     required ApiProvider provider,
     ApiProtocol apiProtocol = ApiProtocol.defaultValue,
     String? customBaseUrl,
+    String? userAgent,
     required String model,
     required List<Map<String, dynamic>> messages,
     double temperature = 0.85,
@@ -91,6 +93,7 @@ class FakeCompletionClient extends ChatApiService {
 
   @override
   Future<Map<String, dynamic>> sendChatMessageStreamed({
+    String? userAgent,
     required String apiKey,
     required ApiProvider provider,
     ApiProtocol apiProtocol = ApiProtocol.defaultValue,
@@ -114,6 +117,7 @@ class FakeCompletionClient extends ChatApiService {
 
   @override
   Future<Map<String, dynamic>> sendStructuredChatMessageStreamed({
+    String? userAgent,
     required String apiKey,
     required ApiProvider provider,
     ApiProtocol apiProtocol = ApiProtocol.defaultValue,
@@ -152,6 +156,7 @@ class FakeStreamingErrorClient extends ChatApiService {
 
   @override
   Stream<ChatStreamEvent> streamChatMessage({
+    String? userAgent,
     required String apiKey,
     required ApiProvider provider,
     ApiProtocol apiProtocol = ApiProtocol.defaultValue,
@@ -168,6 +173,33 @@ class FakeStreamingErrorClient extends ChatApiService {
     String? promptCacheKey,
   }) async* {
     yield ChatStreamEvent.error(errorMessage);
+  }
+}
+
+class FakeStreamingDoneClient extends ChatApiService {
+  final ChatStreamEvent event;
+
+  FakeStreamingDoneClient(this.event);
+
+  @override
+  Stream<ChatStreamEvent> streamChatMessage({
+    String? userAgent,
+    required String apiKey,
+    required ApiProvider provider,
+    ApiProtocol apiProtocol = ApiProtocol.defaultValue,
+    String? customBaseUrl,
+    required String model,
+    required List<Map<String, dynamic>> messages,
+    double temperature = 0.85,
+    int maxTokens = 1024,
+    Duration receiveTimeout = const Duration(seconds: 120),
+    CancelToken? cancelToken,
+    bool finishOnTerminalFrame = false,
+    String? reasoningEffort,
+    void Function()? onResponseActivity,
+    String? promptCacheKey,
+  }) async* {
+    yield event;
   }
 }
 
@@ -1070,6 +1102,93 @@ void main() {
         .toList();
 
     expect(store.diagnostics.last.failureType, 'http_503');
+  });
+
+  test('流式推理完成但正文为空时记为可重试失败', () async {
+    final store = MemoryGovernanceStore();
+    await store.saveCustomCapability(
+      ApiProvider.custom.name,
+      'sensenova-6.8-flash-lite',
+      const CustomModelCapability(
+        supportsStreaming: true,
+        contextWindow: 131072,
+        maxOutput: 8192,
+      ),
+    );
+    final gateway = AiRequestGateway(
+      store: store,
+      client: FakeStreamingDoneClient(const ChatStreamEvent(
+        type: ChatStreamEventType.done,
+        content: '',
+        promptTokens: 2144,
+        completionTokens: 85,
+        reasoningTokens: 85,
+      )),
+    );
+
+    final events = await gateway
+        .streamChatMessage(
+          apiKey: 'secret',
+          provider: ApiProvider.custom,
+          model: 'sensenova-6.8-flash-lite',
+          messages: messages,
+          purpose: AiRequestPurpose.reply,
+          conversationId: 'dm:sensenova-empty-stream',
+          characterId: 'sensenova',
+          maxTokens: 8192,
+        )
+        .toList();
+
+    expect(events.single.type, ChatStreamEventType.error);
+    expect(events.single.message, '模型返回了空内容');
+    // 下游靠这个标记决定"回退非流式 / 原样重发一次"，文案不能当判据。
+    expect(events.single.emptyCompletion, isTrue);
+    expect(events.single.completionTokens, 85);
+    expect(store.diagnostics.single.status, 'failed');
+    expect(store.diagnostics.single.failureType, 'empty_completion');
+    expect(store.diagnostics.single.outputTokens, 85);
+    expect(store.diagnostics.single.requestedMaxTokens, 8192);
+    expect(
+        store.diagnostics.single.failureDetail, contains('reasoningTokens=85'));
+    expect(
+      AiRequestDiagnostic.fromMap(store.diagnostics.single.toMap())
+          .requestedMaxTokens,
+      8192,
+    );
+    expect(
+      store.diagnostics.single.toSafeText(),
+      contains('requestedMaxTokens=8192'),
+    );
+  });
+
+  test('流式 done.content 正文仍记为成功', () async {
+    final store = MemoryGovernanceStore();
+    final gateway = AiRequestGateway(
+      store: store,
+      client: FakeStreamingDoneClient(const ChatStreamEvent(
+        type: ChatStreamEventType.done,
+        content: 'answer',
+        promptTokens: 10,
+        completionTokens: 2,
+      )),
+    );
+
+    final events = await gateway
+        .streamChatMessage(
+          apiKey: 'secret',
+          provider: ApiProvider.deepseek,
+          model: 'deepseek-chat',
+          messages: messages,
+          purpose: AiRequestPurpose.reply,
+          conversationId: 'group:done-content',
+          characterId: 'deepseek',
+        )
+        .toList();
+
+    expect(events.single.type, ChatStreamEventType.done);
+    expect(events.single.content, 'answer');
+    expect(store.diagnostics.single.status, 'success');
+    expect(store.diagnostics.single.failureType, isNull);
   });
 
   test('未登记模型可以流式：不会被治理层以「未声明支持流式输出」拦下', () async {

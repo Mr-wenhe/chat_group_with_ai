@@ -139,9 +139,9 @@ class _ApiKeySettingsPageState extends ConsumerState<ApiKeySettingsPage> {
               title: '搜索服务',
               status: entryOf(ApiKeyCategory.search).summary,
               state: _stateOf(entryOf(ApiKeyCategory.search)),
-              hint: '支持 Tavily / Brave 等 Provider，也可用智谱原生搜索。'
-                  '未配置时联网搜索不可用（DuckDuckGo 百科兜底不受影响）。'
-                  '搜索策略在「模型、成本与联网治理」里开关。',
+              hint: '这里仅配置智谱专用搜索，供新闻角色、圆桌会议等使用。'
+                  'macOS 与 Windows 的自动联网复用聊天配置，无需搜索 Key 或开关，'
+                  '会增加聊天 Token 消耗；其他平台的自动联网未实现。',
               onTap: () => _openPage(const SearchCredentialSettingsPage()),
             ),
           ]),

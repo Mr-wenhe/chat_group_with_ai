@@ -7,7 +7,20 @@ import 'package:flutter_test/flutter_test.dart';
 /// `agentic_reply_utils.dart` instead of a copy-pasted duplicate.
 
 void main() {
+  test('preserves tool metadata in an explicitly labeled JSONC example', () {
+    const sample = '```jsonc\n{"tool":"formatter","enabled":true}\n```';
+    expect(sanitizeNonAgenticReply(sample), sample);
+  });
+
   group('non-agentic sanitize: tool_call / agent_tool leaks', () {
+    test('protocol prefix variants are hidden while unlabeled code survives',
+        () {
+      const protocol =
+          '```tool_calls\n{"tool":"web.search","args":{"query":"x"}}\n```';
+      expect(sanitizeNonAgenticReply(protocol), isNot(contains('web.search')));
+      const code = '```\ntool = createTool();\n```';
+      expect(sanitizeNonAgenticReply(code), code);
+    });
     test('removes standard tool_call blocks', () {
       const input = 'OK, let me help.\n'
           '<tool_call>\n'
@@ -231,6 +244,45 @@ void main() {
       expect(result, contains('void main()'));
       expect(result, contains('That was short.'));
       expect(result, isNot(contains('\u{1F4CE}')));
+    });
+  });
+
+  // --- ```json 工具请求泄漏（现场复现：程序媛 回复整条是 ```json）---
+
+  group('strips tool requests fenced as ```json', () {
+    test('drops the fence entirely', () {
+      const input = '```json\n'
+          '{"tool":"web_search","query":"github high star frontend UI skill"}\n'
+          '```';
+      final result = sanitizeNonAgenticReply(input);
+      expect(result, isNot(contains('web_search')));
+      expect(result, isNot(contains('"query"')));
+      expect(result, isNot(contains('```')));
+      // 整条回复只有一个工具请求时不能留空气泡。
+      expect(result, isNotEmpty);
+    });
+
+    test('keeps the sentence before the fence', () {
+      const input = '我先搜一下。\n\n'
+          '```json\n'
+          '{"tool":"web.search","args":{"query":"flutter"},"reason":"查"}\n'
+          '```';
+      final result = sanitizeNonAgenticReply(input);
+      expect(result, contains('我先搜一下。'));
+      expect(result, isNot(contains('"tool"')));
+    });
+
+    test('keeps a plain json data sample (no tool key)', () {
+      const input = '示例：\n```json\n{"name":"demo","port":8080}\n```';
+      final result = sanitizeNonAgenticReply(input);
+      expect(result, contains('"port":8080'));
+    });
+
+    test('drops a truncated fence without closing marker', () {
+      const input = '正在查询\n```json\n{"tool":"web_search","query":"abc"';
+      final result = sanitizeNonAgenticReply(input);
+      expect(result, isNot(contains('web_search')));
+      expect(result, contains('正在查询'));
     });
   });
 }

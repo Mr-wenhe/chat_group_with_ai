@@ -491,6 +491,7 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
         provider: provider,
         apiProtocol: config.protocol,
         customBaseUrl: config.customBaseUrl,
+        userAgent: config.userAgent,
         model: config.modelName,
         messages: messages,
         maxTokens: WorkRoleModelSelectorService.defaultOutputTokens,

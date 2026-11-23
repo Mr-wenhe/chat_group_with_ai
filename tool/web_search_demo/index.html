@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>伴伴 · 联网工具 Demo</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#f4f5fa;color:#202338;font:15px/1.6 system-ui,-apple-system,sans-serif}
+main{max-width:1000px;margin:36px auto;padding:0 24px}h1{font-size:28px;margin:0}small,.muted{color:#677087}
+.badge{background:#e6e4ff;color:#5148c5;border-radius:6px;padding:3px 9px;font-size:12px}
+.card{background:white;border:1px solid #e0e3ec;border-radius:14px;padding:22px;margin-top:18px}
+label{display:block;font-weight:600;margin:12px 0 6px}select,textarea{width:100%;font:inherit;padding:11px;border:1px solid #cfd4e2;border-radius:8px;background:white;color:inherit}
+textarea{min-height:100px;resize:vertical}button{font:inherit;cursor:pointer;border:0;border-radius:8px;padding:10px 22px;background:#6155df;color:white;margin-right:8px}button.secondary{background:#eceef5;color:#42485c}button:disabled{opacity:.5;cursor:default}
+.steps{display:flex;gap:8px;flex-wrap:wrap;margin:16px 0}.steps span{background:#eceef5;padding:5px 13px;border-radius:6px}.steps .done{background:#dcf3e5;color:#216c41}
+#status{font-weight:600}.event{border-left:3px solid #ddd9ff;padding:0 0 0 14px;margin:19px 0}.event h3{font-size:15px;margin:0 0 7px}.event.error{border-color:#d55656}.event.success{border-color:#3b9b65}
+pre{white-space:pre-wrap;word-break:break-word;font:13px/1.65 ui-monospace,monospace;background:#f7f8fb;padding:12px;border-radius:6px;max-height:320px;overflow:auto}a{color:#5148c5;overflow-wrap:anywhere}.source{margin:8px 0}#empty{color:#8990a1}
+</style>
+<main>
+<span class="badge">独立验证 · 不修改伴伴配置</span>
+<h1>伴伴联网工具 Demo</h1>
+<div class="muted">现有聊天 Key 驱动模型；免 Key 搜索、网页读取、真实文件下载。</div>
+<section class="card">
+<label for="config">已保存的聊天配置</label><select id="config"></select>
+<small>Key 仅由本机后端读取，不发送给页面、搜索站点或 DNS 服务。运行会消耗聊天 Token。</small>
+<label for="task">验证任务</label>
+<textarea id="task">搜索 Flutter 官方 GitHub 仓库的 README.md，读取官方介绍，然后下载一份小型 README.md 文件到本地。最后简述搜索、阅读和下载的实际结果。</textarea>
+<div class="steps"><span id="search-step">1 搜索</span><span id="read-step">2 读取</span><span id="download-step">3 下载</span><span id="complete-step">4 汇报</span></div>
+<button id="run">运行 Demo</button><button id="stop" class="secondary" disabled>停止</button>
+<p id="status">准备就绪。先选择一套现有配置。</p>
+</section>
+<section class="card"><h2 style="font-size:18px;margin:0">执行记录</h2><p id="empty">运行后显示真实请求结果；失败会保留失败步骤。</p><div id="events"></div></section>
+<p class="muted">验证范围：macOS 本机 Demo。仅支持公开 HTTPS 文本页面和不超过 8 MiB 的下载；不处理登录、验证码或付费墙。正式版、Windows 和长期稳定性另行验收。</p>
+</main>
+<script>
+const token='__DEMO_TOKEN__';
+const $=id=>document.getElementById(id);
+const labels={start:'开始',working:'执行中',decision:'模型指令',network:'网络连接',source_failed:'来源失败',search:'搜索结果',read:'网页正文',download:'文件已落盘',complete:'完成',failed:'失败'};
+function text(tag,value,parent){const el=document.createElement(tag);el.textContent=value;parent.append(el);return el}
+function link(title,url,parent){const a=text('a',title,parent);a.href=url;a.target='_blank';a.rel='noopener noreferrer';return a}
+function show(e){
+ $('empty').hidden=true;const box=document.createElement('div');box.className='event'+(e.kind==='failed'?' error':e.kind==='complete'?' success':'');$('events').append(box);
+ text('h3',labels[e.kind]||e.kind,box);
+ if(e.kind==='search'){
+  text('p',e.provider+' · '+e.query,box);
+  for(const r of e.results){const row=document.createElement('div');row.className='source';box.append(row);link(r.title,r.url,row);text('small',' '+r.url,row)}
+  $('search-step').classList.add('done');
+ }else if(e.kind==='read'){
+  link(e.title,e.url,box);text('p','正文 '+e.bodyChars+' 字符'+(e.truncated?'，本次截取 12,000 字符':''),box);text('pre',e.body,box);$('read-step').classList.add('done');
+ }else if(e.kind==='download'){
+  link('下载 '+e.file,'/api/file?id='+encodeURIComponent(e.downloadId),box);
+  text('pre',JSON.stringify({来源:e.url,路径:e.path,字节:e.bytes,SHA256:e.sha256},null,2),box);$('download-step').classList.add('done');
+ }else if(e.kind==='complete'){
+  text('p',String(e.answer),box);text('pre',JSON.stringify({服务端实报用量:e.reportedUsage,记录文件:e.reportPath},null,2),box);$('complete-step').classList.add('done');$('status').textContent='Demo 已完成：搜索、读取、下载均有真实结果。';
+ }else if(e.kind==='failed'){
+  text('p',e.error,box);text('pre',JSON.stringify({实报用量:e.reportedUsage,记录文件:e.reportPath},null,2),box);$('status').textContent='Demo 失败：'+e.error;
+ }else{const rest={...e};delete rest.time;delete rest.kind;text('pre',JSON.stringify(rest,null,2),box)}
+ if(e.kind==='working')$('status').textContent=e.step+'…';
+}
+fetch('/api/configs').then(r=>r.json()).then(configs=>{for(const c of configs){const o=document.createElement('option');o.value=c.name;o.textContent=c.name+' · '+c.model;$('config').append(o)}}).catch(e=>{$('status').textContent='配置加载失败：'+e});
+$('run').onclick=async()=>{
+ $('events').replaceChildren();$('empty').hidden=false;document.querySelectorAll('.steps span').forEach(e=>e.classList.remove('done'));
+ $('run').disabled=true;$('stop').disabled=false;$('status').textContent='正在连接…';
+ try{
+  const response=await fetch('/api/run',{method:'POST',headers:{'Content-Type':'application/json','x-demo-token':token},body:JSON.stringify({config:$('config').value,task:$('task').value})});
+  if(!response.ok)throw Error('本地服务 HTTP '+response.status);
+  const reader=response.body.getReader(),decoder=new TextDecoder();let buffer='';
+  while(true){const {done,value}=await reader.read();if(done)break;buffer+=decoder.decode(value,{stream:true});let end;
+   while((end=buffer.indexOf('\n\n'))>=0){const block=buffer.slice(0,end);buffer=buffer.slice(end+2);if(block.startsWith('data: '))show(JSON.parse(block.slice(6)))}
+  }
+ }catch(e){$('status').textContent='连接中断：'+e.message}
+ finally{$('run').disabled=false;$('stop').disabled=true}
+};
+$('stop').onclick=()=>fetch('/api/stop',{method:'POST',headers:{'x-demo-token':token}}).then(()=>{$('status').textContent='已请求停止…'});
+</script></html>

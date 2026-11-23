@@ -110,12 +110,26 @@ class SearchIntentDetector {
   }) =>
       detect(message, origin: origin, now: now).shouldSearch;
 
-  /// A source/link follow-up has no factual subject of its own. The chat room
-  /// reuses the preceding evidence snapshot instead of issuing another query.
+  /// A new factual request may also explicitly ask for source links.
   bool isSourceLinkRequest(String? message) {
     final value = message?.trim() ?? '';
     return value.isNotEmpty &&
         _containsAny(value, value.toLowerCase(), _sourceLinkTerms);
+  }
+
+  /// Reuse previous evidence only for a link request without a new subject.
+  bool isSourceLinkFollowUp(String? message) {
+    if (!isSourceLinkRequest(message)) return false;
+    final subject = (message ?? '')
+        .replaceAll(RegExp(r'(刚才|刚刚|上面|以上|这些|本次|这次)的?(搜索|查询|查到)?(结果)?'), '');
+    if (detect(subject).shouldSearch) return false;
+    final sources = _sourceLinkTerms.map(RegExp.escape).join('|');
+    return RegExp(
+            '^(?:$sources|'
+            r'请|麻烦|帮我|给我|给出|提供|发我|发给我|列出来|列出|把|的|全部|所有|对应|具体|原始|一下|看看|在哪|呢|吗|'
+            r'\b(?:please|give|show|send|me|the|all|previous|above|original)\b|[\s，。！？!?：:、])+$',
+            caseSensitive: false)
+        .hasMatch(subject);
   }
 
   SearchIntentDecision _decision({
@@ -236,16 +250,13 @@ class SearchIntentDetector {
     if (_containsAny(value, lower, const ['今年', 'this year'])) {
       return SearchFreshness.year;
     }
-    if (_containsAny(
-        value,
-        lower,
-        const [
-          '最新',
-          '当前',
-          '最近',
-          'latest',
-          'current',
-        ])) {
+    if (_containsAny(value, lower, const [
+      '最新',
+      '当前',
+      '最近',
+      'latest',
+      'current',
+    ])) {
       return SearchFreshness.month;
     }
     return SearchFreshness.any;

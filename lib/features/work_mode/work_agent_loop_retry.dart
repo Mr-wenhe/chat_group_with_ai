@@ -36,8 +36,9 @@ const int _responseSnippetCharacters = 300;
 extension _WorkAgentLoopRetry on WorkAgentLoop {
   WorkProgressObservation _toolProgressObservation(
     AgentToolCall call,
-    WorkToolResult result,
-  ) {
+    WorkToolResult result, {
+    AgentTask? task,
+  }) {
     final tool = call.name.wireName;
     final inputHash = sha256.convert(utf8.encode(jsonEncode(call.arguments)));
     final stableData = Map<String, dynamic>.from(result.data)
@@ -45,6 +46,48 @@ extension _WorkAgentLoopRetry on WorkAgentLoop {
       ..remove('timestamp')
       ..remove('durationMs');
     final outputHash = sha256.convert(utf8.encode(jsonEncode(stableData)));
+    // 检索参数、搜索来源排序和随机下载目录变化不代表取得新证据。
+    Object? networkEvidence;
+    if (call.name == AgentToolName.webSearch) {
+      final sources = result.data['sources'];
+      if (sources is List) {
+        final entries = [
+          for (final source in sources.whereType<Map>())
+            jsonEncode([source['url'], source['title'], source['snippet']])
+        ]..sort();
+        if (entries.isNotEmpty) networkEvidence = entries;
+      }
+    } else if (call.name == AgentToolName.webRead) {
+      final text = result.data['text'];
+      final sections = result.data['sections'];
+      if (text is String && text.isNotEmpty) {
+        networkEvidence = [result.data['source_id'], text];
+      } else if (sections is List && sections.isNotEmpty) {
+        networkEvidence = [result.data['source_id'], sections];
+      }
+      final digest = result.data['sha256'];
+      final size = result.data['byteLength'];
+      if (networkEvidence != null &&
+          digest is String &&
+          RegExp(r'^[0-9a-f]{64}$').hasMatch(digest) &&
+          size is int &&
+          size >= 0) {
+        networkEvidence = [networkEvidence, digest, size];
+      }
+    } else if (call.name == AgentToolName.webDownload && result.committed) {
+      final digest = result.data['sha256'];
+      final size = result.data['byteLength'];
+      if (digest is String &&
+          RegExp(r'^[0-9a-f]{64}$').hasMatch(digest) &&
+          size is int &&
+          size >= 0) {
+        networkEvidence = [
+          result.data['url'] ?? result.data['source_id'],
+          digest,
+          size
+        ];
+      }
+    }
     // 相同正文不是新证据，读取长度或参数顺序变化不能刷新群任务进展。
     final readContent = result.data['content'];
     final browserPage =
@@ -58,7 +101,7 @@ extension _WorkAgentLoopRetry on WorkAgentLoop {
         call.arguments['operation'] == 'close' &&
         result.succeeded &&
         result.data['sessionClosed'] == true;
-    final fingerprint = browserEvidence
+    var fingerprint = browserEvidence
         ? sha256
             .convert(utf8.encode(jsonEncode([
               tool,
@@ -81,6 +124,33 @@ extension _WorkAgentLoopRetry on WorkAgentLoop {
                 ])))
                 .toString()
             : '$tool:$inputHash:$outputHash';
+    if (call.name == AgentToolName.workspaceDocument &&
+        result.succeeded &&
+        readContent is String) {
+      final digest = result.data['documentDigest'];
+      final indexes = result.data['chunkIndexes'];
+      final total = result.data['totalChunkCount'];
+      final indexedBody = digest is String &&
+          RegExp(r'^[a-f0-9]{64}$').hasMatch(digest) &&
+          total is int &&
+          total > 0 &&
+          indexes is List &&
+          indexes.isNotEmpty &&
+          indexes.every((index) => index is int && index >= 0 && index < total);
+      fingerprint = sha256
+          .convert(utf8.encode(jsonEncode([
+            tool,
+            result.data['path'] ?? call.arguments['path'],
+            digest,
+            indexedBody ? indexes : readContent,
+          ])))
+          .toString();
+    }
+    if (networkEvidence != null) {
+      fingerprint = sha256
+          .convert(utf8.encode(jsonEncode([tool, networkEvidence])))
+          .toString();
+    }
     // command.run 的真实产物变化：命令桥只报 `artifactPaths`（无文件哈希），
     // 它是"这次运行真实改写了哪些文件"的证据（见 `_existingCommandArtifactPaths`
     // 基于运行前快照 diff）。只认非空列表——像 `true` 这种验证/空跑命令返回
@@ -91,11 +161,10 @@ extension _WorkAgentLoopRetry on WorkAgentLoop {
     // 但 `_existingCommandArtifactPaths` 基于运行前快照 diff，返回非空即代表
     // 文件确实发生了变化。这种"写了一半但确实改了文件"也是进展，不能被纯
     // failure 口径吞掉，否则后续的验证/再写入会被 noProgressCount 误判停滞。
-    final commandChangedArtifact =
-        call.name == AgentToolName.commandRun &&
-            result.status != WorkToolResultStatus.alreadyCommitted &&
-            result.data['artifactPaths'] is List &&
-            (result.data['artifactPaths'] as List).isNotEmpty;
+    final commandChangedArtifact = call.name == AgentToolName.commandRun &&
+        result.status != WorkToolResultStatus.alreadyCommitted &&
+        result.data['artifactPaths'] is List &&
+        (result.data['artifactPaths'] as List).isNotEmpty;
     if (!result.succeeded && !commandChangedArtifact) {
       return WorkProgressObservation(
         kind: WorkProgressObservationKind.failure,
@@ -123,9 +192,37 @@ extension _WorkAgentLoopRetry on WorkAgentLoop {
             call.name == AgentToolName.workspaceSearch ||
             call.name == AgentToolName.workspaceList ||
             call.name == AgentToolName.workspaceDocument);
+    final binding = task == null
+        ? null
+        : _safeExistingMap(task.executionStateJson)['workItemExecution'];
+    // Independent consumers need their own evidence; repeated reads still deduplicate.
+    if (task != null &&
+        binding is Map &&
+        {'verify', 'usage'}.contains(binding['stage']) &&
+        binding['actorId'] == task.characterId &&
+        (hasReadEvidence ||
+            networkEvidence != null &&
+                call.name != AgentToolName.webDownload)) {
+      fingerprint = sha256
+          .convert(utf8.encode(jsonEncode([
+            fingerprint,
+            for (final key in [
+              'stage',
+              'actorId',
+              'workItemId',
+              'iterationId',
+              'requestRevision',
+              'teamRevision',
+              'verificationRevision'
+            ])
+              binding[key]
+          ])))
+          .toString();
+    }
     return WorkProgressObservation(
       kind: changed &&
               (hasReadEvidence ||
+                  networkEvidence != null ||
                   browserEvidence ||
                   browserClosed ||
                   commandChangedArtifact ||

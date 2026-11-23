@@ -93,6 +93,7 @@ class IpVisualDescriptionLlm {
             ),
             apiProtocol: config.protocol,
             customBaseUrl: config.customBaseUrl,
+            userAgent: config.userAgent,
             model: config.modelName,
             // 改写要忠实，不要自由发挥；0.5 让措辞略有变化但不跑偏。
             temperature: 0.5,

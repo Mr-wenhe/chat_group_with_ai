@@ -64,11 +64,11 @@ class _WebSearchRuntimeSettingsCardState
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
-              '搜索运行参数',
+              '智谱搜索运行参数',
               style: Theme.of(context).textTheme.titleMedium,
             ),
             const SizedBox(height: 4),
-            const Text('仅用于用户主动轮次；自动聊天和主动私聊不会触发第三方搜索。'),
+            const Text('仅管理原有智谱搜索流程；桌面自动联网由模型按需调用，不受这里的开关和参数控制。'),
             const SizedBox(height: 12),
             TextField(
               key: const ValueKey('search-runtime-locale'),

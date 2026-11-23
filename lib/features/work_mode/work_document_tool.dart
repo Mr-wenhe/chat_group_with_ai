@@ -32,6 +32,11 @@ typedef WorkDocumentEvidenceWriter = Future<String> Function(
 /// [DocumentUnderstandingService] and all image payload shaping stays in the
 /// existing multimodal content builder.
 class WorkDocumentTool {
+  /// Shares the existing parser's format list without reading the file.
+  static bool supportsBodyFile(String path) =>
+      DocumentUnderstandingService.supports(MediaAttachment(
+          type: 'file', fileName: _basename(path), localPath: path));
+
   final WorkspacePathPolicy pathPolicy;
   final String? workspaceRoot;
   final ModelCapability modelCapability;

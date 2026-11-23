@@ -93,9 +93,11 @@ class ChatMessageList extends StatelessWidget {
   /// 与 [senderColor]、[senderNameById] 同构的纯值对象：本类不碰 DatabaseService，
   /// 由宿主页面装配后下传。
   final EntityLabels? entityLabels;
+  final ValueChanged<Uri>? onOpenSource;
 
   const ChatMessageList({
     super.key,
+    this.onOpenSource,
     required this.messages,
     required this.characters,
     required this.messageIndex,
@@ -177,6 +179,7 @@ class ChatMessageList extends StatelessWidget {
 
         final selectable = selectableIds.contains(message.id);
         final bubble = ChatMessageBubble(
+          onOpenSource: onOpenSource,
           message: message,
           isDirectChat: isDirectChat,
           sender: sender,

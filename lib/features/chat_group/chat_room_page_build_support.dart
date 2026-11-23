@@ -135,9 +135,7 @@ extension _ChatRoomPageBuildSupport on _ChatRoomPageState {
             ChatRoomSearchStatus(
               state: _webSearchState,
               message: _webSearchStatusText,
-              onOpenDetails: _webSearchState.snapshot == null
-                  ? null
-                  : _showWebSearchSources,
+              onOpenDetails: null,
             ),
             _buildConversationControls(cs),
             if (_pendingUserMentionMessageIds.isNotEmpty &&
@@ -152,6 +150,7 @@ extension _ChatRoomPageBuildSupport on _ChatRoomPageState {
               child: _messages.isEmpty
                   ? _buildEmptyState(cs)
                   : ChatMessageList(
+                      onOpenSource: (uri) => unawaited(_openSearchSource(uri)),
                       messages: _messages,
                       characters: _allGroupCharacters,
                       entityLabels: _entityLabels,
@@ -220,7 +219,11 @@ extension _ChatRoomPageBuildSupport on _ChatRoomPageState {
                 child: Row(
                   children: [
                     Text(
-                      _isStreaming ? 'AI 正在生成...' : 'AI 正在回复...',
+                      !_isStreaming
+                          ? 'AI 正在回复...'
+                          : _replyCompatibilityRetry
+                              ? 'AI 正在生成...（模型参数不兼容，正在自动重试）'
+                              : 'AI 正在生成...',
                       style:
                           TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
                     ),

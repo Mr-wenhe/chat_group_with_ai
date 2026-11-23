@@ -101,6 +101,7 @@ class _SequencedGateway extends AiRequestGateway {
 
   @override
   Future<Map<String, dynamic>> sendChatMessageStreamed({
+    String? userAgent,
     required String apiKey,
     required ApiProvider provider,
     ApiProtocol apiProtocol = ApiProtocol.defaultValue,
@@ -202,6 +203,7 @@ class _AppendGateway extends AiRequestGateway {
 
   @override
   Future<Map<String, dynamic>> sendChatMessageStreamed({
+    String? userAgent,
     required String apiKey,
     required ApiProvider provider,
     ApiProtocol apiProtocol = ApiProtocol.defaultValue,
@@ -278,6 +280,7 @@ class _HangingModelGateway extends AiRequestGateway {
 
   @override
   Future<Map<String, dynamic>> sendChatMessageStreamed({
+    String? userAgent,
     required String apiKey,
     required ApiProvider provider,
     ApiProtocol apiProtocol = ApiProtocol.defaultValue,
@@ -325,6 +328,7 @@ class _StallsAfterFirstTokenGateway extends AiRequestGateway {
 
   @override
   Future<Map<String, dynamic>> sendChatMessageStreamed({
+    String? userAgent,
     required String apiKey,
     required ApiProvider provider,
     ApiProtocol apiProtocol = ApiProtocol.defaultValue,
@@ -374,6 +378,7 @@ class _FloodingProgressGateway extends AiRequestGateway {
 
   @override
   Future<Map<String, dynamic>> sendChatMessageStreamed({
+    String? userAgent,
     required String apiKey,
     required ApiProvider provider,
     ApiProtocol apiProtocol = ApiProtocol.defaultValue,
@@ -428,6 +433,7 @@ class _CancelsBeforeFinalProgressGateway extends AiRequestGateway {
 
   @override
   Future<Map<String, dynamic>> sendChatMessageStreamed({
+    String? userAgent,
     required String apiKey,
     required ApiProvider provider,
     ApiProtocol apiProtocol = ApiProtocol.defaultValue,
@@ -482,6 +488,7 @@ class _MultiPatchGateway extends AiRequestGateway {
 
   @override
   Future<Map<String, dynamic>> sendChatMessageStreamed({
+    String? userAgent,
     required String apiKey,
     required ApiProvider provider,
     ApiProtocol apiProtocol = ApiProtocol.defaultValue,
@@ -537,8 +544,12 @@ class _MultiPatchGateway extends AiRequestGateway {
 class _SingleToolGateway extends AiRequestGateway {
   final AgentToolName toolName;
   final Map<String, dynamic> arguments;
+  final List<String>? finishEvidence;
+  final bool pageDocument;
+  String lastPrompt = '';
 
-  _SingleToolGateway(this.toolName, this.arguments)
+  _SingleToolGateway(this.toolName, this.arguments,
+      {this.finishEvidence, this.pageDocument = false})
       : super(
           store: MemoryGovernanceStore(),
           client: _UnusedClient(),
@@ -548,6 +559,7 @@ class _SingleToolGateway extends AiRequestGateway {
 
   @override
   Future<Map<String, dynamic>> sendChatMessageStreamed({
+    String? userAgent,
     required String apiKey,
     required ApiProvider provider,
     ApiProtocol apiProtocol = ApiProtocol.defaultValue,
@@ -573,13 +585,32 @@ class _SingleToolGateway extends AiRequestGateway {
     String? promptCacheKey,
   }) async {
     calls++;
-    final response = calls == 1
+    lastPrompt = jsonEncode(messages);
+    var toolTurn = calls == 1;
+    var toolArguments = arguments;
+    if (pageDocument) {
+      final checkpoint = messages.lastWhere((message) =>
+          message['content'] is String &&
+          (message['content'] as String).startsWith('公开任务检查点：'));
+      final context = jsonDecode(
+              (checkpoint['content'] as String).substring('公开任务检查点：'.length))
+          as Map;
+      final docs = (context['recentToolResults'] as List)
+          .whereType<Map>()
+          .where((result) => result['tool'] == toolName.wireName)
+          .toList();
+      final next =
+          docs.isEmpty ? 0 : (docs.last['data'] as Map)['nextChunkStart'];
+      toolTurn = next is int;
+      if (toolTurn) toolArguments = {...arguments, 'startChunk': next};
+    }
+    final response = toolTurn
         ? {
             'action': 'tool',
             'public_update': '准备执行 QA 工具操作。',
             'tool': {
               'name': toolName.wireName,
-              'arguments': arguments,
+              'arguments': toolArguments,
             },
             'completion': null,
           }
@@ -589,7 +620,7 @@ class _SingleToolGateway extends AiRequestGateway {
             'tool': null,
             'completion': {
               'summary': '已完成 QA 工具操作。',
-              'evidence': ['已确认工具结果'],
+              'evidence': finishEvidence ?? ['已确认工具结果'],
             },
           };
     return {'success': true, 'message': jsonEncode(response)};
@@ -607,6 +638,7 @@ class _CommandGateway extends AiRequestGateway {
 
   @override
   Future<Map<String, dynamic>> sendChatMessageStreamed({
+    String? userAgent,
     required String apiKey,
     required ApiProvider provider,
     ApiProtocol apiProtocol = ApiProtocol.defaultValue,
@@ -665,6 +697,7 @@ class _BinaryReadGateway extends AiRequestGateway {
 
   @override
   Future<Map<String, dynamic>> sendChatMessageStreamed({
+    String? userAgent,
     required String apiKey,
     required ApiProvider provider,
     ApiProtocol apiProtocol = ApiProtocol.defaultValue,
@@ -727,6 +760,7 @@ class _MissingMutationCommandGateway extends AiRequestGateway {
 
   @override
   Future<Map<String, dynamic>> sendChatMessageStreamed({
+    String? userAgent,
     required String apiKey,
     required ApiProvider provider,
     ApiProtocol apiProtocol = ApiProtocol.defaultValue,
@@ -792,6 +826,7 @@ class _ReadOnlyCommandGateway extends AiRequestGateway {
 
   @override
   Future<Map<String, dynamic>> sendChatMessageStreamed({
+    String? userAgent,
     required String apiKey,
     required ApiProvider provider,
     ApiProtocol apiProtocol = ApiProtocol.defaultValue,
@@ -858,6 +893,7 @@ class _SensitiveGateway extends AiRequestGateway {
 
   @override
   Future<Map<String, dynamic>> sendChatMessageStreamed({
+    String? userAgent,
     required String apiKey,
     required ApiProvider provider,
     ApiProtocol apiProtocol = ApiProtocol.defaultValue,
@@ -934,6 +970,7 @@ class _ScriptArtifactGateway extends AiRequestGateway {
 
   @override
   Future<Map<String, dynamic>> sendChatMessageStreamed({
+    String? userAgent,
     required String apiKey,
     required ApiProvider provider,
     ApiProtocol apiProtocol = ApiProtocol.defaultValue,
@@ -1027,6 +1064,7 @@ class _WorkspaceListPathGateway extends AiRequestGateway {
 
   @override
   Future<Map<String, dynamic>> sendChatMessageStreamed({
+    String? userAgent,
     required String apiKey,
     required ApiProvider provider,
     ApiProtocol apiProtocol = ApiProtocol.defaultValue,
@@ -1686,13 +1724,26 @@ void main() {
       id: 'stage02-runner-task',
       groupId: 'stage02-group',
       characterId: character.id,
-      userRequest: '请处理这个需求',
+      userRequest: '请处理这个需求，参考 https://example.com/reference.txt',
       workModeTask: true,
     );
 
     await runner.run(task, WorkTaskCancellation());
 
     expect(task.status, AgentTaskStatus.waitingForApproval);
+    if (Platform.isMacOS || Platform.isWindows) {
+      expect(
+        (jsonDecode(task.executionStateJson) as Map)['webSources'],
+        {'s1': 'https://example.com/reference.txt'},
+      );
+      expect(
+        gateway.observedMessages.first
+            .map((message) => message['content'])
+            .join('\n'),
+        contains('已登记的公开网络来源编号：{"s1":"https://example.com/reference.txt"}'),
+      );
+    }
+    addTearDown(runner.closeWebTools);
     final publicEvents = (await eventStore.read(task.id)).events;
     expect(
       publicEvents.any(
@@ -1717,7 +1768,7 @@ void main() {
     final pendingSummary = jsonDecode(task.contextSummary) as Map;
     expect(pendingSummary['schemaVersion'], 1);
     expect(pendingSummary['conversationId'], 'stage02-group');
-    expect(pendingSummary['target'], '请处理这个需求');
+    expect(pendingSummary['target'], task.userRequest);
     expect(pendingSummary['artifactPaths'], isEmpty);
     expect(
       await File(
@@ -4215,6 +4266,98 @@ void main() {
     expect(gateway.calls, 1);
     expect(processStarts, 2);
   });
+
+  for (final escape in [false, true]) {
+    test(
+        'download authorization records only a writable folder request escape=$escape',
+        () async {
+      if (!Platform.isMacOS) return;
+      final grants = WorkFolderGrantService(
+        box: database.appSettingsBox,
+        directoryValidator: (_) async => true,
+        writeDirectoryValidator: (_) async => escape,
+        isWindows: false,
+      );
+      await grants.authorizeDirectory(authorizedDirectory.path,
+          consent: (_) async => true);
+      if (escape) {
+        final outside =
+            await Directory('${hiveDirectory.path}/outside').create();
+        await grants.authorizeDirectory(outside.path,
+            consent: (_) async => true);
+        await Link('${authorizedDirectory.path}/downloads')
+            .create(outside.path);
+      }
+      final config = ApiConfig(
+          id: 'web-config',
+          name: 'web',
+          provider: 'deepseek',
+          modelName: 'deepseek-chat');
+      final character = AICharacter(
+        id: 'web-character',
+        name: '联网角色',
+        avatar: 'W',
+        age: 30,
+        role: '作家',
+        personalityTags: const [],
+        systemPrompt: '按工具协议工作。',
+        apiKey: '',
+        apiProvider: 'deepseek',
+        modelName: 'deepseek-chat',
+        apiConfigId: config.id,
+        toolPermissions: const [
+          ToolPermission.workspaceRead,
+          ToolPermission.workspacePatch
+        ],
+      );
+      await database.apiConfigBox.put(config.id, config);
+      await database.aiCharacterBox.put(character.id, character);
+      await database.workModeWorkspaceBox.put(
+          'dm:web-character',
+          WorkModeWorkspace(
+            conversationId: 'dm:web-character',
+            conversationType: 'dm',
+            workDirPath: authorizedDirectory.path,
+          ));
+      final paths = WorkspacePathPolicy(grantService: grants);
+      final gateway =
+          _SingleToolGateway(AgentToolName.webDownload, {'sourceId': 's1'});
+      final runner = DefaultWorkTaskRunner(
+        database: database,
+        eventStore: eventStore,
+        credentials: _TestCredentials(),
+        gateway: gateway,
+        folderGrantService: grants,
+        workspaceService:
+            WorkModeWorkspaceService(db: database, grantService: grants),
+        workspaceFileService: WorkspaceFileService(pathPolicy: paths),
+        mutationService: WorkspaceMutationService(pathPolicy: paths),
+      );
+      addTearDown(runner.closeWebTools);
+      final task = AgentTask(
+        id: 'web-grant-task',
+        groupId: 'dm:web-character',
+        characterId: character.id,
+        userRequest: '下载 https://example.com/reference.txt',
+        workModeTask: true,
+      );
+      await runner.run(task, WorkTaskCancellation());
+      final checkpoint = jsonDecode(task.executionStateJson) as Map;
+      if (escape) {
+        expect(task.status, AgentTaskStatus.failed);
+        expect(checkpoint['folderRequestPath'], isNull);
+        expect(checkpoint['folderRequiresWritable'], isNull);
+      } else {
+        expect(task.status, AgentTaskStatus.waitingForApproval);
+        expect(checkpoint['folderRequestPath'], authorizedDirectory.path);
+        expect(checkpoint['folderRequiresWritable'], isTrue);
+        expect(task.pendingToolRequestJson, contains('web.download'));
+      }
+      expect(gateway.calls, 1);
+      expect(task.completedOperations, isEmpty);
+      expect(task.lastArtifactPaths, isEmpty);
+    });
+  }
 
   test('production read-only command runs with a read-only folder grant',
       () async {

@@ -127,3 +127,15 @@ install(DIRECTORY "${PROJECT_BUILD_DIR}/${FLUTTER_ASSET_DIR_NAME}"
 install(FILES "${AOT_LIBRARY}" DESTINATION "${INSTALL_BUNDLE_DATA_DIR}"
   CONFIGURATIONS Profile;Release
   COMPONENT Runtime)
+
+# Bundle the private gateway and checksum-pinned runtime for every desktop build.
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+install(CODE "
+  execute_process(
+    COMMAND \"${Python3_EXECUTABLE}\" \"${CMAKE_CURRENT_SOURCE_DIR}/../scripts/package_web_worker.py\"
+      win-x64 \"${CMAKE_INSTALL_PREFIX}/web_worker\"
+    RESULT_VARIABLE WEB_WORKER_RESULT)
+  if(NOT WEB_WORKER_RESULT EQUAL 0)
+    message(FATAL_ERROR \"Failed to package desktop web worker\")
+  endif()
+" COMPONENT Runtime)

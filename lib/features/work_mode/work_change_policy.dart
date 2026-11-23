@@ -197,6 +197,29 @@ class WorkChangePolicyResult {
 class WorkChangePolicy {
   const WorkChangePolicy._();
 
+  /// Whether a command's impact is fully enumerated and already inside the
+  /// task's approved scope, so running it again needs no new approval.
+  ///
+  /// This is the single judgement shared by the policy gate, the command
+  /// runner's preflight and the command pipeline's no-undo checkpoint. Three
+  /// separate copies used to decide whether a command was "already approved";
+  /// any one of them answering "no" makes the user click again even though the
+  /// path was accepted minutes ago.
+  ///
+  /// 判据必须是"命令自身能界住写入面"，不能只看规划器给的 `impactUncertain`：
+  /// 那个字段由模型声明，而这里要回答的是"argv 是否完整枚举了这条命令会动
+  /// 哪些东西"。`find . -name '*.dart' -delete` 的匹配集不在 argv 里，只要目录
+  /// 已被批准，"批准这个目录可写"就会被当成"批准把这个目录删掉"。
+  static bool commandCoveredByApprovedScope({
+    required WorkChangePlan plan,
+    required WorkApprovalScope? scope,
+  }) {
+    final command = plan.command;
+    if (command == null || plan.impactUncertain) return false;
+    if (!_commandImpactEnumerable(command)) return false;
+    return scope?.allows(plan) == true;
+  }
+
   static WorkChangePolicyResult evaluate({
     required WorkChangePlan plan,
     required WorkChangePolicySettings settings,
@@ -210,9 +233,27 @@ class WorkChangePolicy {
     }
 
     if (plan.actionType == WorkChangeActionType.command) {
+      // 用户在第一次批准时确认的是"这条路径可以写"，不是"这一次运行"。
+      // 影响范围可完整枚举、且完全落在本任务已批准范围内时，再执行一次命令
+      // 不该再要一次点击；否则模型每读一段、每改一处都要用户重新点一遍，
+      // 一次普通文件修改会被拆成几十次审批（2026-10-23 现场：97 次审批、
+      // 104 条重复提醒、407.98 万 token 仍未改完一个 HTML）。
+      //
+      // 删除、移动、权限、安装、下载落盘、提权与外部写入仍然每次单独确认：
+      // 批准"这个目录可写"不等于批准"把这个目录里的东西搬走或删掉"，而且
+      // 这些操作大多不可撤销。影响范围无法枚举的命令同样保持每次确认。
+      if (commandCoveredByApprovedScope(plan: plan, scope: scope)) {
+        return const WorkChangePolicyResult(
+          requirement: WorkChangeApprovalRequirement.none,
+          reason: '该命令的影响范围已在本任务已批准的路径范围内。',
+        );
+      }
       final reason = plan.impactUncertain
           ? '命令的影响范围不确定，必须确认已知文件和可能目录。'
-          : '状态变更命令可能写入工作区或系统状态，必须明确确认。';
+          : plan.command != null && !_commandImpactEnumerable(plan.command!)
+              ? '该命令的写入范围无法从参数完整枚举（例如 find -delete、'
+                  '解释器脚本、打包解压、打补丁），必须每次单独确认。'
+              : '状态变更命令可能写入工作区或系统状态，必须明确确认。';
       return WorkChangePolicyResult(
         requirement: WorkChangeApprovalRequirement.alwaysConfirm,
         reason: reason,
@@ -287,6 +328,273 @@ List<WorkApprovalScopeEntry> _normalizeScopeEntries(
     }
   }
   return List<WorkApprovalScopeEntry>.unmodifiable(normalized);
+}
+
+/// Commands whose approval is never inherited from a path scope.
+///
+/// Approving "this directory may be written" says nothing about removing,
+/// moving, reinstalling, downloading over, or escalating through the files in
+/// it, and those actions are typically not reversible. They therefore keep the
+/// per-run confirmation even when every affected path is already approved.
+///
+/// Interpreters (`python3`, `sh`, `powershell`) are listed for the same reason:
+/// nothing in the argv proves which files the script will touch, so their
+/// declared impact cannot be trusted as the whole impact.
+const Set<String> _standaloneCommandExecutables = <String>{
+  'rm',
+  'rmdir',
+  'del',
+  'erase',
+  'unlink',
+  'mv',
+  'move',
+  'rename',
+  'ren',
+  'dd',
+  'tee',
+  'chmod',
+  'chown',
+  'chgrp',
+  'ln',
+  'truncate',
+  'install',
+  'sudo',
+  'su',
+  'doas',
+  'curl',
+  'wget',
+  'ssh',
+  'scp',
+  'sftp',
+  'rsync',
+  'git',
+  'gh',
+  'docker',
+  'brew',
+  'apt',
+  'apt-get',
+  'dnf',
+  'yum',
+  'pacman',
+  'choco',
+  'winget',
+  'npm',
+  'pnpm',
+  'yarn',
+  'bun',
+  'pip',
+  'pip3',
+  'gem',
+  'cargo',
+  'go',
+  'dart',
+  'flutter',
+  'python',
+  'python3',
+  'sh',
+  'bash',
+  'zsh',
+  'powershell',
+  'cmd',
+};
+
+bool _requiresStandaloneCommandApproval(WorkChangeCommand plan) {
+  final executable = _commandExecutableName(plan);
+  if (_standaloneCommandExecutables.contains(executable)) return true;
+  final arguments = plan.arguments.map((item) => item.toLowerCase()).toList();
+  return arguments.any(
+    (argument) =>
+        argument == '--force' ||
+        argument == '-f' ||
+        argument == '-rf' ||
+        argument == '-fr' ||
+        argument == '--in-place' ||
+        argument.startsWith('--in-place=') ||
+        argument == '-i.bak',
+  );
+}
+
+/// Canonical executable name: lower-cased basename without a trailing `.exe`.
+String _commandExecutableName(WorkChangeCommand command) {
+  final raw = command.executable.trim().replaceAll('\\', '/');
+  final basename = raw.split('/').last.toLowerCase();
+  return basename.endsWith('.exe')
+      ? basename.substring(0, basename.length - 4)
+      : basename;
+}
+
+/// 写入面能由 argv 完整界住的命令。**白名单，不是黑名单。**
+///
+/// 判据的失败史就是它必须是白名单的理由：这里曾经只有可执行名黑名单
+/// （rm/mv/dd/chmod/解释器…）加危险标志匹配，而黑名单永远漏项。
+/// `find . -name '*.dart' -delete` 的可执行名是 `find`、危险标志一个都没有，
+/// 规划器把它归到"本地变更"，于是只要目录已在批准范围内就免审批执行删除——
+/// 用户批准的是"这个目录可以改"，不是"这个目录里的东西可以清掉"。
+/// 同理 `xargs rm`、`tar -x`、`patch`、`unzip` 的影响都散在参数之外。
+///
+/// 只放三类：
+/// - 只读命令：本身不写盘，argv 是否安全只取决于有没有 shell 元字符；
+/// - `sed`：唯一允许直接改文件的可继承命令，且必须 `-i`、脚本不得写别的文件、
+///   文件参数不得带通配符；
+/// - 单目标写入：`cp` / `touch` / `mkdir`，写入目标就写在 argv 里。
+const Set<String> _enumerableReadExecutables = <String>{
+  'cat',
+  'head',
+  'tail',
+  'wc',
+  'sort',
+  'uniq',
+  'cut',
+  'tr',
+  'nl',
+  'diff',
+  'comm',
+  'grep',
+  'egrep',
+  'fgrep',
+  'rg',
+  'fd',
+  'find',
+  'ls',
+  'dir',
+  'stat',
+  'file',
+  'pwd',
+  'which',
+  'where',
+  'whoami',
+  'uname',
+  'basename',
+  'dirname',
+  'realpath',
+  'jq',
+};
+
+const Set<String> _enumerableWriteExecutables = <String>{
+  'touch',
+  'mkdir',
+  'cp',
+  'copy',
+};
+
+/// Whether the command's own arguments bound everything it can write.
+bool _commandImpactEnumerable(WorkChangeCommand command) {
+  if (_requiresStandaloneCommandApproval(command)) return false;
+  // A path-qualified executable (`/tmp/rg`) is not the utility it resembles.
+  if (command.executable.contains('/') || command.executable.contains('\\')) {
+    return false;
+  }
+  final executable = _commandExecutableName(command);
+  if (executable == 'find' || executable == 'fd') {
+    // `-delete` / `-exec` 作用在匹配集上，而匹配集不写在 argv 里。
+    if (command.arguments.any(_hasMutationPredicate)) return false;
+    return !_hasShellControlTokens(command.arguments);
+  }
+  if (executable == 'sed') return _isBoundedInPlaceSed(command.arguments);
+  if (_enumerableReadExecutables.contains(executable) ||
+      _enumerableWriteExecutables.contains(executable)) {
+    return !_hasShellControlTokens(command.arguments);
+  }
+  return false;
+}
+
+/// 独立的 shell 控制词元：管道、重定向、串联、命令替换。
+///
+/// 只认独立的 argv 词元：`grep -nE "<section|</section>" file` 里的 `|` 是正则
+/// 文本，把它当管道会让每一次只读检索都要审批（2026-10-23 现场：991 次）。
+bool _hasShellControlTokens(List<String> arguments) {
+  const control = <String>{
+    '|',
+    '|&',
+    '||',
+    '&&',
+    ';',
+    '&',
+    '>',
+    '>>',
+    '<',
+    '<<',
+    '<<<',
+    '2>',
+    '2>>',
+    '&>',
+  };
+  return arguments.any((raw) {
+    final token = raw.trim();
+    return control.contains(token) ||
+        token.contains('`') ||
+        token.contains(r'$(');
+  });
+}
+
+bool _hasMutationPredicate(String raw) {
+  const predicates = <String>{
+    '-delete',
+    '-exec',
+    '-execdir',
+    '-ok',
+    '-okdir',
+    '--exec',
+    '--exec-batch',
+    '-x',
+    '-X',
+  };
+  return predicates.contains(raw.trim().toLowerCase());
+}
+
+/// `sed -i` 是唯一可以直接改文件的可继承命令，但只有这几种情形可继承：
+/// 带 `-i`、脚本不含 `w`/`W`/`e`（会写 argv 之外的文件）、文件参数不带通配符
+/// （一次编辑会扩散到 argv 没点名的文件，而审批范围只覆盖点名的那个）。
+bool _isBoundedInPlaceSed(List<String> arguments) {
+  var hasInPlace = false;
+  var scriptSeen = false;
+  final scripts = <String>[];
+  final usesExplicitExpression = arguments.any((raw) {
+    final lower = raw.toLowerCase();
+    return lower == '-e' ||
+        lower == '--expression' ||
+        lower.startsWith('--expression=');
+  });
+  for (var index = 0; index < arguments.length; index++) {
+    final raw = arguments[index];
+    final lower = raw.toLowerCase();
+    if (lower == '-i' ||
+        lower == '--in-place' ||
+        lower.startsWith('--in-place=') ||
+        (lower.startsWith('-i') && !lower.startsWith('--'))) {
+      hasInPlace = true;
+      continue;
+    }
+    if (lower == '-e' || lower == '--expression') {
+      if (index + 1 < arguments.length) {
+        scripts.add(arguments[index + 1]);
+        index++;
+      }
+      continue;
+    }
+    if (lower.startsWith('--expression=')) {
+      scripts.add(raw.substring('--expression='.length));
+      continue;
+    }
+    if (lower.startsWith('-')) continue;
+    if (!usesExplicitExpression && !scriptSeen) {
+      // sed 的第一个非选项参数是脚本，后续才是文件。
+      scripts.add(raw);
+      scriptSeen = true;
+      continue;
+    }
+    if (RegExp(r'[*?\[]').hasMatch(raw)) return false;
+  }
+  if (!hasInPlace) return false;
+  return !scripts.any(_sedScriptWritesElsewhere);
+}
+
+/// `w`/`W`/`e` 会把内容写到 argv 之外的位置；与规划器的判定保持一致。
+bool _sedScriptWritesElsewhere(String script) {
+  final normalized = script.toLowerCase().replaceAll('\r', '\n');
+  return RegExp(r'(?:^|[;{}\n])\s*(?:(?:\d+|\$|/[^/\n]*/)\s*,?\s*)?'
+          r'(?:(?:\d+|\$|/[^/\n]*/)\s*)?!?\s*[wWe](?:\s|$)')
+      .hasMatch(normalized);
 }
 
 bool _scopeEntryCovers(

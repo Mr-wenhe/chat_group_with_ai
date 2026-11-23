@@ -360,15 +360,15 @@ void main() {
     await tester.pump(const Duration(seconds: 4));
   });
 
-  testWidgets('role can opt into keyless web search', (tester) async {
+  testWidgets('role can opt into existing Zhipu search sources', (tester) async {
     tester.view.physicalSize = const Size(800, 2000);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
 
     await tester.pumpWidget(app(const AICharacterFormPage()));
-    await tester.ensureVisible(find.text('允许联网搜索'));
-    await tester.tap(find.text('允许联网搜索'));
+    await tester.ensureVisible(find.text('允许使用智谱搜索来源'));
+    await tester.tap(find.text('允许使用智谱搜索来源'));
     await tester.pump();
 
     await tester.enterText(find.byType(TextFormField).at(0), '搜索角色');

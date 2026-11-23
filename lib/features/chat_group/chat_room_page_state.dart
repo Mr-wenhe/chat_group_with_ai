@@ -37,6 +37,33 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   /// room also releases a Provider request that is still resolving.
   CancelToken? _activeSearchCancelToken;
 
+  /// 当前回复回合的取消令牌：流式请求与失败重试共用同一份。
+  ///
+  /// 「停止生成」除了让 UI 收尾，还必须真正 abort 传输层请求：上游卡在等字节时
+  /// async* 的订阅取消打断不了那个 await，只有 CancelToken 能让 dio abort socket。
+  CancelToken? _activeReplyCancelToken;
+
+  /// 开启一次新的回复请求，并作废上一轮尚未取消的令牌。
+  CancelToken _beginReplyCancelToken() {
+    _cancelActiveReplyRequest('new-round');
+    final token = CancelToken();
+    // 没有在飞请求时取消也必须静默：dio 的 whenCancel 无监听时会报未处理错误。
+    unawaited(token.whenCancel.then<void>((_) {}, onError: (Object _) {}));
+    _activeReplyCancelToken = token;
+    return token;
+  }
+
+  /// abort 当前回复回合的传输层请求（停止、离开页面、看门狗判停滞时调用）。
+  ///
+  /// [reason] 只进诊断（dio 会把它带进 `DioException` 文案，最终落到
+  /// `ai_request_diagnostics_v1` 的 `failureDetail`）：上一轮请求被谁取消，是
+  /// 「停止」「页面离开」还是「又开了一轮」，事后只能靠它区分。
+  void _cancelActiveReplyRequest(String reason) {
+    final token = _activeReplyCancelToken;
+    _activeReplyCancelToken = null;
+    if (token != null && !token.isCancelled) token.cancel(reason);
+  }
+
   SearchCoordinator get _searchCoordinator => _searchRuntime.coordinator;
   SearchTurnContextController get _searchTurnController =>
       _searchRuntime.turnController;
@@ -267,15 +294,35 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   /// App 是否在前台。
   bool _appForeground = true;
 
-  /// 本群是否可以继续自动工作（空闲自动聊天、逐次选人、自动续接、回合内的
-  /// 摘要与压缩请求）。
+  /// App 是否进入**真后台**（`paused` / `detached`）。
   ///
-  /// 与 [_pageActive] 分开：后者只表达"页面对象还在"，`deactivate` 之外的离开
-  /// 方式（切到别的群、打开别的页面、App 进后台）都改不动它。这里额外要求
-  /// "用户真的在看这个群"，是全部后台自动行为的唯一开关。由
-  /// `_refreshRoomActivity` 维护，只在翻转时起停调度，因此不会在暂停期间积累
-  /// 计时器，恢复时也不会补跑过期回合。
+  /// 桌面端"窗口被遮挡/最小化"只会是 `hidden`/`inactive`，移动端退到后台才会
+  /// `paused`。自动聊天允许在窗口被遮挡时继续（2026-11-17 决定），但**移动端
+  /// 真后台必须停**——否则等于在没有通知设计的情况下后台生成（CLAUDE.md 红线）。
+  bool _appPaused = false;
+
+  /// 自动聊天是否允许调度：会话还在，App 没有进入真后台，且用户没在多选。
+  ///
+  /// 多选必须算进这条判据：勾选框的位置就是用户手指的位置，自动发言在勾选期间
+  /// 冒出新气泡会顶动列表，点下去的就不是他要删的那一条（删除不可撤销）。
+  /// `_enterMessageSelection` 里的 `_stopAutoChat()` 只停当下这一次，15 秒看门狗
+  /// 会把它重新拉起来——只有把判据收在这里，看门狗、恢复闸门、回合入口才同时收敛。
+  bool get _autoChatAllowed =>
+      _roomSessionVisible && !_appPaused && !_messageSelectionActive;
+
+  /// 用户是否真的在看这个群（页面在 + 路由可见 + App 在前台）。
+  ///
+  /// 现在只用于**用户输入派发**（排队消息等 App 回到前台再发）——自动聊天与已发出
+  /// 的回复都只看 [_roomSessionVisible]：窗口被遮挡/失焦时继续跑（2026-11-17 用户
+  /// 拍板），只有真正离开会话才停。由 `_refreshRoomActivity` 维护。
   bool _roomWorkAllowed = false;
+
+  /// 用户是否还在这个会话里（App 内切走才算离开；窗口被遮挡/最小化不算）。
+  ///
+  /// 回合存活、结果采纳、自动聊天调度、待回复清理都用它：页面还在、路由没被别的
+  /// 页面盖住就继续——否则"切出去看一眼"会让回复被取消后重发、自动聊天永远抢不到
+  /// 45 秒的窗口。
+  bool get _roomSessionVisible => _pageActive && _routeVisible;
 
   /// 当前 burst 内已执行的自动聊天轮数。
   int _autoChatRoundCount = 0;
@@ -407,6 +454,13 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   /// 自动聊天启动延迟定时器（页面离开时取消，避免测试挂起）。
   Timer? _autoChatStartTimer;
 
+  /// 自动聊天调度看门狗：房间允许自动聊天时，定期确认调度器还活着。
+  ///
+  /// 「停止生成」、生命周期暂停、burst 冷却都曾把调度器停掉而没人重启，用户看到
+  /// 的就是"自动聊天再也不说话"。这里每 15 秒兜一次底，不依赖某条具体路径的收尾。
+  Timer? _autoChatWatchdog;
+
+
   /// 用户在本会话手动覆盖的联网搜索策略（为空表示用全局策略）。
   WebSearchPolicy? _searchPolicyOverride;
 
@@ -419,6 +473,17 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
 
   /// 当前流式回复会话（持有 StreamSubscription，可取消）。
   StreamingReplySession? _streamingSession;
+
+  /// 本轮回复正卡在「模型拒绝采样参数、客户端自动换参数重发」的等待里。
+  ///
+  /// 这段等待通常十几秒且没有任何正文，不提示的话用户只会看到界面毫无反应。
+  bool _replyCompatibilityRetry = false;
+
+  void _setReplyCompatibilityRetry(bool retrying) {
+    if (_replyCompatibilityRetry == retrying) return;
+    if (!_canTouchUi) return;
+    _setUiState(() => _replyCompatibilityRetry = retrying);
+  }
 
   /// 文档解析任务令牌（可取消长时间的文档理解流程）。
   DocumentProcessingToken? _documentProcessingToken;

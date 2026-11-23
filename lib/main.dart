@@ -14,6 +14,7 @@ import 'features/chat_group/chat_room_page.dart';
 import 'features/direct_chat/direct_chat_foreground_watcher.dart';
 import 'features/direct_chat/direct_chat_list_page.dart';
 import 'features/direct_chat/direct_chat_session.dart';
+import 'features/game/game_lobby_page.dart';
 import 'features/memory/memory_migrator.dart';
 import 'features/memory/observation_entry.dart';
 import 'features/settings/settings_page.dart';
@@ -234,6 +235,7 @@ class MyApp extends ConsumerWidget {
         '/': (_) => const AICharacterListPage(),
         '/groups': (_) => const ChatGroupListPage(),
         '/direct-chats': (_) => const DirectChatListPage(),
+        '/games': (_) => const GameLobbyPage(),
         '/settings': (_) => const SettingsPage(),
       },
       onGenerateRoute: (settings) {

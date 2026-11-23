@@ -1,6 +1,5 @@
 import 'dart:convert';
 
-import 'package:flutter/foundation.dart';
 
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/api_config.dart';
@@ -16,7 +15,6 @@ import 'package:chat_group/features/web_search/data/search_settings_store.dart';
 import 'package:chat_group/features/web_search/data/zhipu_native_search_credential_store.dart';
 import 'package:chat_group/features/web_search/models/search_runtime_settings.dart';
 import 'package:chat_group/features/web_search/providers/native_web_search_adapter.dart';
-import 'package:chat_group/features/web_search/providers/duckduckgo_result_page_enricher.dart';
 import 'package:chat_group/features/chat_group/roundtable_news_role_service.dart';
 
 typedef ChatRoomApiConfigResolver = ApiConfig? Function(AICharacter character);
@@ -128,15 +126,11 @@ class ChatRoomSearchRuntimeController {
       store: governanceStore,
       routes: SearchRuntimeProviderFactory(store: settings).buildRoutes(
         nativeSearch: nativeBinding,
-        nativeOnly: nativeOnly,
       ),
       // Native-only search already has a provider-owned query protocol. Do
       // not spend another model request on rewriting the query before the
       // native Web Search call; this also keeps the mode strictly native.
       queryPlanner: nativeOnly ? null : _searchQueryPlanner(),
-      duckDuckGoPageEnricher: DuckDuckGoResultPageEnricher(
-        isRelease: kReleaseMode,
-      ),
     );
   }
 
@@ -253,6 +247,7 @@ class ChatRoomSearchRuntimeController {
         apiProtocol: config.protocol,
         model: config.modelName,
         customBaseUrl: config.customBaseUrl,
+        userAgent: config.userAgent,
         conversationId: conversationId,
         resolveApiKey: () => credentialResolver.resolve(config),
       ),

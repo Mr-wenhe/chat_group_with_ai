@@ -128,6 +128,9 @@ class AgentDecisionParser {
     AgentToolName.workspaceSearch,
     AgentToolName.workspaceDocument,
     AgentToolName.weatherForecast,
+    AgentToolName.webSearch,
+    AgentToolName.webRead,
+    AgentToolName.webDownload,
     AgentToolName.workspacePatch,
     AgentToolName.workspaceRename,
     AgentToolName.workspaceDelete,
@@ -509,6 +512,24 @@ class AgentDecisionParser {
   String? _validateArguments(AgentToolName name, Map<String, dynamic> args) {
     if (!_isJsonValue(args)) return 'tool.arguments 含有不可序列化值。';
     switch (name) {
+      case AgentToolName.webSearch:
+        return _validateRequiredFields(
+            args, const {'query': _ArgumentType.string}, const {'query'});
+      case AgentToolName.webRead:
+        return _validateRequiredFields(args, const {
+          'sourceId': _ArgumentType.string,
+          'startSection': _ArgumentType.integer
+        }, const {
+          'sourceId'
+        });
+      case AgentToolName.webDownload:
+        return _validateRequiredFields(args, const {
+          'sourceId': _ArgumentType.string,
+          'fileName': _ArgumentType.string
+        }, const {
+          'sourceId'
+        });
+
       case AgentToolName.workspaceList:
         return _validateFields(args, const {
           'path': _ArgumentType.string,
@@ -852,6 +873,14 @@ class AgentDecisionParser {
     AgentToolName name,
     Map<String, dynamic> arguments,
   ) {
+    if (name == AgentToolName.webSearch &&
+        (arguments.containsKey('startSection') ||
+            arguments.containsKey('nextSection'))) {
+      final normalised = Map<String, dynamic>.from(arguments)
+        ..remove('startSection')
+        ..remove('nextSection');
+      return normalised;
+    }
     if (name != AgentToolName.commandRun) return arguments;
     final normalised = Map<String, dynamic>.from(arguments);
     final encodedArguments = normalised['arguments'];
@@ -1077,9 +1106,8 @@ class AgentDecisionParser {
           value.values.every((item) => item is String),
       // 一段正文用字符串写、多段用数组写，两种都是模型的自然写法；只接受数组
       // 时它会退化成试字段名（steps/content），白烧一整轮。
-      _ArgumentType.stringOrStringList =>
-        value is String ||
-            value is List && value.every((item) => item is String),
+      _ArgumentType.stringOrStringList => value is String ||
+          value is List && value.every((item) => item is String),
     };
   }
 

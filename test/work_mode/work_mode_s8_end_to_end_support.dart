@@ -26,6 +26,7 @@ class _S8ExecutionGateway extends AiRequestGateway {
 
   @override
   Future<Map<String, dynamic>> sendChatMessageStreamed({
+    String? userAgent,
     required String apiKey,
     required ApiProvider provider,
     ApiProtocol apiProtocol = ApiProtocol.defaultValue,

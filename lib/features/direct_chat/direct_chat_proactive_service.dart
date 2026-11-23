@@ -1,6 +1,14 @@
+import '../../core/models/media_attachment.dart';
+import '../../core/streaming/chat_stream_event.dart';
+import '../web_search/desktop/desktop_web_service.dart';
+import '../web_search/desktop/web_worker_client.dart';
+import '../web_search/desktop/network_reply_stream.dart';
+import '../web_search/application/autonomous_web_policy.dart';
+import '../agentic/context_window_manager.dart';
 import 'dart:math';
 import 'dart:async';
 
+import 'package:dio/dio.dart';
 import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/api_config.dart';
@@ -54,7 +62,10 @@ class DirectChatProactiveService {
 
   Future<DirectChatProactiveResult?> tryCreateProactiveMessage({
     String? preferredConversationId,
+    bool Function()? mayContinue,
   }) async {
+    bool active() => mayContinue?.call() ?? true;
+    if (!active()) return null;
     final now = DateTime.now();
     final characters = db.aiCharacterBox.values.toList();
     final charactersById = {
@@ -158,27 +169,108 @@ class DirectChatProactiveService {
             .take(8)
             .toList();
 
-    final result = await gateway.sendChatMessage(
-      apiKey: apiKey,
-      provider: ApiProvider.values.firstWhere(
-        (provider) => provider.name == config.provider,
-        orElse: () => ApiProvider.deepseek,
-      ),
-      apiProtocol: config.protocol,
-      customBaseUrl: config.customBaseUrl,
-      model: config.modelName,
-      messages: await _buildMessages(
-        character: candidate.character,
-        source: candidate.source,
-        reason: candidate.reason,
-        directContext: context,
-        groupContext: sourceGroupContext,
-      ),
-      temperature: 0.8,
-      purpose: AiRequestPurpose.proactive,
-      conversationId: conversationId,
-      characterId: candidate.character.id,
+    final initialMessages = await _buildMessages(
+      character: candidate.character,
+      source: candidate.source,
+      reason: candidate.reason,
+      directContext: context,
+      groupContext: sourceGroupContext,
     );
+    final provider = ApiProvider.values.firstWhere(
+        (provider) => provider.name == config.provider,
+        orElse: () => ApiProvider.deepseek);
+    final capability = gateway.capability(provider, config.modelName);
+    final outputTokens = capability.maxOutput
+        .clamp(1, min(1024, max(1, capability.contextWindow)))
+        .toInt();
+    final downloads = <MediaAttachment>[];
+    WebWorkerClient? worker;
+    DesktopWebService? web;
+    final cancelToken = CancelToken();
+    final lifecycleGuard = mayContinue == null
+        ? null
+        : Timer.periodic(const Duration(milliseconds: 100), (_) {
+            if (!active() && !cancelToken.isCancelled) {
+              cancelToken.cancel('App left foreground');
+            }
+          });
+    Map<String, dynamic> result = {'success': false};
+    Stream<ChatStreamEvent> generate(
+        List<Map<String, dynamic>> messages) async* {
+      if (!active()) return;
+      final response = await gateway.sendChatMessage(
+        apiKey: apiKey,
+        provider: provider,
+        apiProtocol: config.protocol,
+        customBaseUrl: config.customBaseUrl,
+        userAgent: config.userAgent,
+        model: config.modelName,
+        messages: messages,
+        temperature: 0.8,
+        maxTokens: outputTokens,
+        cancelToken: cancelToken,
+        purpose: AiRequestPurpose.proactive,
+        conversationId: conversationId,
+        characterId: candidate.character.id,
+      );
+
+      if (response['success'] != true) {
+        yield const ChatStreamEvent(
+            type: ChatStreamEventType.error,
+            message: '主动私聊生成失败。',
+            sanitized: true);
+        return;
+      }
+      yield ChatStreamEvent(
+          type: ChatStreamEventType.done,
+          content: response['message']?.toString() ?? '');
+    }
+
+    try {
+      Stream<ChatStreamEvent> stream = generate(initialMessages);
+      if (WebWorkerClient.isSupported &&
+          AutonomousWebPolicy.allows(
+              candidate.character, AutonomousWebScene.directChat)) {
+        worker = WebWorkerClient.bundled();
+        web = DesktopWebService(worker);
+        stream = networkReplyStream(
+            messages: initialMessages,
+            generate: generate,
+            inputTokenBudget: ContextWindowManager.inputBudget(
+                contextWindow: capability.contextWindow,
+                maxOutput: outputTokens),
+            maxToolCalls: networkReplyToolCallLimit,
+            isRequired: (message) =>
+                message['content'] == initialMessages.first['content'] ||
+                message['content'] ==
+                    candidate.character.rolePlaySystemPrompt ||
+                message['content'] == initialMessages.last['content'] ||
+                message['role'] == 'system' &&
+                    (message['content'] as String).startsWith('这次由你主动发起私聊。'),
+            service: web,
+            downloadDirectory: () => db.mediaDir,
+            isActive: active,
+            onDownload: (receipt) => downloads.add(MediaAttachment(
+                type: 'file',
+                localPath: receipt['path'] as String,
+                fileName: receipt['fileName'] as String,
+                fileSize: receipt['byteLength'] as int)));
+      }
+      await for (final event in stream) {
+        if (!active()) return null;
+        if (event.type == ChatStreamEventType.done) {
+          result = {'success': true, 'message': event.content};
+        }
+        if (event.type == ChatStreamEventType.error) return null;
+      }
+    } finally {
+      lifecycleGuard?.cancel();
+      if (!cancelToken.isCancelled) {
+        cancelToken.cancel('Proactive generation finished');
+      }
+      worker?.close();
+    }
+    if (!active()) return null;
     if (!(result['success'] ?? false)) return null;
     final content = result['message']?.toString().trim() ?? '';
     if (content.isEmpty) return null;
@@ -188,6 +280,9 @@ class DirectChatProactiveService {
       senderId: candidate.character.id,
       senderType: 'ai',
       content: content,
+      media: downloads.isEmpty ? null : downloads,
+      webSearchSnapshot:
+          web?.hasEvidence == true ? web!.evidenceSnapshot() : null,
       visibleToCharacterIds: [candidate.character.id],
     );
     await db.persistMessage(message);

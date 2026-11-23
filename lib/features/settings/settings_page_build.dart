@@ -442,7 +442,7 @@ extension _SettingsPageBuild on _SettingsPageState {
           const SizedBox(height: 32),
         ],
       ),
-      bottomNavigationBar: AppBottomNav(currentIndex: 3, cs: cs),
+      bottomNavigationBar: AppBottomNav(currentIndex: 4, cs: cs),
     );
   }
 }

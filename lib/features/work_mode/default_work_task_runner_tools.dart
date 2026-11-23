@@ -61,10 +61,7 @@ extension _DefaultWorkTaskRunnerTools on DefaultWorkTaskRunner {
       ..._attachmentPathsForTask(task),
       if (candidate != null)
         for (final entry in candidate.files)
-          if (const {'docx', 'pdf'}.contains(p
-              .extension(entry['path'] as String)
-              .toLowerCase()
-              .replaceFirst('.', '')))
+          if (WorkDocumentTool.supportsBodyFile(entry['path'] as String))
             candidate.file(entry['path'] as String).path,
     };
     final usageAssignment = candidate == null
@@ -154,7 +151,103 @@ extension _DefaultWorkTaskRunnerTools on DefaultWorkTaskRunner {
       return result;
     }
 
+    final allowsAutonomousNetwork =
+        workModeAllowsAutonomousNetworkTools(character);
     final definitions = <WorkToolDefinition>[
+      if (WebWorkerClient.isSupported && allowsAutonomousNetwork)
+        ...webInvestigationTools(
+          _webForTask(task),
+          onEvidenceChanged: () =>
+              persistWorkWebEvidence(task, _webForTask(task)),
+        ),
+      if (WebWorkerClient.isSupported && allowsAutonomousNetwork)
+        WorkToolDefinition(
+          name: AgentToolName.webDownload,
+          access: WorkToolAccess.mutation,
+          schema: const WorkToolSchema(fields: {
+            'sourceId': WorkToolValueType.string,
+            'fileName': WorkToolValueType.string,
+          }, required: {
+            'sourceId'
+          }),
+          mutationPipeline:
+              WorkToolMutationPipeline(policy: (invocation) async {
+            _webForTask(task)
+                .source(invocation.arguments['sourceId'] as String);
+            try {
+              await resolveWorkDownloadDirectory(
+                  files.pathPolicy, workspaceRoot);
+            } on WorkspacePathException catch (error) {
+              if (error.kind == WorkspacePathErrorKind.notAuthorized) {
+                task.executionStateJson =
+                    _withFolderRequest(task.executionStateJson, workspaceRoot);
+                return WorkToolResult.waitingForApproval(
+                  message: '下载需要重新授权可写任务工作目录后才能继续。',
+                  data: {
+                    'folderRequestPath': workspaceRoot,
+                    'requiresWritable': true,
+                  },
+                  failureCode: 'authorizationRequired',
+                );
+              }
+              return WorkToolResult.pathRejected(message: error.reason);
+            }
+            return null;
+          }),
+          handler: (invocation) async {
+            final target = await resolveWorkDownloadDirectory(
+                files.pathPolicy, workspaceRoot);
+            final manager = resourceLockManager ?? WorkResourceLockManager();
+            final lease = await manager.acquire(
+                task.id, [WorkResourceLockRequest.treeWrite(target.path)],
+                cancellation: invocation.context.cancellation?.whenCancelled,
+                isCancelled: () => invocation.context.isCancelled);
+            try {
+              if (invocation.context.isCancelled) {
+                return const WorkToolResult.paused(message: '下载已停止。');
+              }
+              // Every download owns a fresh directory, so no existing file needs an undo snapshot.
+              final service = _webForTask(task);
+              late final Map<String, dynamic> receipt;
+              try {
+                receipt = await service.download(
+                  invocation.arguments['sourceId'] as String,
+                  Directory(target.path),
+                  fileName: invocation.arguments['fileName'] as String?,
+                  cancellation: invocation.context.cancellation?.whenCancelled,
+                );
+              } on Object catch (error) {
+                recordWorkWebToolReceipt(
+                  service: service,
+                  tool: 'web.download',
+                  arguments: invocation.arguments,
+                  result: safeWorkWebFailureReceipt(error),
+                  onEvidenceChanged: () =>
+                      persistWorkWebEvidence(task, service),
+                );
+                rethrow;
+              }
+              final toolReceipt = recordWorkWebToolReceipt(
+                service: service,
+                tool: 'web.download',
+                arguments: invocation.arguments,
+                result: receipt,
+                onEvidenceChanged: () => persistWorkWebEvidence(task, service),
+              );
+              return WorkToolResult.success(
+                  message: '已下载公开文件。',
+                  data: {
+                    ...receipt,
+                    'toolReceipt': toolReceipt,
+                    'changed': true,
+                    'afterSha256': receipt['sha256'],
+                  },
+                  committed: true);
+            } finally {
+              await lease.release();
+            }
+          },
+        ),
       WorkToolDefinition(
         name: AgentToolName.weatherForecast,
         access: WorkToolAccess.readOnly,
@@ -520,7 +613,8 @@ extension _DefaultWorkTaskRunnerTools on DefaultWorkTaskRunner {
         cancellationToken: cancellationToken,
       ),
     ];
-    return WorkToolRegistry(definitions: definitions);
+    return WorkToolRegistry(
+        definitions: filterWorkModeNetworkTools(definitions, character));
   }
 
   /// `overwrite:false` 在 `workspace.patch` 的每种形态下同义：不许碰已存在的

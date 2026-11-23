@@ -20,12 +20,14 @@ class AiApiService {
     required ApiProvider provider,
     ApiProtocol apiProtocol = ApiProtocol.defaultValue,
     String? customBaseUrl,
+    String? userAgent,
   }) =>
       gateway.client.fetchModels(
         apiKey: apiKey,
         provider: provider,
         apiProtocol: apiProtocol,
         customBaseUrl: customBaseUrl,
+        userAgent: userAgent,
       );
 
   Future<Map<String, dynamic>> testApiKey({
@@ -33,6 +35,7 @@ class AiApiService {
     required ApiProvider provider,
     ApiProtocol apiProtocol = ApiProtocol.defaultValue,
     String? customBaseUrl,
+    String? userAgent,
     String? model,
   }) async {
     final configuredModel = model?.trim() ?? '';
@@ -45,6 +48,7 @@ class AiApiService {
       provider: provider,
       apiProtocol: apiProtocol,
       customBaseUrl: customBaseUrl,
+      userAgent: userAgent,
       model: modelName,
       messages: const [
         {'role': 'user', 'content': 'Hi, reply with "OK" only.'},
