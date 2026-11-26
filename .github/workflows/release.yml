@@ -172,6 +172,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # 必须固定 JDK：Gradle wrapper 是 8.3（最高支持 Java 20），AGP 8.1 也以 17 为准，
+      # 而 ubuntu-latest 已切到 26.04 镜像、默认 JDK 变成 25，不固定会让 Gradle 在
+      # 编译 settings.gradle 时直接失败（Unsupported class file major version 69）。
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
       - uses: subosito/flutter-action@v2
         with:
           flutter-version: "3.27.1"
