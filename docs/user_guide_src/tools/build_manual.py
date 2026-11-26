@@ -41,6 +41,7 @@ ORDER = [
     "10-middle-12-governance.md",
     "10-middle-13-search.md",
     "10-middle-14-wecom.md",
+    "10-middle-15-games.md",
     "30-lower-A-settings.md",
     "30-lower-B-troubleshooting.md",
     "30-lower-C-data.md",

@@ -16,7 +16,7 @@
 
 | 路径 | 内容 |
 |---|---|
-| `chapters/` | 分章 Markdown，28 个文件 |
+| `chapters/` | 分章 Markdown，29 个文件 |
 | `images/` | 已压缩的 JPEG（构建输入）。尺寸统一为宽 1400px |
 | `tools/build_manual.py` | 构建脚本：拼装、自动编图号、base64 内嵌图片、生成目录 |
 | `tools/shell.html` | HTML 外壳：样式、侧边栏、滚动高亮、移动端与打印适配 |
